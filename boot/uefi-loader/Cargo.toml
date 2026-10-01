@@ -1,0 +1,13 @@
+[package]
+name = "zc-uefi-loader"
+description = "UEFI entry point and early boot services for ZC OS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+zc-abi = { path = "../../libs/zc-abi" }
+
+[lints]
+workspace = true
