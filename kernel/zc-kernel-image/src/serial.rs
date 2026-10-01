@@ -21,7 +21,9 @@ pub fn outb(port: u16, value: u8) {
 }
 
 /// Reads a byte from an I/O port.
-fn inb(port: u16) -> u8 {
+///
+/// Shared with the keyboard driver, which polls the 8042 status port.
+pub(crate) fn inb(port: u16) -> u8 {
     let value: u8;
     // SAFETY: as in `outb`; `port` is a compile-time constant.
     unsafe {
@@ -71,5 +73,95 @@ impl Write for Writer {
     fn write_str(&mut self, value: &str) -> fmt::Result {
         write_str(value);
         Ok(())
+    }
+}
+
+/// Bytes buffered from COM1 for task input.
+const INPUT_CAP: usize = 256;
+
+/// Receive ring drained by the timer poll.
+static mut INPUT_RING: [u8; INPUT_CAP] = [0; INPUT_CAP];
+/// Oldest buffered byte index.
+static mut INPUT_HEAD: usize = 0;
+/// Buffered byte count.
+static mut INPUT_LEN: usize = 0;
+
+/// Reads one pending byte without blocking.
+///
+/// Returns `None` when the line-status register reports no data.
+fn try_read_byte() -> Option<u8> {
+    if inb(COM1 + 5) & 0x01 == 0 {
+        return None;
+    }
+    Some(inb(COM1))
+}
+
+/// Moves pending COM1 bytes into the receive ring.
+///
+/// Called once per timer tick; bytes arriving faster than the ring are
+/// dropped newest-first so early keystrokes survive bursts.
+pub fn poll_input() {
+    // SAFETY: owned here; the poll runs with interrupts masked.
+    unsafe {
+        loop {
+            let len = core::ptr::addr_of!(INPUT_LEN).read();
+            if len >= INPUT_CAP {
+                break;
+            }
+            let Some(byte) = try_read_byte() else {
+                break;
+            };
+            let head = core::ptr::addr_of!(INPUT_HEAD).read();
+            core::ptr::addr_of_mut!(INPUT_RING)
+                .cast::<u8>()
+                .add((head + len) % INPUT_CAP)
+                .write(byte);
+            core::ptr::addr_of_mut!(INPUT_LEN).write(len + 1);
+        }
+    }
+}
+
+/// Returns whether the receive ring holds a byte.
+pub fn input_available() -> bool {
+    // SAFETY: read-only and interrupt-masked here.
+    unsafe { core::ptr::addr_of!(INPUT_LEN).read() > 0 }
+}
+
+/// Removes and returns the oldest buffered byte, if any.
+pub fn read_input() -> Option<u8> {
+    // SAFETY: owned here; the poll runs with interrupts masked.
+    unsafe {
+        let len = core::ptr::addr_of!(INPUT_LEN).read();
+        if len == 0 {
+            return None;
+        }
+        let head = core::ptr::addr_of!(INPUT_HEAD).read();
+        let byte = core::ptr::addr_of!(INPUT_RING)
+            .cast::<u8>()
+            .add(head)
+            .read();
+        core::ptr::addr_of_mut!(INPUT_HEAD).write((head + 1) % INPUT_CAP);
+        core::ptr::addr_of_mut!(INPUT_LEN).write(len - 1);
+        Some(byte)
+    }
+}
+
+/// Buffers one byte from another source, dropping when full.
+///
+/// Keyboard interrupts share the serial ring so every task sees one
+/// input stream regardless of which device the keystroke arrived on.
+pub fn push_input_byte(byte: u8) {
+    // SAFETY: owned here; producers run with interrupts masked.
+    unsafe {
+        let len = core::ptr::addr_of!(INPUT_LEN).read();
+        if len >= INPUT_CAP {
+            return;
+        }
+        let head = core::ptr::addr_of!(INPUT_HEAD).read();
+        core::ptr::addr_of_mut!(INPUT_RING)
+            .cast::<u8>()
+            .add((head + len) % INPUT_CAP)
+            .write(byte);
+        core::ptr::addr_of_mut!(INPUT_LEN).write(len + 1);
     }
 }

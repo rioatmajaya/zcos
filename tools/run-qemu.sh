@@ -49,12 +49,29 @@ common="-machine q35 -m 512M -net none -vga std -no-reboot
 if [ "${1:-}" = "--test" ]; then
     # isa-debug-exit turns the loader's port write into a process exit code;
     # writing 0x10 makes QEMU exit with (0x10 << 1) | 1 = 33.
-    # stdin is detached so QEMU never blocks on the controlling terminal.
+    # The shell transcript is scripted from tools/boot-script.txt so the
+    # interactive shell is exercised deterministically; the final `exit`
+    # ends the shell and the kernel check below ends the run. Firmware
+    # eats early stdin during its own boot, so a slow drip keeps full
+    # script copies arriving through the whole kernel phase; the shell
+    # consumes one pass and ignores the rest after it exits. A FIFO feeds
+    # QEMU so the drip dies with the emulator instead of hanging CI.
+    # (QEMU monitor key injection does not deliver in this environment, so
+    # the PS/2 IRQ path is proven by a self-IPI plus a translator loopback
+    # instead; real keystrokes share the same ring when they arrive.)
     # The `||` keeps `set -e` from aborting on the expected non-zero status.
     status=0
+    feed="$root/build/boot-feed.fifo"
+    rm -f "$feed"
+    mkfifo "$feed"
     # shellcheck disable=SC2086
+    ( while :; do cat "$root/tools/boot-script.txt"; sleep 1; done > "$feed" ) &
+    feeder=$!
     qemu-system-x86_64 $common \
-        -display none -serial stdio -device isa-debug-exit < /dev/null || status=$?
+        -display none -serial stdio -device isa-debug-exit < "$feed" || status=$?
+    kill "$feeder" 2>/dev/null || true
+    wait 2>/dev/null || true
+    rm -f "$feed"
     if [ "$status" -eq 33 ]; then
         exit 0
     fi

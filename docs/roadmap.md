@@ -85,6 +85,23 @@
   initramfs through a read-only filesystem (path validation, descriptor
   tables with offsets, all host-tested); the bring-up tasks open and
   verify their data files before the IPC exchange.
+- Landed as Milestone 3f: interactive shell. A third task reads the
+  serial port through a blocking byte syscall (timer-polled ring, Mesa
+  wakeups, idle-halt for the lone waiter) and runs `help`, `echo`, `cat`,
+  and `exit` with line editing; CI scripts a full transcript through a
+  drip-fed FIFO because firmware eats early stdin.
+- Landed as Milestone 3g: userspace framebuffer. The display is mapped
+  non-executable into user space, described through a new syscall that
+  hands tasks the mapped (never physical) address; a fourth task paints
+  eight color bars shared with the kernel through `zc-abi` helpers, and
+  the kernel recomputes all 1024000 pixels for a matching checksum.
+- Landed as Milestone 3h: keyboard input. The PS/2 controller is routed
+  through the I/O APIC to its own IST vector, scancodes translate through
+  a host-tested state machine into the shared input ring (with a timer
+  poll as backup), and delivery is proven by a self-IPI plus a translator
+  loopback on hardware. QEMU monitor injection does not deliver in this
+  environment (accepted but lost before the controller), so scripted
+  typing stays a follow-up; interactive keyboards share the proven path.
 
 ## Milestone 3 — desktop base
 

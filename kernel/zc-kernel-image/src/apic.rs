@@ -194,6 +194,12 @@ fn send_ipi(target: u8, low: u32) -> bool {
     wait_ipi()
 }
 
+/// Sends an inter-processor interrupt to this CPU.
+pub fn self_ipi(vector: u8) {
+    write(ICR_HIGH, 0);
+    write(ICR_LOW, u32::from(vector) | (1 << 18));
+}
+
 /// Sends the INIT assert/deassert pair of the universal start-up sequence.
 pub fn send_init(target: u8) -> bool {
     send_ipi(target, IPI_INIT_ASSERT)
@@ -213,6 +219,11 @@ pub fn send_sipi(target: u8, vector: u8) -> bool {
 /// Called from the timer vector stub.
 pub fn on_tick() {
     TICKS.fetch_add(1, Ordering::SeqCst);
+    write(EOI, 0);
+}
+
+/// Acknowledges any local-APIC interrupt without touching the tick count.
+pub fn eoi() {
     write(EOI, 0);
 }
 

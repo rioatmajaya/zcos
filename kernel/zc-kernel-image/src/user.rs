@@ -28,7 +28,7 @@ const USER_WINDOW_END: u64 = 0x60_0000;
 const STACK_ZONE_START: u64 = 0x40_4000;
 
 /// End of the reserved user-stack zone.
-const STACK_ZONE_END: u64 = 0x40_7000;
+const STACK_ZONE_END: u64 = 0x40_8000;
 
 /// Each task links at its own base (producer at [`USER_CODE_VIRT`], the
 /// consumer 64 KiB higher), so images never share pages and absolute
@@ -45,10 +45,32 @@ const STACK_A_PAGE: u64 = STACK_A_TOP - PAGE_SIZE;
 /// Task B stack page.
 const STACK_B_PAGE: u64 = STACK_B_TOP - PAGE_SIZE;
 
+/// Top of the shell's user stack.
+const STACK_C_TOP: u64 = 0x40_7000;
+
+/// Shell stack page backing that top.
+const STACK_C_PAGE: u64 = STACK_C_TOP - PAGE_SIZE;
+
+/// Top of the framebuffer task's user stack.
+const STACK_D_TOP: u64 = 0x40_8000;
+
+/// Framebuffer-task stack page backing that top.
+const STACK_D_PAGE: u64 = STACK_D_TOP - PAGE_SIZE;
+
 /// File names of the bring-up tasks inside the initramfs.
 const PRODUCER_NAME: &str = "producer.elf";
 /// Consumer binary name.
 const CONSUMER_NAME: &str = "consumer.elf";
+/// Shell binary name.
+const SHELL_NAME: &str = "shell.elf";
+/// Framebuffer task binary name.
+const FB_NAME: &str = "fb.elf";
+
+/// User virtual address the display framebuffer is mapped at.
+const FB_VIRT: u64 = 0x10_00000;
+
+/// Firmware framebuffer description shared with userspace.
+static mut FB_INFO: zc_abi::FramebufferInfo = zc_abi::FramebufferInfo::UNAVAILABLE;
 
 /// Shared endpoint the bring-up tasks pass messages through.
 static mut ENDPOINT: Endpoint<4> = Endpoint::new();
@@ -61,7 +83,8 @@ const MIN_SWITCHES: u64 = 10;
 
 /// Ticks after task start that trigger the timeout path instead of waiting.
 ///
-/// Sized for calibrated 1 ms ticks with wide margin for slow emulation.
+/// Sized generously: slow emulation still finishes the scripted session
+/// two orders of magnitude below this.
 const USER_TIMEOUT_TICKS: u64 = 5000;
 
 /// Page-table entry flags for user pages: present, writable, user.
@@ -307,6 +330,79 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 }
             }
         }
+        Ok(Action::Close) => {
+            let me = tasks.current();
+            // SAFETY: task indexes stay below the table length.
+            let table = unsafe { &mut (*core::ptr::addr_of_mut!(FDS))[me] };
+            match table.close(regs.rdi as u32) {
+                Ok(()) => {
+                    regs.set_result(0);
+                    0
+                }
+                Err(_) => {
+                    regs.set_result(u64::MAX);
+                    0
+                }
+            }
+        }
+        Ok(Action::SerialRead) => {
+            if let Some(byte) = crate::serial::read_input() {
+                regs.set_result(u64::from(byte));
+                return 0;
+            }
+            if tasks.alive_count() == 1 {
+                // Sole survivor: idle with interrupts on until a keystroke
+                // lands instead of failing a wait nobody can satisfy.
+                unsafe {
+                    core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
+                }
+                while !crate::serial::input_available() {
+                    unsafe {
+                        core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
+                    }
+                }
+                unsafe {
+                    core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
+                }
+                match crate::serial::read_input() {
+                    Some(byte) => {
+                        regs.set_result(u64::from(byte));
+                        0
+                    }
+                    None => crate::fail("serial byte vanished"),
+                }
+            } else {
+                block_with_retry(tasks, regs, frame)
+            }
+        }
+        Ok(Action::FbInfo) => {
+            const INFO_LEN: u64 = core::mem::size_of::<zc_abi::FramebufferInfo>() as u64;
+            if regs.rsi != INFO_LEN {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            match validate_user_slice_mut(regs.rdi, INFO_LEN) {
+                Some(out) => {
+                    // SAFETY: the buffer was validated writable above.
+                    // Tasks receive the user-mapped address, never the
+                    // physical one: only the kernel reads through identity.
+                    let mut info =
+                        unsafe { core::ptr::addr_of!(FB_INFO).read() };
+                    if info.is_available() {
+                        info.address = FB_VIRT;
+                    }
+                    unsafe {
+                        (out.as_mut_ptr() as *mut zc_abi::FramebufferInfo).write(info);
+                    }
+                    regs.set_result(0);
+                    0
+                }
+                None => {
+                    regs.set_result(u64::MAX);
+                    0
+                }
+            }
+        }
         Ok(_) => {
             regs.set_result(u64::MAX);
             0
@@ -405,6 +501,13 @@ pub unsafe extern "C" fn sched_tick(regs: *mut SyscallRegs, frame: *mut IrqFrame
     let regs = unsafe { &mut *regs };
     let frame = unsafe { &mut *frame };
     let tasks = unsafe { &mut *addr_of_mut!(TASKS) };
+    // Drain new keystrokes, then wake any task they unblock: a serial waiter
+    // whose byte arrived retries its read instead of sleeping through it.
+    crate::serial::poll_input();
+    crate::kbd::drain_controller();
+    if crate::serial::input_available() {
+        tasks.unblock_all();
+    }
     if tasks.alive_count() == 0 {
         return;
     }
@@ -436,9 +539,124 @@ pub unsafe extern "C" fn user_finished() -> ! {
     if switches < MIN_SWITCHES {
         crate::fail("scheduler did not switch tasks");
     }
+    verify_framebuffer();
     // SAFETY: saved from the loader's valid BootInfo before entering the tasks.
     let info = unsafe { &*(SAVED_BOOT_INFO as *const BootInfo) };
     crate::boot_tail(info);
+}
+
+/// Recomputes the painted pattern and compares it against the display.
+///
+/// Reads every pixel back through the identity map and checks the wrapping
+/// checksum against an independent recomputation from the shared helpers.
+/// A mismatch means the task painted wrong pixels or the mapping is broken.
+fn verify_framebuffer() {
+    use zc_abi::{bar_at, bar_color, encode};
+
+    // SAFETY: published once during setup before any task ran.
+    let info = unsafe { core::ptr::addr_of!(FB_INFO).read() };
+    if !info.is_available() {
+        crate::serial::write_str("fb: unavailable, skipped\n");
+        return;
+    }
+    let width = u64::from(info.width);
+    let height = u64::from(info.height);
+    let stride = u64::from(info.stride);
+    let mut expected = 0u64;
+    let mut actual = 0u64;
+    let mut y = 0;
+    while y < height {
+        let mut x = 0;
+        while x < width {
+            let (red, green, blue) = bar_color(bar_at(x, width));
+            let Some(pixel) = encode(info.pixel_format, red, green, blue) else {
+                crate::fail("unsupported fb format");
+            };
+            expected = expected.wrapping_add(u64::from(pixel));
+            // SAFETY: the setup mapped exactly this range with user
+            // permissions; the identity map covers it for the check.
+            let seen =
+                unsafe { read_volatile((info.address + (y * stride + x) * 4) as *const u32) };
+            actual = actual.wrapping_add(u64::from(seen));
+            x += 1;
+        }
+        y += 1;
+    }
+    if expected != actual {
+        crate::fail("fb checksum mismatch");
+    }
+    let _ = crate::serial::print(format_args!(
+        "fb: checksum ok ({} pixels)\n",
+        width * height,
+    ));
+}
+
+/// Maps the display framebuffer into userspace at [`FB_VIRT`].
+///
+/// Allocates up to two page tables for the range and links them into the
+/// page directory holding the user window. The pages are non-executable:
+/// tasks may paint pixels but never run code from the display.
+fn map_framebuffer(pd: u64, alloc: &mut FrameAllocator<'_>) {
+    use zc_abi::PixelFormat;
+
+    // SAFETY: published during setup before any task ran.
+    let info = unsafe { core::ptr::addr_of!(FB_INFO).read() };
+    if !info.is_available() {
+        return;
+    }
+    match info.pixel_format {
+        PixelFormat::Rgbx8888 | PixelFormat::Bgrx8888 => {}
+        _ => crate::fail("unsupported fb format"),
+    }
+    let pixels = u64::from(info.width)
+        .checked_mul(u64::from(info.height))
+        .and_then(|count| count.checked_mul(4))
+        .and_then(|bytes| bytes.checked_add(PAGE_SIZE - 1))
+        .map(|bytes| bytes / PAGE_SIZE);
+    let Some(pages) = pixels else {
+        crate::fail("fb dimensions overflow");
+    };
+    if pages == 0 || pages > 1024 {
+        crate::fail("fb does not fit two page tables");
+    }
+    let end = info.address + pages * PAGE_SIZE;
+    if end > 0x1_0000_0000 {
+        crate::fail("fb leaves the identity map");
+    }
+    let base_index = VirtAddr::new(FB_VIRT).pd_index();
+    if base_index + 1 >= 512 {
+        crate::fail("fb crosses the page directory");
+    }
+    let mut tables = [0u64; 2];
+    for table in &mut tables {
+        let Some(frame) = alloc.allocate() else {
+            crate::fail("fb setup found no page-table frame");
+        };
+        // SAFETY: fresh frame inside the identity map.
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                frame.start_address() as *mut u8,
+                PAGE_SIZE as usize,
+            )
+            .fill(0);
+        }
+        *table = frame.start_address();
+    }
+    // SAFETY: the loader's tables are identity-mapped.
+    unsafe {
+        set_table_entry(pd, base_index, tables[0] | USER_PAGE_FLAGS);
+        set_table_entry(pd, base_index + 1, tables[1] | USER_PAGE_FLAGS);
+        let mut page = 0u64;
+        while page < pages {
+            let slot = (page % 512) as usize;
+            let table = tables[(page / 512) as usize];
+            let phys = info.address + page * PAGE_SIZE;
+            // Bit 63 keeps display memory non-executable.
+            const NO_EXECUTE: u64 = 1 << 63;
+            set_table_entry(table, slot, phys | USER_PAGE_FLAGS | NO_EXECUTE);
+            page += 1;
+        }
+    }
 }
 
 /// Reports a user task that never exited and stops the machine.
@@ -508,7 +726,11 @@ pub fn enter(
 
     let producer = find_initramfs_file(boot_info, PRODUCER_NAME);
     let consumer = find_initramfs_file(boot_info, CONSUMER_NAME);
-    let (Some(producer), Some(consumer)) = (producer, consumer) else {
+    let shell = find_initramfs_file(boot_info, SHELL_NAME);
+    let fb = find_initramfs_file(boot_info, FB_NAME);
+    let (Some(producer), Some(consumer), Some(shell), Some(fb)) =
+        (producer, consumer, shell, fb)
+    else {
         crate::fail("user task ELF missing from initramfs");
     };
 
@@ -527,6 +749,14 @@ pub fn enter(
 
     let entry_a = map_elf(PRODUCER_NAME, producer, alloc, pt_phys);
     let entry_b = map_elf(CONSUMER_NAME, consumer, alloc, pt_phys);
+    let entry_c = map_elf(SHELL_NAME, shell, alloc, pt_phys);
+    let entry_d = map_elf(FB_NAME, fb, alloc, pt_phys);
+
+    // Publish the firmware framebuffer for the info syscall and mapping.
+    // SAFETY: `boot_info` is the loader structure validated on entry.
+    unsafe {
+        core::ptr::addr_of_mut!(FB_INFO).write((&*boot_info).framebuffer);
+    }
 
     // Mount the initramfs for file syscalls before any task can open.
     // SAFETY: the loader wrote the archive into the identity map; the
@@ -546,13 +776,20 @@ pub fn enter(
     }
 
     // One stack page per task, above the image window.
-    let (Some(stack_a), Some(stack_b)) = (alloc.allocate(), alloc.allocate()) else {
+    let (Some(stack_a), Some(stack_b), Some(stack_c), Some(stack_d)) = (
+        alloc.allocate(),
+        alloc.allocate(),
+        alloc.allocate(),
+        alloc.allocate(),
+    ) else {
         crate::fail("user setup found no stack frames");
     };
     // SAFETY: the loader's tables are identity-mapped.
     unsafe {
         set_table_entry(pt_phys, page_index(STACK_A_PAGE), stack_a.start_address() | USER_PAGE_FLAGS);
         set_table_entry(pt_phys, page_index(STACK_B_PAGE), stack_b.start_address() | USER_PAGE_FLAGS);
+        set_table_entry(pt_phys, page_index(STACK_C_PAGE), stack_c.start_address() | USER_PAGE_FLAGS);
+        set_table_entry(pt_phys, page_index(STACK_D_PAGE), stack_d.start_address() | USER_PAGE_FLAGS);
     }
 
     // SAFETY: the loader's tables are identity-mapped; the indices come from
@@ -582,48 +819,42 @@ pub fn enter(
             base.pd_index(),
             pt_phys | USER_PAGE_FLAGS,
         );
-        // Reload CR3 so the replaced huge page leaves the TLB.
+        map_framebuffer(pd & !0xFFF, alloc);
+        // Reload CR3 so the replaced huge pages leave the TLB.
         let cr3 = read_cr3();
         asm!("mov cr3, {}", in(reg) cr3, options(nostack));
     }
 
     let _ = crate::serial::print(format_args!(
-        "user: producer entry {:#x}, consumer entry {:#x}\n",
-        entry_a, entry_b,
+        "user: producer entry {:#x}, consumer entry {:#x}, shell entry {:#x}, fb entry {:#x}\n",
+        entry_a, entry_b, entry_c, entry_d,
     ));
 
     // SAFETY: the table is owned here; interrupts are masked for the whole
     // setup, so no tick can observe a half-built table.
     let tasks = unsafe { &mut *addr_of_mut!(TASKS) };
-    if tasks
-        .spawn(
-            SyscallRegs::EMPTY,
-            IrqFrame {
-                rip: entry_a,
-                cs: u64::from(USER_CS),
-                rflags: USER_RFLAGS,
-                rsp: STACK_A_TOP,
-                ss: u64::from(USER_SS),
-            },
-        )
-        .is_err()
-    {
-        crate::fail("task table holds two tasks");
-    }
-    if tasks
-        .spawn(
-            SyscallRegs::EMPTY,
-            IrqFrame {
-                rip: entry_b,
-                cs: u64::from(USER_CS),
-                rflags: USER_RFLAGS,
-                rsp: STACK_B_TOP,
-                ss: u64::from(USER_SS),
-            },
-        )
-        .is_err()
-    {
-        crate::fail("task table holds two tasks");
+    let initial = [
+        (entry_a, STACK_A_TOP),
+        (entry_b, STACK_B_TOP),
+        (entry_c, STACK_C_TOP),
+        (entry_d, STACK_D_TOP),
+    ];
+    for (entry, stack) in initial {
+        if tasks
+            .spawn(
+                SyscallRegs::EMPTY,
+                IrqFrame {
+                    rip: entry,
+                    cs: u64::from(USER_CS),
+                    rflags: USER_RFLAGS,
+                    rsp: stack,
+                    ss: u64::from(USER_SS),
+                },
+            )
+            .is_err()
+        {
+            crate::fail("task table holds four tasks");
+        }
     }
 
     let rsp: u64;

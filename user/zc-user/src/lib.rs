@@ -11,8 +11,8 @@
 use core::arch::asm;
 
 pub use zc_abi::{
-    SYS_CAP_DELEGATE, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_OPEN, SYS_READ, SYS_RECV, SYS_SEND,
-    SYS_TASK_EXIT, SYS_YIELD, SyscallError,
+    SYS_CAP_DELEGATE, SYS_CLOSE, SYS_FB_INFO, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_OPEN, SYS_READ,
+    SYS_RECV, SYS_SEND, SYS_SERIAL_READ, SYS_TASK_EXIT, SYS_YIELD, SyscallError,
 };
 
 /// Issues a syscall with no arguments.
@@ -119,6 +119,32 @@ pub fn read(fd: u64, buffer: &mut [u8]) -> u64 {
         buffer.as_mut_ptr() as u64,
         buffer.len() as u64,
     )
+}
+
+/// Reads one serial byte, blocking until a key arrives.
+#[inline(always)]
+pub fn serial_read() -> u8 {
+    syscall0(SYS_SERIAL_READ) as u8
+}
+
+/// Closes a descriptor, returning 0 or `u64::MAX` on failure.
+#[inline(always)]
+pub fn close(fd: u64) -> u64 {
+    syscall1(SYS_CLOSE, fd)
+}
+
+/// Copies the framebuffer description into `info`.
+///
+/// Returns `true` on success; the pixels themselves live at the mapped
+/// address the kernel chose for userspace.
+#[inline(always)]
+pub fn framebuffer_info(info: &mut zc_abi::FramebufferInfo) -> bool {
+    let code = syscall2(
+        SYS_FB_INFO,
+        info as *mut zc_abi::FramebufferInfo as u64,
+        core::mem::size_of::<zc_abi::FramebufferInfo>() as u64,
+    );
+    code == 0
 }
 
 /// Terminates the calling task; never returns.

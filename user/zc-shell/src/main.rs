@@ -1,0 +1,203 @@
+//! Shell task: an interactive command line over the serial port.
+//!
+//! Reads keystrokes with blocking serial reads, edits a single line with
+//! backspace support, and runs `help`, `echo`, `cat`, and `exit`. Output
+//! goes through the log syscall, so the transcript appears in the kernel
+//! serial log.
+
+#![no_std]
+#![no_main]
+#![allow(unsafe_code)]
+
+use zc_user::{close, log, open, read, serial_read, task_exit};
+
+/// Longest command line accepted.
+const LINE_CAP: usize = 128;
+
+/// Line buffer backing the editor.
+static mut LINE: [u8; LINE_CAP] = [0; LINE_CAP];
+/// Used bytes in [`LINE`].
+static mut LINE_LEN: usize = 0;
+
+/// Output staging for multi-word responses.
+static mut OUT: [u8; LINE_CAP] = [0; LINE_CAP];
+/// Used bytes in [`OUT`].
+static mut OUT_LEN: usize = 0;
+
+/// Appends bytes to the output staging, truncating on overflow.
+fn out_bytes(bytes: &[u8]) {
+    // SAFETY: owned here; no other task touches this buffer.
+    unsafe {
+        let len = core::ptr::addr_of!(OUT_LEN).read();
+        let room = LINE_CAP.saturating_sub(len);
+        let take = bytes.len().min(room);
+        core::ptr::addr_of_mut!(OUT)
+            .cast::<u8>()
+            .add(len)
+            .copy_from_nonoverlapping(bytes.as_ptr(), take);
+        core::ptr::addr_of_mut!(OUT_LEN).write(len + take);
+    }
+}
+
+/// Logs the staged output as one line and clears it.
+fn out_flush() {
+    // SAFETY: owned here; called once per response.
+    unsafe {
+        let len = core::ptr::addr_of!(OUT_LEN).read();
+        let bytes =
+            core::slice::from_raw_parts(core::ptr::addr_of!(OUT).cast::<u8>(), len);
+        log(core::str::from_utf8(bytes).unwrap_or("?"));
+        core::ptr::addr_of_mut!(OUT_LEN).write(0);
+    }
+}
+
+/// Appends a byte to the line, echoing it when printable.
+fn push(byte: u8) {
+    // SAFETY: owned here; no other task touches this buffer.
+    unsafe {
+        let len = core::ptr::addr_of!(LINE_LEN).read();
+        if byte == b'\x08' || byte == 0x7F {
+            if len > 0 {
+                core::ptr::addr_of_mut!(LINE_LEN).write(len - 1);
+                log("\x08 \x08");
+            }
+            return;
+        }
+        if len >= LINE_CAP {
+            return;
+        }
+        core::ptr::addr_of_mut!(LINE).cast::<u8>().add(len).write(byte);
+        core::ptr::addr_of_mut!(LINE_LEN).write(len + 1);
+        if byte.is_ascii_graphic() || byte == b' ' {
+            let echo = [byte];
+            log(core::str::from_utf8(&echo).unwrap_or("?"));
+        }
+    }
+}
+
+/// Takes the current line contents.
+fn take_line() -> usize {
+    // SAFETY: owned here; called once per line.
+    unsafe {
+        let len = core::ptr::addr_of!(LINE_LEN).read();
+        core::ptr::addr_of_mut!(LINE_LEN).write(0);
+        len
+    }
+}
+
+/// Views the first `len` line bytes.
+fn line_bytes(len: usize) -> &'static [u8] {
+    // SAFETY: `len` never exceeds the buffer both writers respect.
+    unsafe { core::slice::from_raw_parts(core::ptr::addr_of!(LINE).cast::<u8>(), len) }
+}
+
+/// Splits a line into whitespace-separated arguments.
+fn split<'a>(line: &'a [u8], mut visit: impl FnMut(&'a [u8])) {
+    let mut start = None;
+    let mut index = 0;
+    while index <= line.len() {
+        let boundary = index == line.len() || line[index] == b' ';
+        match (start, boundary) {
+            (None, false) => start = Some(index),
+            (Some(begin), true) => {
+                visit(&line[begin..index]);
+                start = None;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+}
+
+/// Logs a raw byte slice as text.
+fn print_bytes(bytes: &[u8]) {
+    let mut chunk = [0u8; 64];
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let take = bytes.len().saturating_sub(offset).min(chunk.len());
+        chunk[..take].copy_from_slice(&bytes[offset..offset + take]);
+        log(core::str::from_utf8(&chunk[..take]).unwrap_or("?"));
+        offset += take;
+    }
+}
+
+/// Runs one parsed command line. Returns whether to exit the shell.
+fn run(line: &[u8]) -> bool {
+    let mut argv: [&[u8]; 4] = [&[]; 4];
+    let mut count = 0;
+    split(line, |arg| {
+        if count < argv.len() {
+            argv[count] = arg;
+            count += 1;
+        }
+    });
+    if count == 0 {
+        return false;
+    }
+    match argv[0] {
+        b"help" => {
+            log("Commands: help echo cat exit\n");
+        }
+        b"echo" => {
+            for index in 1..count {
+                out_bytes(argv[index]);
+                if index + 1 < count {
+                    out_bytes(b" ");
+                }
+            }
+            out_bytes(b"\n");
+            out_flush();
+        }
+        b"cat" => {
+            if count < 2 {
+                log("usage: cat <file>\n");
+                return false;
+            }
+            let path = core::str::from_utf8(argv[1]).unwrap_or("");
+            let fd = open(path);
+            if fd == u64::MAX {
+                log("cat: no such file\n");
+                return false;
+            }
+            let mut buffer = [0u8; 64];
+            loop {
+                let got = read(fd, &mut buffer);
+                if got == u64::MAX || got == 0 {
+                    break;
+                }
+                print_bytes(&buffer[..got as usize]);
+            }
+            close(fd);
+            log("\n");
+        }
+        b"exit" => {
+            log("shell exiting\n");
+            return true;
+        }
+        _ => {
+            log("unknown command\n");
+        }
+    }
+    false
+}
+
+/// Task entry point; the kernel provides a fresh user stack.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn _start() -> ! {
+    log("shell ready\n");
+    loop {
+        log("> ");
+        loop {
+            let byte = serial_read();
+            if byte == b'\r' || byte == b'\n' {
+                log("\n");
+                break;
+            }
+            push(byte);
+        }
+        let len = take_line();
+        if run(line_bytes(len)) {
+            task_exit()
+        }
+    }
+}

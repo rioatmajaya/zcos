@@ -11,13 +11,15 @@
 
 #![no_std]
 
+pub mod fb;
 pub mod ipc;
 pub mod syscall;
 
+pub use fb::{BAR_COUNT, bar_at, bar_color, encode};
 pub use ipc::{MESSAGE_WORDS, Message};
 pub use syscall::{
-    SYS_CAP_DELEGATE, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_OPEN, SYS_READ, SYS_RECV, SYS_SEND,
-    SYS_TASK_EXIT, SYS_YIELD, SyscallError,
+    SYS_CAP_DELEGATE, SYS_CLOSE, SYS_FB_INFO, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_OPEN, SYS_READ,
+    SYS_RECV, SYS_SEND, SYS_SERIAL_READ, SYS_TASK_EXIT, SYS_YIELD, SyscallError,
 };
 
 /// Current version of the loader-to-kernel boot protocol.

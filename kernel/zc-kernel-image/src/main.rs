@@ -12,8 +12,9 @@ use core::arch::asm;
 use core::fmt::Write;
 
 use zc_abi::{
-    BootInfo, MemoryRegion, Message, SYS_CAP_DELEGATE, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_OPEN,
-    SYS_READ, SYS_RECV, SYS_SEND, SYS_TASK_EXIT, SYS_YIELD,
+    BootInfo, MemoryRegion, Message, SYS_CAP_DELEGATE, SYS_CLOSE, SYS_FB_INFO, SYS_LOG_WRITE,
+    SYS_MAP_FRAME, SYS_OPEN, SYS_READ, SYS_RECV, SYS_SEND, SYS_SERIAL_READ, SYS_TASK_EXIT,
+    SYS_YIELD,
 };
 use zc_kernel::{
     addrspace::AddressSpace,
@@ -30,6 +31,7 @@ mod acpi;
 mod apic;
 mod gdt;
 mod hpet;
+mod kbd;
 mod serial;
 mod idt;
 mod smp;
@@ -220,6 +222,9 @@ fn exercise_mechanisms(alloc: &mut FrameAllocator<'_>, usable: u64) {
         (SYS_LOG_WRITE, Action::LogWrite),
         (SYS_OPEN, Action::Open),
         (SYS_READ, Action::Read),
+        (SYS_SERIAL_READ, Action::SerialRead),
+        (SYS_FB_INFO, Action::FbInfo),
+        (SYS_CLOSE, Action::Close),
     ];
     for (number, expected) in dispatched {
         match syscall::dispatch(number) {
@@ -280,7 +285,9 @@ fn exercise_traps_and_timer() {
 
     apic::init();
     apic::start_timer();
+    kbd::init();
     idt::enable();
+    kbd::self_test();
 
     let mut spins = 0u32;
     while apic::ticks() < apic::TARGET_TICKS {

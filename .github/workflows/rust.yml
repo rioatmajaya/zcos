@@ -54,6 +54,15 @@ jobs:
         grep -q "task 1: consumer received 2000" build/boot.log
         grep -q "task 1: hello verified" build/boot.log
         grep -q "task 0: manifest ok" build/boot.log
+        grep -q "task 2: Commands: help echo cat exit" build/boot.log
+        grep -q "task 2: hello os" build/boot.log
+        grep -q "task 2: hello from the ZC OS initramfs" build/boot.log
+        grep -q "task 2: shell exiting" build/boot.log
+        grep -q "input: loopback ok" build/boot.log
+        grep -q "input: irq self-test ok" build/boot.log
+        grep -q "task 3: fb painted" build/boot.log
+        grep -q "task 3: fb painted" build/boot.log
+        grep -q "fb: checksum ok" build/boot.log
         grep -q "switches" build/boot.log
         grep -q "acpi: rsdp v2" build/boot.log
         grep -q "initramfs: 4 files" build/boot.log

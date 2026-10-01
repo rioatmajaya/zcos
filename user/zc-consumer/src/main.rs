@@ -8,7 +8,7 @@
 #![no_main]
 #![allow(unsafe_code)]
 
-use zc_user::{abort, log, open, read, recv, task_exit};
+use zc_user::{abort, close, log, open, read, recv, task_exit};
 
 /// How many words to verify before exiting.
 const COUNT: u64 = 2000;
@@ -26,6 +26,7 @@ pub unsafe extern "C" fn _start() -> ! {
     }
     let mut buffer = [0u8; 64];
     let count = read(hello, &mut buffer) as usize;
+    close(hello);
     if count != HELLO.len() || &buffer[..count] != HELLO {
         abort();
     }

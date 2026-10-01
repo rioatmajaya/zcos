@@ -7,8 +7,8 @@
 //! which numbers exist.
 
 use zc_abi::{
-    SYS_CAP_DELEGATE, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_OPEN, SYS_READ, SYS_RECV, SYS_SEND,
-    SYS_TASK_EXIT, SYS_YIELD, SyscallError,
+    SYS_CAP_DELEGATE, SYS_CLOSE, SYS_FB_INFO, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_OPEN, SYS_READ,
+    SYS_RECV, SYS_SEND, SYS_SERIAL_READ, SYS_TASK_EXIT, SYS_YIELD, SyscallError,
 };
 
 /// The kernel operation a syscall number requests.
@@ -35,6 +35,12 @@ pub enum Action {
     Open,
     /// Read from an open file.
     Read,
+    /// Read one serial byte, blocking until available.
+    SerialRead,
+    /// Copy the framebuffer description into a caller buffer.
+    FbInfo,
+    /// Close an open file.
+    Close,
 }
 
 /// Maps a raw syscall number to its [`Action`].
@@ -52,6 +58,9 @@ pub const fn dispatch(number: u64) -> Result<Action, SyscallError> {
         SYS_LOG_WRITE => Ok(Action::LogWrite),
         SYS_OPEN => Ok(Action::Open),
         SYS_READ => Ok(Action::Read),
+        SYS_SERIAL_READ => Ok(Action::SerialRead),
+        SYS_FB_INFO => Ok(Action::FbInfo),
+        SYS_CLOSE => Ok(Action::Close),
         _ => Err(SyscallError::InvalidNumber),
     }
 }
@@ -71,12 +80,15 @@ mod tests {
         assert_eq!(dispatch(SYS_LOG_WRITE), Ok(Action::LogWrite));
         assert_eq!(dispatch(SYS_OPEN), Ok(Action::Open));
         assert_eq!(dispatch(SYS_READ), Ok(Action::Read));
+        assert_eq!(dispatch(SYS_SERIAL_READ), Ok(Action::SerialRead));
+        assert_eq!(dispatch(SYS_FB_INFO), Ok(Action::FbInfo));
+        assert_eq!(dispatch(SYS_CLOSE), Ok(Action::Close));
     }
 
     #[test]
     fn unknown_numbers_are_rejected() {
         assert_eq!(
-            dispatch(9),
+            dispatch(12),
             Err(SyscallError::InvalidNumber)
         );
         assert_eq!(

@@ -11,6 +11,9 @@ pub const TIMER_VECTOR: u8 = 32;
 /// Spurious-interrupt vector programmed into the local APIC.
 pub const SPURIOUS_VECTOR: u8 = 0xFF;
 
+/// Keyboard interrupt vector for ISA IRQ1 through the I/O APIC.
+pub const KBD_VECTOR: u8 = 0x21;
+
 /// Software-interrupt vector userspace raises for syscalls.
 ///
 /// Its gate uses DPL 3 so ring-3 code may invoke it; every other gate stays
@@ -219,6 +222,7 @@ mod tests {
     #[test]
     fn well_known_vectors_are_stable() {
         assert_eq!(TIMER_VECTOR, 32);
+        assert_eq!(KBD_VECTOR, 0x21);
         assert_eq!(SPURIOUS_VECTOR, 0xFF);
         assert_eq!(SYSCALL_VECTOR, 0x80);
         assert!(!has_error_code(SYSCALL_VECTOR));

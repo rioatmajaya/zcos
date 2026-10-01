@@ -17,6 +17,7 @@ pub mod cpio;
 pub mod fs;
 pub mod gdt;
 pub mod ipc;
+pub mod kbd;
 pub mod memory;
 pub mod sched;
 pub mod syscall;

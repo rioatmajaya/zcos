@@ -1,0 +1,5 @@
+help
+echo hello os
+cat hello.txt
+cat zc.manifest
+exit

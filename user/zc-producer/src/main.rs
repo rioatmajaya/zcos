@@ -8,7 +8,7 @@
 #![no_main]
 #![allow(unsafe_code)]
 
-use zc_user::{abort, log, open, read, send, task_exit};
+use zc_user::{abort, close, log, open, read, send, task_exit};
 
 /// How many words to send before exiting.
 const COUNT: u64 = 2000;
@@ -23,6 +23,7 @@ pub unsafe extern "C" fn _start() -> ! {
     }
     let mut buffer = [0u8; 64];
     let count = read(manifest, &mut buffer);
+    close(manifest);
     if count == u64::MAX || count == 0 || &buffer[..6] != b"name=Z" {
         abort();
     }

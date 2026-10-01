@@ -24,6 +24,13 @@ pub const SYS_OPEN: u64 = 7;
 /// Reads from a descriptor into a buffer: args are descriptor, pointer, and
 /// length; returns bytes read or `u64::MAX` on failure.
 pub const SYS_READ: u64 = 8;
+/// Reads one serial byte, blocking until available: returns the byte.
+pub const SYS_SERIAL_READ: u64 = 9;
+/// Copies the framebuffer description into a caller buffer: arg is the
+/// pointer, the buffer must fit `FramebufferInfo`; returns 0 or `u64::MAX`.
+pub const SYS_FB_INFO: u64 = 10;
+/// Closes a descriptor: arg is the descriptor; returns 0 or `u64::MAX`.
+pub const SYS_CLOSE: u64 = 11;
 
 /// Error codes returned by failed syscalls.
 ///
@@ -88,6 +95,9 @@ mod tests {
         assert_eq!(SYS_LOG_WRITE, 6);
         assert_eq!(SYS_OPEN, 7);
         assert_eq!(SYS_READ, 8);
+        assert_eq!(SYS_SERIAL_READ, 9);
+        assert_eq!(SYS_FB_INFO, 10);
+        assert_eq!(SYS_CLOSE, 11);
     }
 
     #[test]

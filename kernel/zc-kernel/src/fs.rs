@@ -148,6 +148,18 @@ impl<'a> FdTable<'a> {
     pub fn len(&self) -> usize {
         self.slots.iter().filter(|slot| slot.is_some()).count()
     }
+
+    /// Closes a descriptor, freeing its slot for reuse.
+    pub fn close(&mut self, fd: u32) -> Result<(), FsError> {
+        let Some(slot) = self.slots.iter_mut().find(|slot| match slot {
+            Some(file) if file.fd == fd => true,
+            _ => false,
+        }) else {
+            return Err(FsError::BadFd);
+        };
+        *slot = None;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -230,5 +242,11 @@ mod tests {
         assert_eq!(table.len(), 2);
         let mut full = [0u8; 16];
         assert_eq!(table.read(other, &mut full), Ok(11));
+        table.close(fd).expect("close");
+        table.close(other).expect("close");
+        assert_eq!(table.len(), 0);
+        assert_eq!(table.close(fd), Err(FsError::BadFd));
+        // A freed slot is reusable.
+        assert!(table.open(fs.open(b"hello.txt").expect("file")).is_ok());
     }
 }

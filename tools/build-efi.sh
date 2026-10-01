@@ -62,9 +62,15 @@ cargo build --manifest-path user/zc-producer/Cargo.toml \
     --target "$none_target" --target-dir target --release
 cargo build --manifest-path user/zc-consumer/Cargo.toml \
     --target "$none_target" --target-dir target --release
+cargo build --manifest-path user/zc-shell/Cargo.toml \
+    --target "$none_target" --target-dir target --release
+cargo build --manifest-path user/zc-fb/Cargo.toml \
+    --target "$none_target" --target-dir target --release
 ./tools/mkinitramfs.sh \
     "target/$none_target/release/producer:producer.elf" \
-    "target/$none_target/release/consumer:consumer.elf"
+    "target/$none_target/release/consumer:consumer.elf" \
+    "target/$none_target/release/shell:shell.elf" \
+    "target/$none_target/release/fb:fb.elf"
 dd if=/dev/zero of="$image" bs=1M count="$esp_size_mib" status=none
 mkfs.vfat "$image" >/dev/null
 mmd -i "$image" ::EFI ::EFI/BOOT

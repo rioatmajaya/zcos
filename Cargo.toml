@@ -14,7 +14,9 @@ members = [
 exclude = [
     "kernel/zc-kernel-image",
     "user/zc-consumer",
+    "user/zc-fb",
     "user/zc-producer",
+    "user/zc-shell",
     "user/zc-user",
 ]
 
