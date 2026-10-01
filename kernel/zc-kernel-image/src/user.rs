@@ -11,6 +11,7 @@ use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 
 use zc_abi::BootInfo;
 use zc_kernel::gdt::{USER_CS, USER_RFLAGS, USER_SS};
+use zc_kernel::ipc::Endpoint;
 use zc_kernel::memory::{FrameAllocator, PAGE_SIZE};
 use zc_kernel::syscall::{Action, dispatch};
 use zc_kernel::task::{EXIT_TO_KERNEL, IrqFrame, SyscallRegs, TaskTable};
@@ -34,10 +35,11 @@ const COUNTER_B_VIRT: u64 = 0x40_3000;
 /// Top of task B's user stack (one page above its counter page).
 const STACK_B_TOP: u64 = 0x40_4000;
 
-/// Task A iterations; task B runs fewer so the tasks finish in order.
-const ITERATIONS_A: u32 = 50_000_000;
-/// Task B iterations.
-const ITERATIONS_B: u32 = 30_000_000;
+/// Messages the producer sends and the consumer receives.
+const MESSAGE_COUNT: u32 = 2000;
+
+/// Shared endpoint the bring-up tasks pass messages through.
+static mut ENDPOINT: Endpoint<4> = Endpoint::new();
 
 /// Minimum timer ticks observed during the tasks to accept the demo.
 const MIN_USER_TICKS: u64 = 2;
@@ -56,45 +58,108 @@ const USER_PAGE_FLAGS: u64 = 0x7;
 /// User/supervisor flag shared by every level of the user path.
 const FLAG_USER: u64 = 1 << 2;
 
-/// User program template: count to a patched limit, then `int 0x80` with
-/// `SYS_TASK_EXIT` in `eax`. Assembled by hand; [`build_code`] patches the
-/// counter address and iteration limit per task:
+/// Producer program: send values `0..limit`, then `int 0x80` with
+/// `SYS_TASK_EXIT`. The kernel blocks an over-full send transparently and
+/// resumes the task at the `int`, so no userspace retry loop is needed:
 ///
 /// ```asm
-///     movabs rax, [counter]
+///     xor ebx, ebx
 /// again:
-///     inc rax
-///     movabs [counter], rax
-///     cmp rax, limit
+///     mov rdi, rbx
+///     mov eax, 1
+///     int 0x80
+///     inc ebx
+///     cmp ebx, limit
 ///     jb again
+///     mov rax, rbx
+///     movabs [counter], rax
 ///     mov eax, 5
 ///     int 0x80
 ///     jmp $
 /// ```
-const CODE_TEMPLATE: [u8; 40] = [
-    0x48, 0xA1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,[counter]
-    0x48, 0xFF, 0xC0, // inc rax
+const PRODUCER_TEMPLATE: [u8; 44] = [
+    0x31, 0xDB, // xor ebx,ebx
+    0x48, 0x89, 0xDF, // mov rdi,rbx
+    0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+    0xCD, 0x80, // int 0x80
+    0xFF, 0xC3, // inc ebx
+    0x81, 0xFB, 0x00, 0x00, 0x00, 0x00, // cmp ebx,limit
+    0x72, 0xEC, // jb -20
+    0x48, 0x89, 0xD8, // mov rax,rbx
     0x48, 0xA3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs [counter],rax
-    0x48, 0x3D, 0x00, 0x00, 0x00, 0x00, // cmp rax,limit
-    0x72, 0xE1, // jb -31
     0xB8, 0x05, 0x00, 0x00, 0x00, // mov eax,5
     0xCD, 0x80, // int 0x80
     0xEB, 0xFE, // jmp $
 ];
 
-/// Offsets of the patched immediates inside [`CODE_TEMPLATE`].
-const OFF_LOAD_ADDR: usize = 2;
-/// Offset of the store address.
-const OFF_STORE_ADDR: usize = 15;
-/// Offset of the iteration limit.
-const OFF_LIMIT: usize = 25;
+/// Consumer program: receive `limit` values in order, `int3` on mismatch,
+/// then exit. A receive on an empty endpoint blocks like a send on a full
+/// one:
+///
+/// ```asm
+///     xor ebx, ebx
+/// again:
+///     mov eax, 2
+///     int 0x80
+///     cmp eax, ebx
+///     jne mismatch
+///     inc ebx
+///     cmp ebx, limit
+///     jb again
+///     mov rax, rbx
+///     movabs [counter], rax
+///     mov eax, 5
+///     int 0x80
+///     jmp $
+/// mismatch:
+///     int3
+/// ```
+///
+/// A mismatch raises `#BP`, which arrives as `#GP` because the breakpoint
+/// gate stays at DPL 0; either way the boot stops with a vector print.
+const CONSUMER_TEMPLATE: [u8; 46] = [
+    0x31, 0xDB, // xor ebx,ebx
+    0xB8, 0x02, 0x00, 0x00, 0x00, // mov eax,2
+    0xCD, 0x80, // int 0x80
+    0x39, 0xD8, // cmp eax,ebx
+    0x75, 0x20, // jne +32
+    0xFF, 0xC3, // inc ebx
+    0x81, 0xFB, 0x00, 0x00, 0x00, 0x00, // cmp ebx,limit
+    0x72, 0xEB, // jb -21 (to mov eax,2)
+    0x48, 0x89, 0xD8, // mov rax,rbx
+    0x48, 0xA3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs [counter],rax
+    0xB8, 0x05, 0x00, 0x00, 0x00, // mov eax,5
+    0xCD, 0x80, // int 0x80
+    0xEB, 0xFE, // jmp $
+    0xCC, // mismatch: int3
+];
 
-/// Builds one task's machine code for `counter` and `limit`.
-fn build_code(counter: u64, limit: u32) -> [u8; 40] {
-    let mut code = CODE_TEMPLATE;
-    code[OFF_LOAD_ADDR..OFF_LOAD_ADDR + 8].copy_from_slice(&counter.to_le_bytes());
-    code[OFF_STORE_ADDR..OFF_STORE_ADDR + 8].copy_from_slice(&counter.to_le_bytes());
-    code[OFF_LIMIT..OFF_LIMIT + 4].copy_from_slice(&limit.to_le_bytes());
+/// Offsets of the message limit inside both templates.
+const OFF_PRODUCER_LIMIT: usize = 16;
+/// Offset of the consumer limit.
+const OFF_CONSUMER_LIMIT: usize = 17;
+/// Offset of the producer counter address.
+const OFF_PRODUCER_COUNTER: usize = 27;
+/// Offset of the consumer counter address.
+const OFF_CONSUMER_COUNTER: usize = 28;
+
+/// Builds the producer loop for `counter` and `limit`.
+fn build_producer(counter: u64, limit: u32) -> [u8; 44] {
+    let mut code = PRODUCER_TEMPLATE;
+    code[OFF_PRODUCER_LIMIT..OFF_PRODUCER_LIMIT + 4]
+        .copy_from_slice(&limit.to_le_bytes());
+    code[OFF_PRODUCER_COUNTER..OFF_PRODUCER_COUNTER + 8]
+        .copy_from_slice(&counter.to_le_bytes());
+    code
+}
+
+/// Builds the consumer loop for `counter` and `limit`.
+fn build_consumer(counter: u64, limit: u32) -> [u8; 46] {
+    let mut code = CONSUMER_TEMPLATE;
+    code[OFF_CONSUMER_LIMIT..OFF_CONSUMER_LIMIT + 4]
+        .copy_from_slice(&limit.to_le_bytes());
+    code[OFF_CONSUMER_COUNTER..OFF_CONSUMER_COUNTER + 8]
+        .copy_from_slice(&counter.to_le_bytes());
     code
 }
 
@@ -196,13 +261,39 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
     // SAFETY: the stub passes pointers to the areas it pushed.
     let regs = unsafe { &mut *regs };
     let frame = unsafe { &mut *frame };
-    // SAFETY: the task table is owned here; traps cannot nest because every
-    // gate runs with interrupts masked.
+    // SAFETY: the task table and endpoint are owned here; traps cannot
+    // nest because every gate runs with interrupts masked.
     let tasks = unsafe { &mut *addr_of_mut!(TASKS) };
+    let endpoint = unsafe { &mut *addr_of_mut!(ENDPOINT) };
     match dispatch(regs.number()) {
         Ok(Action::TaskExit) => match tasks.exit_current(regs, frame) {
             Some(_) => 0,
             None => EXIT_TO_KERNEL,
+        },
+        Ok(Action::Send) => {
+            let message = match zc_abi::Message::from_words(&[regs.rdi]) {
+                Some(message) => message,
+                None => {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+            };
+            match endpoint.send(message) {
+                Ok(()) => {
+                    tasks.unblock_all();
+                    regs.set_result(0);
+                    0
+                }
+                Err(_) => block_with_retry(tasks, regs, frame),
+            }
+        }
+        Ok(Action::Receive) => match endpoint.recv() {
+            Ok(message) => {
+                tasks.unblock_all();
+                regs.set_result(message.words[0]);
+                0
+            }
+            Err(_) => block_with_retry(tasks, regs, frame),
         },
         Ok(_) => {
             regs.set_result(u64::MAX);
@@ -212,6 +303,24 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             regs.set_result(error.code());
             0
         }
+    }
+}
+
+/// Blocks the running task for IPC and switches to a peer.
+///
+/// Rewinds the saved `rip` past the two-byte `int 0x80` so the woken task
+/// re-executes its send or receive instead of skipping it. The two-task
+/// protocol guarantees the retry succeeds: an unblock always follows a
+/// complementary operation that freed a slot or queued a message.
+fn block_with_retry(
+    tasks: &mut TaskTable<4>,
+    regs: &mut SyscallRegs,
+    frame: &mut IrqFrame,
+) -> u64 {
+    frame.rip = frame.rip.wrapping_sub(2);
+    match tasks.block_current(regs, frame) {
+        Some(_) => 0,
+        None => crate::fail("ipc deadlock"),
     }
 }
 
@@ -236,25 +345,26 @@ pub unsafe extern "C" fn sched_tick(regs: *mut SyscallRegs, frame: *mut IrqFrame
 
 /// Continues the boot after the last user task exits.
 ///
-/// Reads both iteration counters the tasks left behind, checks that timer
-/// ticks preempted them and the scheduler actually switched, stops the
-/// timer, and runs the remaining boot tail.
+/// Reads both message counters the tasks left behind, checks that every
+/// message arrived, that timer ticks preempted the tasks, and that the
+/// scheduler actually switched, then stops the timer and runs the
+/// remaining boot tail.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn user_finished() -> ! {
     // SAFETY: the counter pages stay mapped; no task can run anymore.
-    let counter_a = unsafe { read_volatile(COUNTER_A_VIRT as *const u64) };
-    let counter_b = unsafe { read_volatile(COUNTER_B_VIRT as *const u64) };
+    let sent = unsafe { read_volatile(COUNTER_A_VIRT as *const u64) };
+    let received = unsafe { read_volatile(COUNTER_B_VIRT as *const u64) };
     // SAFETY: written before entering the tasks; no concurrent access.
     let elapsed = crate::apic::ticks().saturating_sub(unsafe { START_TICKS });
     let switches = unsafe { (*addr_of!(TASKS)).switches() };
     crate::apic::stop_timer();
     crate::idt::disable();
     let _ = crate::serial::print(format_args!(
-        "user: exited, counters {} {}, {} user ticks, {} switches\n",
-        counter_a, counter_b, elapsed, switches,
+        "user: exited, sent {} received {}, {} user ticks, {} switches\n",
+        sent, received, elapsed, switches,
     ));
-    if counter_a != u64::from(ITERATIONS_A) || counter_b != u64::from(ITERATIONS_B) {
-        crate::fail("user tasks exited with wrong counters");
+    if sent != u64::from(MESSAGE_COUNT) || received != u64::from(MESSAGE_COUNT) {
+        crate::fail("ipc lost messages");
     }
     if elapsed < MIN_USER_TICKS {
         crate::fail("timer did not preempt the user tasks");
@@ -342,8 +452,8 @@ pub fn enter(
         crate::fail("user setup found no frames");
     };
 
-    let code_a_bytes = build_code(COUNTER_A_VIRT, ITERATIONS_A);
-    let code_b_bytes = build_code(COUNTER_B_VIRT, ITERATIONS_B);
+    let code_a_bytes = build_producer(COUNTER_A_VIRT, MESSAGE_COUNT);
+    let code_b_bytes = build_consumer(COUNTER_B_VIRT, MESSAGE_COUNT);
 
     // SAFETY: all five frames are fresh allocator output inside the identity
     // map, and the lengths match the objects placed there.
@@ -411,6 +521,10 @@ pub fn enter(
         data_a.start_address(),
         code_b.start_address(),
         data_b.start_address(),
+    ));
+    let _ = crate::serial::print(format_args!(
+        "user: producer sends {}, consumer verifies\n",
+        MESSAGE_COUNT,
     ));
 
     // SAFETY: the table is owned here; interrupts are masked for the whole

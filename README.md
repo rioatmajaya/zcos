@@ -23,7 +23,8 @@ IDT, proves the APIC timer path by counting 16 ticks, runs a first
 userspace task in ring 3 (50M iterations preempted by 100+ ticks, exited
 via `int 0x80`), ACPI topology (`acpi: rsdp v2, …`), a calibrated APIC bus,
 an initramfs walked and listed (`initramfs: 2 files, …`), two preemptively
-scheduled ring-3 tasks (`user: exited, counters … … switches`), and a
+scheduled ring-3 tasks exchanging 2000 IPC messages (`user: exited, sent …
+received … switches`), and a
 mechanisms self-test on live loader data (`gdt:` / `traps:` /
 `syscall gate probe:` / `timer:` / `user:` / `mechanisms self-test ok` in
 the serial log).

@@ -67,6 +67,11 @@
   (`SyscallRegs` plus the CPU interrupt frame) through a bounded task
   table, and task exit hands the survivor to the stub until the last task
   resumes the kernel (~340 switches per boot in QEMU).
+- Landed as Milestone 3b: blocking IPC between live tasks. A producer
+  sends 2000 ordered messages through a depth-4 endpoint while a consumer
+  verifies them; full/empty operations transparently block (rewinding
+  past `int 0x80` for retry) and wake peers, with a deadlock fail-stop
+  and a timeout watchdog as backstops (~1000 switches per boot).
 
 ## Milestone 3 — desktop base
 

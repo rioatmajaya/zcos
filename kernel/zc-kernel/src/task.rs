@@ -149,6 +149,7 @@ pub struct Task {
     regs: SyscallRegs,
     frame: IrqFrame,
     alive: bool,
+    blocked: bool,
 }
 
 impl Task {
@@ -168,6 +169,12 @@ impl Task {
     #[must_use]
     pub const fn is_alive(self) -> bool {
         self.alive
+    }
+
+    /// Returns whether the task waits for an IPC operation.
+    #[must_use]
+    pub const fn is_blocked(self) -> bool {
+        self.blocked
     }
 }
 
@@ -213,6 +220,7 @@ impl<const N: usize> TaskTable<N> {
             regs,
             frame,
             alive: true,
+            blocked: false,
         });
         Ok(index)
     }
@@ -238,6 +246,38 @@ impl<const N: usize> TaskTable<N> {
             .count()
     }
 
+    /// Marks the running task blocked and loads the next runnable one.
+    ///
+    /// Returns the new running index, or `None` when no other task can run
+    /// (the caller then reports a deadlock instead of switching nowhere).
+    pub fn block_current(
+        &mut self,
+        regs: &mut SyscallRegs,
+        frame: &mut IrqFrame,
+    ) -> Option<usize> {
+        if let Some(task) = self.tasks[self.current].as_mut() {
+            task.regs = *regs;
+            task.frame = *frame;
+            task.blocked = true;
+        }
+        let next = self.next_runnable(self.current)?;
+        self.load_into(next, regs, frame);
+        Some(next)
+    }
+
+    /// Marks every task runnable again.
+    ///
+    /// Callers invoke this after any successful IPC operation: a woken task
+    /// whose operation still cannot complete simply blocks again, so
+    /// spurious wakeups stay correct.
+    pub fn unblock_all(&mut self) {
+        for slot in &mut self.tasks {
+            if let Some(task) = slot {
+                task.blocked = false;
+            }
+        }
+    }
+
     /// Saves `current` from the stub areas, then loads the next alive task
     /// back into them. Returns the new running index.
     pub fn switch_from(
@@ -246,7 +286,7 @@ impl<const N: usize> TaskTable<N> {
         frame: &mut IrqFrame,
     ) -> Result<usize, TaskError> {
         let from = self.current;
-        let Some(next) = self.next_alive(from) else {
+        let Some(next) = self.next_runnable(from) else {
             return Err(TaskError::NoTasks);
         };
         if let Some(task) = self.tasks[from].as_mut() {
@@ -257,7 +297,7 @@ impl<const N: usize> TaskTable<N> {
         Ok(next)
     }
 
-    /// Terminates `current`, loading the next alive task when one remains.
+    /// Terminates `current`, loading the next runnable task when one remains.
     ///
     /// Returns the new running index, or `None` when every task finished so
     /// the stub may leave userspace for good.
@@ -268,20 +308,22 @@ impl<const N: usize> TaskTable<N> {
     ) -> Option<usize> {
         if let Some(task) = self.tasks[self.current].as_mut() {
             task.alive = false;
+            task.blocked = false;
         }
-        let next = self.next_alive(self.current)?;
+        self.unblock_all();
+        let next = self.next_runnable(self.current)?;
         self.load_into(next, regs, frame);
         Some(next)
     }
 
-    /// Finds the next alive task after `from`, wrapping around.
-    fn next_alive(&self, from: usize) -> Option<usize> {
+    /// Finds the next alive and unblocked task after `from`, wrapping around.
+    fn next_runnable(&self, from: usize) -> Option<usize> {
         if N == 0 {
             return None;
         }
         for step in 1..=N {
             let index = (from + step) % N;
-            if matches!(self.tasks[index], Some(task) if task.alive) {
+            if matches!(self.tasks[index], Some(task) if task.alive && !task.blocked) {
                 return Some(index);
             }
         }
@@ -363,6 +405,24 @@ mod task_table_tests {
         assert_eq!(irq.rip, 0x200);
         assert_eq!(table.exit_current(&mut regs, &mut irq), None);
         assert_eq!(table.alive_count(), 0);
+    }
+
+    #[test]
+    fn blocked_tasks_are_skipped_until_woken() {
+        let mut table = TaskTable::<4>::new();
+        table.spawn(SyscallRegs::EMPTY, frame(0x100)).unwrap();
+        table.spawn(SyscallRegs::EMPTY, frame(0x200)).unwrap();
+
+        let mut regs = SyscallRegs::EMPTY;
+        let mut irq = IrqFrame::EMPTY;
+        // Task 0 blocks: task 1 runs next.
+        assert_eq!(table.block_current(&mut regs, &mut irq), Some(1));
+        assert_eq!(irq.rip, 0x200);
+        // Task 1 blocks too: nobody is runnable.
+        assert_eq!(table.block_current(&mut regs, &mut irq), None);
+        // A wakeup makes task 0 runnable again from task 1.
+        table.unblock_all();
+        assert_eq!(table.switch_from(&mut regs, &mut irq), Ok(0));
     }
 
     #[test]
