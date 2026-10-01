@@ -6,15 +6,17 @@ The system uses a native graphical stack and a capability-based microkernel.
 
 ## Project status
 
-The repository contains the Milestone 1 loader: a UEFI application that boots
-in QEMU/OVMF, disables the firmware watchdog, discovers the GOP framebuffer,
-captures the memory map, locates the ACPI RSDP, and assembles a
-`zc_abi::BootInfo`. It stops before `ExitBootServices`; handing control to the
-kernel is the next increment. See [the roadmap](docs/roadmap.md).
+Milestone 1 is complete: the UEFI loader boots in QEMU/OVMF, reads a kernel
+ELF from its own FAT volume, exits boot services, installs its own page tables
+and GDT, and jumps to the bare-metal kernel. The kernel validates the
+`zc_abi::BootInfo` handed over by the loader, reports the framebuffer, memory
+map, and ACPI RSDP over the serial port, and halts. The full path runs
+headless and is verified by the CI boot test.
 
 The kernel crate provides the first mechanisms — boot-contract validation, a
 physical frame allocator, and generation-safe capability tables — and is
-covered by host unit tests.
+covered by host unit tests. The loader's UEFI bindings and ELF parser have host
+unit tests as well.
 
 ## Development
 
@@ -22,14 +24,15 @@ covered by host unit tests.
 cargo test --workspace
 ./tools/verify-host.sh
 
-./tools/build-efi.sh          # produce build/zcos.img
+./tools/build-efi.sh          # produce build/zcos.img (loader + kernel)
 ./tools/run-qemu.sh           # boot it under QEMU + OVMF
 ./tools/run-qemu.sh --test    # headless boot test for CI
 ```
 
-`tools/build-efi.sh` needs the `x86_64-unknown-uefi` target, `objdump`, and
-`mtools`. `tools/run-qemu.sh` needs `qemu-system-x86_64` and an OVMF firmware
-package. The host verification script checks all of them.
+`tools/build-efi.sh` needs the `x86_64-unknown-uefi` and
+`x86_64-unknown-none` targets, `objdump`, and `mtools`.
+`tools/run-qemu.sh` needs `qemu-system-x86_64` and an OVMF firmware package.
+The host verification script checks all of them.
 
 See [the architecture document](docs/architecture.md) and
 [the roadmap](docs/roadmap.md) for design and delivery details.

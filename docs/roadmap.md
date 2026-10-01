@@ -14,8 +14,12 @@
   framebuffer, captures the memory map, and locates the ACPI RSDP.
 - Serial diagnostics and a repeatable QEMU boot test (`tools/run-qemu.sh
   --test`), wired into CI.
-- `ExitBootServices`, ELF64 kernel loading, and the hand-off to `kernel_main`.
-  initramfs loading follows.
+- `ExitBootServices`, ELF64 kernel loading from the loader's FAT volume, and the
+  hand-off to the bare-metal kernel: the loader builds identity and higher-half
+  page tables, installs a 64-bit GDT, and jumps to the kernel entry with a
+  `BootInfo` pointer in `rdi`. The kernel validates the boot contract and
+  reports the framebuffer, memory map, and ACPI RSDP over serial.
+- initramfs loading follows in Milestone 2.
 
 ## Milestone 2 — kernel mechanisms
 

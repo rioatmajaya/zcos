@@ -1,15 +1,18 @@
 #!/usr/bin/env sh
-# Build the ZC OS UEFI loader and package it into a bootable FAT image.
+# Build the ZC OS UEFI loader and kernel, and package them into a bootable
+# FAT image that QEMU/OVMF can start.
 #
 # Usage: tools/build-efi.sh [--test]
-#   --test  build with the qemu-exit feature so tools/run-qemu.sh --test can
-#           terminate the emulator with a status code.
+#   --test  build both the loader and the kernel with the qemu-exit feature so
+#           tools/run-qemu.sh --test can terminate the emulator with a status
+#           code once the kernel reaches its idle state.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
-target=x86_64-unknown-uefi
+uefi_target=x86_64-unknown-uefi
+none_target=x86_64-unknown-none
 image=build/zcos.img
 esp_size_mib=4
 features=""
@@ -18,17 +21,30 @@ if [ "${1:-}" = "--test" ]; then
     features="--features qemu-exit"
 fi
 
-if ! rustup target list --installed | grep -qx "$target"; then
-    echo "installing rust target $target"
-    rustup target add "$target"
+if ! rustup target list --installed | grep -qx "$uefi_target"; then
+    echo "installing rust target $uefi_target"
+    rustup target add "$uefi_target"
+fi
+if ! rustup target list --installed | grep -qx "$none_target"; then
+    echo "installing rust target $none_target"
+    rustup target add "$none_target"
 fi
 
 # shellcheck disable=SC2086
-cargo build -p zc-uefi-loader --target "$target" --release $features
+cargo build -p zc-uefi-loader --target "$uefi_target" --release $features
 
-efi="target/$target/release/zc-uefi-loader.efi"
+# shellcheck disable=SC2086
+cargo build --manifest-path kernel/zc-kernel-image/Cargo.toml \
+    --target "$none_target" --target-dir target --release $features
+
+efi="target/$uefi_target/release/zc-uefi-loader.efi"
+kernel="target/$none_target/release/zc-kernel"
 if [ ! -f "$efi" ]; then
     echo "error: expected $efi" >&2
+    exit 1
+fi
+if [ ! -f "$kernel" ]; then
+    echo "error: expected $kernel" >&2
     exit 1
 fi
 
@@ -44,5 +60,6 @@ dd if=/dev/zero of="$image" bs=1M count="$esp_size_mib" status=none
 mkfs.vfat "$image" >/dev/null
 mmd -i "$image" ::EFI ::EFI/BOOT
 mcopy -i "$image" "$efi" ::EFI/BOOT/BOOTX64.EFI
+mcopy -i "$image" "$kernel" ::EFI/BOOT/KERNEL.ELF
 
-echo "built $image from $efi"
+echo "built $image (loader + kernel)"

@@ -5,3 +5,16 @@
 # - debuginfo=2: crash addresses stay resolvable; it does not change codegen.
 [target.x86_64-unknown-uefi]
 rustflags = ["-C", "panic=abort", "-C", "no-redzone=y", "-C", "debuginfo=2"]
+
+# Flags for the bare-metal kernel image target.
+#
+# - relocation-model=static: the loader performs no relocation, so the kernel
+#   must be position-dependent and linked at its final address.
+# - no-redzone: an interrupt would otherwise clobber the red zone.
+[target.x86_64-unknown-none]
+rustflags = [
+    "-C", "relocation-model=static",
+    "-C", "panic=abort",
+    "-C", "no-redzone=y",
+    "-C", "debuginfo=2",
+]

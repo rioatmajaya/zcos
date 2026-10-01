@@ -84,6 +84,18 @@ pub const ACPI_TABLE_GUID: Guid =
         0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d,
     ]);
 
+/// EFI Loaded Image Protocol GUID.
+pub const LOADED_IMAGE_PROTOCOL_GUID: Guid =
+    Guid::new(0x5b1b_31a1, 0x9562, 0x11d2, [
+        0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b,
+    ]);
+
+/// EFI Simple File System Protocol GUID.
+pub const SIMPLE_FILE_SYSTEM_PROTOCOL_GUID: Guid =
+    Guid::new(0x964e_5b22, 0x6459, 0x11d2, [
+        0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b,
+    ]);
+
 /// Common header at the start of every UEFI table.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -203,6 +215,13 @@ pub type GetMemoryMap = unsafe extern "efiapi" fn(
     *mut u32,
 ) -> EfiStatus;
 
+/// `EFI_BOOT_SERVICES.AllocatePages`.
+///
+/// Allocates 4 KiB pages but does **not** guarantee any alignment beyond the
+/// page size, so callers needing a 2 MiB-aligned region must over-allocate and
+/// align up.
+pub type AllocatePages = unsafe extern "efiapi" fn(u32, u32, usize, *mut u64) -> EfiStatus;
+
 /// `EFI_BOOT_SERVICES.AllocatePool`.
 pub type AllocatePool = unsafe extern "efiapi" fn(u32, usize, *mut *mut c_void) -> EfiStatus;
 
@@ -245,7 +264,7 @@ pub struct BootServices {
     /// Restores the task priority level.
     pub restore_tpl: *mut c_void,
     /// Allocates pages.
-    pub allocate_pages: *mut c_void,
+    pub allocate_pages: AllocatePages,
     /// Frees pages.
     pub free_pages: *mut c_void,
     /// Retrieves the memory map. Offset 56.
@@ -333,6 +352,115 @@ pub struct BootServices {
 /// `EfiLoaderData`; memory owned by the loader and preserved after
 /// `ExitBootServices`.
 pub const EFI_LOADER_DATA: u32 = 2;
+
+/// `AllocateAnyPages` allocation type.
+pub const ALLOCATE_ANY_PAGES: u32 = 0;
+
+/// `EFI_FILE_MODE_READ`.
+pub const EFI_FILE_MODE_READ: u64 = 0x0000_0000_0000_0001;
+
+/// The EFI Loaded Image Protocol for the running image.
+///
+/// Only the prefix through `device_handle` is consumed; the handle identifies
+/// the volume the loader was booted from.
+#[repr(C)]
+pub struct LoadedImageProtocol {
+    /// Protocol revision.
+    pub revision: u32,
+    /// Handle of the parent image.
+    pub parent_handle: EfiHandle,
+    /// System table passed to the image.
+    pub system_table: *mut SystemTable,
+    /// Handle of the device the image was loaded from.
+    pub device_handle: EfiHandle,
+    /// Path of the image on that device.
+    pub file_path: *mut c_void,
+    /// Reserved.
+    pub reserved: *mut c_void,
+    /// Size of the load options.
+    pub load_options_size: u32,
+    /// Load options.
+    pub load_options: *mut c_void,
+    /// Base address of the image.
+    pub image_base: *mut c_void,
+    /// Size of the image.
+    pub image_size: u64,
+    /// Memory type of the image code.
+    pub image_code_type: u32,
+    /// Memory type of the image data.
+    pub image_data_type: u32,
+    /// Unloads the image.
+    pub unload: *mut c_void,
+}
+
+/// `EFI_SIMPLE_FILE_SYSTEM_PROTOCOL.OpenVolume`.
+pub type OpenVolume = unsafe extern "efiapi" fn(
+    *mut SimpleFileSystemProtocol,
+    *mut *mut FileProtocol,
+) -> EfiStatus;
+
+/// The EFI Simple File System Protocol.
+#[repr(C)]
+pub struct SimpleFileSystemProtocol {
+    /// Protocol revision; `0x0001_0000`.
+    pub revision: u64,
+    /// Opens the volume root directory.
+    pub open_volume: OpenVolume,
+}
+
+/// `EFI_FILE_PROTOCOL.Open`.
+pub type FileOpen = unsafe extern "efiapi" fn(
+    *mut FileProtocol,
+    *mut *mut FileProtocol,
+    *const u16,
+    u64,
+    u64,
+) -> EfiStatus;
+
+/// `EFI_FILE_PROTOCOL.Close`.
+pub type FileClose = unsafe extern "efiapi" fn(*mut FileProtocol) -> EfiStatus;
+
+/// `EFI_FILE_PROTOCOL.Read`.
+pub type FileRead =
+    unsafe extern "efiapi" fn(*mut FileProtocol, *mut usize, *mut c_void) -> EfiStatus;
+
+/// The EFI File Protocol.
+///
+/// Only `Open`, `Close`, and `Read` are called; the remaining slots are kept so
+/// their offsets stay correct.
+#[repr(C)]
+pub struct FileProtocol {
+    /// Protocol revision; `0x0001_0000`.
+    pub revision: u64,
+    /// Opens a file relative to this one.
+    pub open: FileOpen,
+    /// Closes this handle.
+    pub close: FileClose,
+    /// Deletes a file.
+    pub delete: *mut c_void,
+    /// Reads from the file. Offset 32.
+    pub read: FileRead,
+    /// Writes to the file.
+    pub write: *mut c_void,
+    /// Reads the current position.
+    pub get_position: *mut c_void,
+    /// Sets the current position.
+    pub set_position: *mut c_void,
+    /// Reads file information.
+    pub get_info: *mut c_void,
+    /// Sets file information.
+    pub set_info: *mut c_void,
+    /// Flushes pending writes.
+    pub flush: *mut c_void,
+    /// Opens a file with extra parameters.
+    pub open_ex: *mut c_void,
+    /// Reads with extra parameters.
+    pub read_ex: *mut c_void,
+    /// Writes with extra parameters.
+    pub write_ex: *mut c_void,
+    /// Flushes with extra parameters.
+    pub flush_ex: *mut c_void,
+}
 
 /// Describes one graphics mode.
 #[repr(C)]
@@ -463,6 +591,41 @@ mod tests {
         );
         assert_eq!(offset_of!(GraphicsOutputModeInformation, pixel_format), 12);
         assert_eq!(offset_of!(GraphicsOutputModeInformation, pixel_information), 16);
+    }
+
+    #[test]
+    fn loaded_image_offsets_match_specification() {
+        assert_eq!(size_of::<LoadedImageProtocol>(), 96);
+        assert_eq!(offset_of!(LoadedImageProtocol, system_table), 16);
+        assert_eq!(offset_of!(LoadedImageProtocol, device_handle), 24);
+        assert_eq!(offset_of!(LoadedImageProtocol, load_options), 56);
+        assert_eq!(offset_of!(LoadedImageProtocol, image_size), 72);
+    }
+
+    #[test]
+    fn simple_file_system_offsets_match_specification() {
+        assert_eq!(size_of::<SimpleFileSystemProtocol>(), 16);
+        assert_eq!(offset_of!(SimpleFileSystemProtocol, open_volume), 8);
+    }
+
+    #[test]
+    fn file_protocol_offsets_match_specification() {
+        assert_eq!(size_of::<FileProtocol>(), 120);
+        assert_eq!(offset_of!(FileProtocol, open), 8);
+        assert_eq!(offset_of!(FileProtocol, close), 16);
+        assert_eq!(offset_of!(FileProtocol, read), 32);
+    }
+
+    #[test]
+    fn file_protocol_guids_encode_expected_bytes() {
+        assert_eq!(
+            LOADED_IMAGE_PROTOCOL_GUID.data1.to_le_bytes(),
+            [0xa1, 0x31, 0x1b, 0x5b]
+        );
+        assert_eq!(
+            SIMPLE_FILE_SYSTEM_PROTOCOL_GUID.data1.to_le_bytes(),
+            [0x22, 0x5b, 0x4e, 0x96]
+        );
     }
 
     #[test]

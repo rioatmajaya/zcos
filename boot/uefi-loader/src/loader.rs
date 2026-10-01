@@ -1,9 +1,10 @@
-//! UEFI loader flow: firmware discovery and boot-metadata assembly.
+//! UEFI loader flow: firmware discovery, kernel loading, and the hand-off.
 //!
-//! This module runs only on the `x86_64-unknown-uefi` target. It stops short
-//! of `ExitBootServices`; the `MapKey` captured here is what the next
-//! increment will hand to that call.
+//! This module runs only on the `x86_64-unknown-uefi` target. It ends by
+//! leaving boot services, installing its own page tables, and jumping to the
+//! kernel entry point with a [`BootInfo`] pointer in `rdi`.
 
+use core::arch::asm;
 use core::ffi::c_void;
 use core::fmt::{self, Write};
 use core::mem::size_of;
@@ -13,17 +14,49 @@ use zc_abi::{
     BOOT_INFO_MAGIC, BOOT_PROTOCOL_VERSION, BootInfo, FramebufferInfo, MemoryRegion, PixelFormat,
 };
 
+use crate::elf::{self, ElfImage};
 use crate::memmap;
 use crate::serial;
 use crate::uefi::{
-    self, ACPI_20_TABLE_GUID, ACPI_TABLE_GUID, BootServices, EFI_BUFFER_TOO_SMALL,
-    EFI_INVALID_PARAMETER, EFI_LOADER_DATA, GRAPHICS_OUTPUT_PROTOCOL_GUID, GraphicsOutputProtocol,
-    MemoryDescriptor, SimpleTextOutputProtocol, SystemTable,
+    self, ACPI_20_TABLE_GUID, ACPI_TABLE_GUID, ALLOCATE_ANY_PAGES, BootServices,
+    EFI_BUFFER_TOO_SMALL, EFI_FILE_MODE_READ, EFI_INVALID_PARAMETER, EFI_LOADER_DATA, FileProtocol,
+    GRAPHICS_OUTPUT_PROTOCOL_GUID, GraphicsOutputProtocol, LOADED_IMAGE_PROTOCOL_GUID,
+    LoadedImageProtocol, MemoryDescriptor, SIMPLE_FILE_SYSTEM_PROTOCOL_GUID,
+    SimpleFileSystemProtocol, SimpleTextOutputProtocol, SystemTable,
 };
 use crate::uefi::{EfiHandle, EfiStatus};
 
+/// x86_64 base page size.
+const PAGE_SIZE: u64 = 4096;
+
+/// 2 MiB huge page, the granularity the kernel image is mapped at.
+const PAGE_2MIB: u64 = 2 * 1024 * 1024;
+
+/// Highest physical address the loader's identity map covers.
+const IDENTITY_LIMIT: u64 = 0x1_0000_0000;
+
+/// Pages reserved for reading the kernel ELF (1 MiB).
+const KERNEL_BUFFER_PAGES: usize = 256;
+
+/// Pages reserved for the kernel stack (64 KiB).
+const STACK_PAGES: usize = 16;
+
+/// Pages in the 2 MiB kernel image frame.
+const KERNEL_FRAME_PAGES: usize = 512;
+
+/// Page-table entry bits.
+const PRESENT: u64 = 1 << 0;
+const WRITABLE: u64 = 1 << 1;
+const HUGE: u64 = 1 << 7;
+
+/// 2 MiB identity-mapped page directories covering `0..IDENTITY_LIMIT`.
+const IDENTITY_PAGE_DIRECTORIES: usize = (IDENTITY_LIMIT / (PAGE_2MIB * 512)) as usize;
+
 /// Bytes of UTF-16 the console buffers before flushing.
 const CONSOLE_BUFFER: usize = 256;
+
+/// Path of the kernel image on the boot volume.
+const KERNEL_PATH: [u16; 21] = utf16z("\\EFI\\BOOT\\KERNEL.ELF");
 
 /// UEFI entry point used by firmware to start the ZC OS loader.
 ///
@@ -34,21 +67,19 @@ const CONSOLE_BUFFER: usize = 256;
 #[unsafe(no_mangle)]
 #[allow(private_interfaces)] // UEFI calls this symbol, not Rust callers.
 pub unsafe extern "efiapi" fn efi_main(
-    _image_handle: EfiHandle,
+    image_handle: EfiHandle,
     system_table: *mut SystemTable,
 ) -> EfiStatus {
     serial::init();
     serial::write_str("\nZC OS UEFI loader\n");
 
     if system_table.is_null() {
-        serial::write_str("fatal: null system table\n");
         return EFI_INVALID_PARAMETER;
     }
     // SAFETY: firmware passes a valid EFI_SYSTEM_TABLE pointer.
     let system_table = unsafe { &*system_table };
     if system_table.boot_services.is_null() || system_table.con_out.is_null() {
-        serial::write_str("fatal: missing boot services or console\n");
-        return EFI_INVALID_PARAMETER;
+        fatal("missing boot services or console");
     }
     // SAFETY: checked non-null above; firmware owns both tables for the
     // lifetime of this call.
@@ -83,59 +114,111 @@ pub unsafe extern "efiapi" fn efi_main(
         report(&mut console, format_args!("framebuffer unavailable\n"));
     }
 
-    let memory_map = capture_memory_map(boot_services);
-    let (memory_map_address, memory_map_len) = match &memory_map {
-        Some(map) => {
-            report(
-                &mut console,
-                format_args!(
-                    "memory map: {} regions, {} MiB usable, key {:#x}\n",
-                    map.len,
-                    map.usable_bytes / (1024 * 1024),
-                    map.map_key,
-                ),
-            );
-            (map.base as u64, map.len as u64)
-        }
-        None => {
-            report(&mut console, format_args!("memory map unavailable\n"));
-            (0, 0)
-        }
+    // Every allocation happens before the final GetMemoryMap below.
+    let Some(mut map_buffers) = MemoryMapBuffers::prepare(boot_services) else {
+        fatal("cannot allocate memory-map buffers");
     };
 
-    let rsdp = find_rsdp(system_table);
-    if rsdp != 0 {
-        report(&mut console, format_args!("ACPI RSDP at {:#x}\n", rsdp));
-    } else {
-        report(&mut console, format_args!("ACPI RSDP not found\n"));
-    }
-
-    // Assembled now and handed to the kernel in the next increment.
-    let boot_info = BootInfo {
-        magic: BOOT_INFO_MAGIC,
-        protocol_version: BOOT_PROTOCOL_VERSION,
-        flags: 0,
-        memory_map: memory_map_address,
-        memory_map_len,
-        initramfs_start: 0,
-        initramfs_len: 0,
-        rsdp,
-        framebuffer,
+    let Some(kernel_bytes) = read_kernel_image(image_handle, boot_services) else {
+        fatal("cannot read \\EFI\\BOOT\\KERNEL.ELF");
+    };
+    let image = match elf::parse(kernel_bytes) {
+        Ok(image) => image,
+        Err(_) => fatal("kernel image is not a valid ELF64"),
     };
     report(
         &mut console,
         format_args!(
-            "boot info ready: {} bytes, magic {:#x}\n",
-            size_of::<BootInfo>(),
-            boot_info.magic,
+            "kernel: {} bytes, {} segments, entry {:#x}, base {:#x}, span {:#x}\n",
+            kernel_bytes.len(),
+            image.segments().len(),
+            image.entry(),
+            image.vaddr_base(),
+            image.span(),
         ),
     );
 
-    // Next increment: final GetMemoryMap, then ExitBootServices(map_key) with
-    // no boot-service call in between. The console is flushed here and nothing
-    // is printed afterwards so that transition stays possible.
+    let Some(kernel_physical) = allocate_kernel_frame(boot_services) else {
+        fatal("cannot allocate a 2 MiB-aligned kernel frame");
+    };
+    if !copy_segments(kernel_bytes, &image, kernel_physical) {
+        fatal("kernel segments do not fit the frame");
+    }
+    report(
+        &mut console,
+        format_args!("kernel loaded at {:#x}\n", kernel_physical),
+    );
+
+    let Some(stack_base) = allocate_pages(boot_services, STACK_PAGES) else {
+        fatal("cannot allocate the kernel stack");
+    };
+    let stack_top = stack_base + (STACK_PAGES as u64) * PAGE_SIZE;
+
+    let Some(page_tables) = PageTables::build(boot_services, kernel_physical, &image) else {
+        fatal("cannot build page tables");
+    };
+    let Some(boot_info) = allocate_boot_info(boot_services) else {
+        fatal("cannot allocate boot info");
+    };
+
+    // From here on the console must stay untouched: ConOut is a boot service,
+    // and any boot-service call after the final GetMemoryMap invalidates the
+    // map key that ExitBootServices requires.
     console.flush();
-    halt();
+
+    let Some((region_count, map_key, usable_bytes)) = map_buffers.refresh(boot_services) else {
+        fatal("final GetMemoryMap failed");
+    };
+
+    // SAFETY: `boot_info` is a loader-owned allocation that outlives this call.
+    unsafe {
+        boot_info.write(BootInfo {
+            magic: BOOT_INFO_MAGIC,
+            protocol_version: BOOT_PROTOCOL_VERSION,
+            flags: 0,
+            memory_map: map_buffers.internal_address(),
+            memory_map_len: region_count as u64,
+            initramfs_start: 0,
+            initramfs_len: 0,
+            rsdp: find_rsdp(system_table),
+            framebuffer,
+        });
+    }
+
+    // Serial is direct port I/O, not a boot service, so it stays usable.
+    serial::print(format_args!(
+        "memory map: {} regions, {} MiB usable, key {:#x}\n",
+        region_count,
+        usable_bytes / (1024 * 1024),
+        map_key,
+    ));
+    serial::print(format_args!(
+        "boot info at {:#x}, page tables at {:#x}, stack top {:#x}\n",
+        boot_info as u64,
+        page_tables.pml4,
+        stack_top,
+    ));
+
+    // The firmware IDT and GDT live in memory that ExitBootServices releases,
+    // so install our own GDT and keep interrupts off across the transition.
+    load_gdt();
+    disable_interrupts();
+
+    exit_boot_services(boot_services, image_handle, &mut map_buffers);
+
+    serial::write_str("boot services exited; entering kernel\n");
+
+    // SAFETY: page tables map the kernel's virtual range, the stack is a
+    // loader-owned allocation, and `boot_info` is the structure the kernel
+    // expects in `rdi`.
+    unsafe {
+        jump_to_kernel(
+            page_tables.pml4,
+            stack_top,
+            boot_info as u64,
+            image.entry(),
+        )
+    }
 }
 
 /// Locates the GOP and reads the current mode into the boot ABI.
@@ -199,103 +282,467 @@ fn paint_framebuffer(framebuffer: FramebufferInfo) {
     }
 }
 
-/// A captured memory map in the loader-owned ABI.
-struct MemoryMap {
-    /// First internal region.
-    base: *mut MemoryRegion,
-    /// Number of internal regions.
-    len: usize,
-    /// Key the firmware expects at `ExitBootServices`.
-    map_key: usize,
-    /// Total bytes of usable RAM.
-    usable_bytes: u64,
-}
+/// Reads the kernel ELF from the volume the loader was booted from.
+///
+/// Returns a slice over a loader-owned 1 MiB buffer. The buffer is never
+/// freed, so the slice stays valid for the rest of the boot.
+fn read_kernel_image(
+    image_handle: EfiHandle,
+    boot_services: &BootServices,
+) -> Option<&'static [u8]> {
+    // SAFETY: `image_handle` is the handle firmware passed to `efi_main`.
+    let loaded = unsafe { open_protocol::<LoadedImageProtocol>(
+        boot_services,
+        image_handle,
+        &LOADED_IMAGE_PROTOCOL_GUID,
+    ) }?;
+    // SAFETY: `loaded` is a valid Loaded Image Protocol instance.
+    let device = unsafe { (*loaded).device_handle };
+    if device.is_null() {
+        return None;
+    }
 
-/// Reads the firmware memory map and converts it into internal regions.
-fn capture_memory_map(boot_services: &BootServices) -> Option<MemoryMap> {
-    let mut map_size = 0usize;
-    let mut map_key = 0usize;
-    let mut desc_size = 0usize;
-    let mut desc_version = 0u32;
+    // SAFETY: `device` came from the Loaded Image Protocol.
+    let filesystem = unsafe {
+        open_protocol::<SimpleFileSystemProtocol>(
+            boot_services,
+            device,
+            &SIMPLE_FILE_SYSTEM_PROTOCOL_GUID,
+        )
+    }?;
 
-    // Probe: with a null buffer the firmware reports the required size.
-    // SAFETY: standard boot-services call; a null buffer is the documented
-    // way to query the size.
+    let mut root: *mut FileProtocol = ptr::null_mut();
+    // SAFETY: `filesystem` is a valid Simple File System Protocol instance.
+    let status = unsafe { ((*filesystem).open_volume)(filesystem, &mut root) };
+    if uefi::is_error(status) || root.is_null() {
+        return None;
+    }
+
+    let mut file: *mut FileProtocol = ptr::null_mut();
+    // SAFETY: `root` is a valid directory handle.
     let status = unsafe {
-        (boot_services.get_memory_map)(
-            &mut map_size,
-            ptr::null_mut(),
-            &mut map_key,
-            &mut desc_size,
-            &mut desc_version,
+        ((*root).open)(
+            root,
+            &mut file,
+            KERNEL_PATH.as_ptr(),
+            EFI_FILE_MODE_READ,
+            0,
         )
     };
-    if uefi::is_error(status) && status != EFI_BUFFER_TOO_SMALL && status != EFI_INVALID_PARAMETER
-    {
+    if uefi::is_error(status) || file.is_null() {
+        // SAFETY: `root` is still open here.
+        unsafe { ((*root).close)(root) };
         return None;
     }
-    if desc_size < size_of::<MemoryDescriptor>() {
-        return None;
-    }
-    // Leave room for descriptors the firmware may add before the real call.
-    map_size = map_size
-        .saturating_add(desc_size.saturating_mul(2))
-        .saturating_add(64);
 
+    let buffer = allocate_pages(boot_services, KERNEL_BUFFER_PAGES);
+    let total = buffer.and_then(|base| read_all(file, base));
+
+    // SAFETY: both handles were opened above and are no longer needed.
+    unsafe {
+        ((*file).close)(file);
+        ((*root).close)(root);
+    }
+
+    let base = buffer?;
+    let total = total?;
+    // SAFETY: `base` is a loader-owned allocation that is never freed.
+    Some(unsafe { core::slice::from_raw_parts(base as *const u8, total) })
+}
+
+/// Reads `file` until end of file into `base`, returning the byte count.
+fn read_all(file: *mut FileProtocol, base: u64) -> Option<usize> {
+    let capacity = KERNEL_BUFFER_PAGES * PAGE_SIZE as usize;
+    let mut total = 0usize;
+    loop {
+        let mut chunk = capacity.checked_sub(total)?;
+        // SAFETY: `file` is an open handle and `base + total` has room for
+        // `chunk` bytes inside the buffer.
+        let status = unsafe {
+            ((*file).read)(file, &mut chunk, (base + total as u64) as *mut c_void)
+        };
+        if uefi::is_error(status) {
+            return None;
+        }
+        if chunk == 0 {
+            return Some(total);
+        }
+        total += chunk;
+    }
+}
+
+/// Opens a protocol interface on `handle`.
+///
+/// # Safety
+///
+/// `handle` must be a valid firmware handle for the duration of the call.
+unsafe fn open_protocol<T>(
+    boot_services: &BootServices,
+    handle: EfiHandle,
+    guid: &crate::uefi::Guid,
+) -> Option<*mut T> {
+    let mut interface: *mut c_void = ptr::null_mut();
+    // SAFETY: the caller guarantees `handle`; `interface` is written on success.
+    let status =
+        unsafe { (boot_services.handle_protocol)(handle, guid, &mut interface) };
+    if uefi::is_error(status) || interface.is_null() {
+        return None;
+    }
+    Some(interface.cast::<T>())
+}
+
+/// Allocates `pages` 4 KiB pages of loader-owned memory.
+fn allocate_pages(boot_services: &BootServices, pages: usize) -> Option<u64> {
+    let mut address = 0u64;
+    // SAFETY: standard boot-services allocation; `address` is written on success.
+    let status = unsafe {
+        (boot_services.allocate_pages)(ALLOCATE_ANY_PAGES, EFI_LOADER_DATA, pages, &mut address)
+    };
+    if uefi::is_error(status) || address == 0 {
+        return None;
+    }
+    Some(address)
+}
+
+/// Allocates a 2 MiB-aligned frame for the kernel image.
+///
+/// `AllocatePages` only guarantees 4 KiB alignment, so this over-allocates and
+/// aligns up, then verifies the result is inside the identity map.
+fn allocate_kernel_frame(boot_services: &BootServices) -> Option<u64> {
+    let total_pages = KERNEL_FRAME_PAGES * 2;
+    let base = allocate_pages(boot_services, total_pages)?;
+    let aligned = (base + PAGE_2MIB - 1) & !(PAGE_2MIB - 1);
+
+    let region_end = aligned.checked_add(PAGE_2MIB)?;
+    let allocated_end = base + (total_pages as u64) * PAGE_SIZE;
+    if region_end > allocated_end || region_end > IDENTITY_LIMIT {
+        return None;
+    }
+    Some(aligned)
+}
+
+/// Copies each `PT_LOAD` segment to its offset inside the kernel frame.
+fn copy_segments(bytes: &[u8], image: &ElfImage, frame: u64) -> bool {
+    let base = image.vaddr_base();
+    for segment in image.segments() {
+        let destination = frame + (segment.vaddr - base);
+        if destination + segment.memsz > frame + PAGE_2MIB {
+            return false;
+        }
+        let start = segment.offset as usize;
+        let end = start + segment.filesz as usize;
+        let source = &bytes[start..end];
+
+        // SAFETY: the destination lies inside the frame we allocated, and the
+        // copy plus zero-fill stays within the segment's memory size.
+        unsafe {
+            ptr::copy_nonoverlapping(source.as_ptr(), destination as *mut u8, source.len());
+            let tail = (segment.memsz - segment.filesz) as usize;
+            ptr::write_bytes((destination + segment.filesz) as *mut u8, 0, tail);
+        }
+    }
+    true
+}
+
+/// Allocates storage for the boot ABI structure.
+///
+/// It must not live on the loader's stack: that stack belongs to firmware and
+/// may be reclaimed by `ExitBootServices`.
+fn allocate_boot_info(boot_services: &BootServices) -> Option<*mut BootInfo> {
     let mut raw: *mut c_void = ptr::null_mut();
     // SAFETY: standard pool allocation; `raw` is written on success.
-    let status = unsafe { (boot_services.allocate_pool)(EFI_LOADER_DATA, map_size, &mut raw) };
+    let status =
+        unsafe { (boot_services.allocate_pool)(EFI_LOADER_DATA, size_of::<BootInfo>(), &mut raw) };
     if uefi::is_error(status) || raw.is_null() {
         return None;
     }
-    let raw = raw.cast::<MemoryDescriptor>();
+    Some(raw.cast::<BootInfo>())
+}
 
-    // SAFETY: `raw` points to `map_size` bytes of pool memory.
-    let status = unsafe {
-        (boot_services.get_memory_map)(
-            &mut map_size,
-            raw,
-            &mut map_key,
-            &mut desc_size,
-            &mut desc_version,
-        )
+/// The page tables the kernel starts with.
+struct PageTables {
+    /// Physical address of the PML4, loaded into `CR3`.
+    pml4: u64,
+}
+
+impl PageTables {
+    /// Builds identity and kernel mappings.
+    fn build(
+        boot_services: &BootServices,
+        kernel_physical: u64,
+        image: &ElfImage,
+    ) -> Option<Self> {
+        let pages = 2 + IDENTITY_PAGE_DIRECTORIES + 2;
+        let base = allocate_pages(boot_services, pages)?;
+        let pml4 = base;
+        let pdpt_low = base + PAGE_SIZE;
+        let first_pd = base + 2 * PAGE_SIZE;
+        let pdpt_high = first_pd + (IDENTITY_PAGE_DIRECTORIES as u64) * PAGE_SIZE;
+        let pd_high = pdpt_high + PAGE_SIZE;
+
+        let kernel_base = image.vaddr_base();
+        if (kernel_base >> 39) & 0x1FF != 511 {
+            return None;
+        }
+
+        // SAFETY: all four regions are inside the pages just allocated.
+        unsafe {
+            ptr::write_bytes(pml4 as *mut u8, 0, pages * PAGE_SIZE as usize);
+
+            write_entry(pml4, 0, pdpt_low | PRESENT | WRITABLE);
+            write_entry(pml4, 511, pdpt_high | PRESENT | WRITABLE);
+
+            for index in 0..IDENTITY_PAGE_DIRECTORIES {
+                write_entry(
+                    pdpt_low,
+                    index,
+                    (first_pd + (index as u64) * PAGE_SIZE) | PRESENT | WRITABLE,
+                );
+            }
+
+            for directory in 0..IDENTITY_PAGE_DIRECTORIES {
+                let pd = first_pd + (directory as u64) * PAGE_SIZE;
+                for entry in 0..512 {
+                    let physical = ((directory * 512 + entry) as u64) << 21;
+                    write_entry(pd, entry, physical | PRESENT | WRITABLE | HUGE);
+                }
+            }
+
+            let pdpt_index = ((kernel_base >> 30) & 0x1FF) as usize;
+            write_entry(pdpt_high, pdpt_index, pd_high | PRESENT | WRITABLE);
+            let pd_index = ((kernel_base >> 21) & 0x1FF) as usize;
+            write_entry(pd_high, pd_index, kernel_physical | PRESENT | WRITABLE | HUGE);
+        }
+
+        Some(Self { pml4 })
+    }
+}
+
+/// Writes one 8-byte page-table entry at `table[index]`.
+///
+/// # Safety
+///
+/// `table` must point to a page-table page owned by the loader.
+unsafe fn write_entry(table: u64, index: usize, value: u64) {
+    // SAFETY: the caller guarantees the table is valid for 512 entries.
+    unsafe { ptr::write_volatile((table + (index as u64) * 8) as *mut u64, value) };
+}
+
+/// A static 64-bit GDT: null, kernel code, and kernel data descriptors.
+#[repr(C, align(16))]
+struct Gdt([u64; 3]);
+
+static GDT: Gdt = Gdt([
+    0,
+    0x00AF_9A00_0000_FFFF, // 64-bit code, ring 0
+    0x00CF_9200_0000_FFFF, // data, ring 0
+]);
+
+/// Pointer operand for `lgdt`.
+#[repr(C, packed)]
+struct DescriptorTablePointer {
+    limit: u16,
+    base: u64,
+}
+
+/// Installs the loader's own GDT.
+fn load_gdt() {
+    let pointer = DescriptorTablePointer {
+        limit: (size_of::<Gdt>() - 1) as u16,
+        base: GDT.0.as_ptr() as u64,
     };
-    if uefi::is_error(status) {
-        return None;
+    // SAFETY: `pointer` describes the static GDT, and the far return reloads
+    // CS from selector 0x08 after loading the new table.
+    unsafe {
+        asm!(
+            "lgdt [{pointer}]",
+            "push 0x08",
+            "lea rax, [rip + 2f]",
+            "push rax",
+            "retfq",
+            "2:",
+            "mov ax, 0x10",
+            "mov ds, ax",
+            "mov es, ax",
+            "mov ss, ax",
+            "mov fs, ax",
+            "mov gs, ax",
+            pointer = in(reg) &pointer,
+            out("rax") _,
+        );
     }
-    let count = map_size / desc_size;
-    if count == 0 {
-        return None;
-    }
+}
 
-    // Loader-owned region array; `EfiLoaderData` survives ExitBootServices.
-    let bytes = count.saturating_mul(size_of::<MemoryRegion>());
-    let mut regions: *mut c_void = ptr::null_mut();
-    // SAFETY: standard pool allocation; `regions` is written on success.
-    let status = unsafe { (boot_services.allocate_pool)(EFI_LOADER_DATA, bytes, &mut regions) };
-    if uefi::is_error(status) || regions.is_null() {
-        return None;
-    }
-    let regions = regions.cast::<MemoryRegion>();
+/// Disables interrupts.
+fn disable_interrupts() {
+    // SAFETY: `cli` is always valid at ring 0.
+    unsafe { asm!("cli", options(nomem, nostack)) };
+}
 
-    // SAFETY: `regions` is a fresh allocation of `count` aligned slots.
-    let out = unsafe { core::slice::from_raw_parts_mut(regions, count) };
-    // SAFETY: `raw` holds `count` descriptors of `desc_size` stride.
-    let written = unsafe { memmap::convert_all(raw, count, desc_size, out) };
-
-    let mut usable_bytes = 0u64;
-    for region in &out[..written] {
-        if region.kind.is_usable() {
-            usable_bytes = usable_bytes.saturating_add(region.len);
+/// Leaves boot services, retrying once if the firmware rejects the map key.
+fn exit_boot_services(
+    boot_services: &BootServices,
+    image_handle: EfiHandle,
+    map_buffers: &mut MemoryMapBuffers,
+) {
+    for attempt in 0..2 {
+        // SAFETY: `image_handle` is the image being started and the key comes
+        // from the most recent GetMemoryMap.
+        let status = unsafe { (boot_services.exit_boot_services)(image_handle, map_buffers.map_key) };
+        if !uefi::is_error(status) {
+            return;
+        }
+        if attempt == 1 {
+            fatal("ExitBootServices was rejected");
+        }
+        // The key went stale; re-read the map and try once more.
+        if map_buffers.refresh(boot_services).is_none() {
+            fatal("cannot refresh the memory map for ExitBootServices");
         }
     }
+}
 
-    Some(MemoryMap {
-        base: regions,
-        len: written,
-        map_key,
-        usable_bytes,
-    })
+/// Switches to the kernel's address space and stack, then jumps to `entry`.
+///
+/// # Safety
+///
+/// `pml4` must map `entry`, `stack_top` must be a writable stack, and
+/// `boot_info` must point to a valid [`BootInfo`].
+unsafe fn jump_to_kernel(pml4: u64, stack_top: u64, boot_info: u64, entry: u64) -> ! {
+    // SAFETY: the caller guarantees the mappings and pointers. The stack is
+    // installed before CR3 so the firmware stack is abandoned immediately.
+    unsafe {
+        asm!(
+            "mov rsp, {stack}",
+            "mov cr3, {pml4}",
+            "mov rdi, {info}",
+            "jmp {entry}",
+            stack = in(reg) stack_top,
+            pml4 = in(reg) pml4,
+            info = in(reg) boot_info,
+            entry = in(reg) entry,
+            options(noreturn)
+        );
+    }
+}
+
+/// Loader-owned buffers for the firmware memory map.
+struct MemoryMapBuffers {
+    raw: *mut MemoryDescriptor,
+    raw_size: usize,
+    internal: *mut MemoryRegion,
+    internal_capacity: usize,
+    map_key: usize,
+}
+
+impl MemoryMapBuffers {
+    /// Probes the map and allocates buffers large enough for the final read.
+    fn prepare(boot_services: &BootServices) -> Option<Self> {
+        let mut map_size = 0usize;
+        let mut map_key = 0usize;
+        let mut desc_size = 0usize;
+        let mut desc_version = 0u32;
+
+        // SAFETY: standard boot-services probe with a null buffer.
+        let status = unsafe {
+            (boot_services.get_memory_map)(
+                &mut map_size,
+                ptr::null_mut(),
+                &mut map_key,
+                &mut desc_size,
+                &mut desc_version,
+            )
+        };
+        if uefi::is_error(status)
+            && status != EFI_BUFFER_TOO_SMALL
+            && status != EFI_INVALID_PARAMETER
+        {
+            return None;
+        }
+        if desc_size < size_of::<MemoryDescriptor>() {
+            return None;
+        }
+        // Leave room for descriptors added by the allocations still to come.
+        map_size = map_size
+            .saturating_add(desc_size.saturating_mul(4))
+            .saturating_add(256);
+
+        let mut raw: *mut c_void = ptr::null_mut();
+        // SAFETY: standard pool allocation; `raw` is written on success.
+        let status =
+            unsafe { (boot_services.allocate_pool)(EFI_LOADER_DATA, map_size, &mut raw) };
+        if uefi::is_error(status) || raw.is_null() {
+            return None;
+        }
+
+        let capacity = map_size / desc_size + 4;
+        let internal_bytes = capacity.saturating_mul(size_of::<MemoryRegion>());
+        let mut internal: *mut c_void = ptr::null_mut();
+        // SAFETY: standard pool allocation; `internal` is written on success.
+        let status = unsafe {
+            (boot_services.allocate_pool)(EFI_LOADER_DATA, internal_bytes, &mut internal)
+        };
+        if uefi::is_error(status) || internal.is_null() {
+            return None;
+        }
+
+        Some(Self {
+            raw: raw.cast::<MemoryDescriptor>(),
+            raw_size: map_size,
+            internal: internal.cast::<MemoryRegion>(),
+            internal_capacity: capacity,
+            map_key,
+        })
+    }
+
+    /// Reads the current map, converts it, and returns `(regions, key, usable)`.
+    ///
+    /// Performs no allocation, so it is safe to call immediately before
+    /// `ExitBootServices`.
+    fn refresh(&mut self, boot_services: &BootServices) -> Option<(usize, usize, u64)> {
+        let mut map_size = self.raw_size;
+        let mut map_key = 0usize;
+        let mut desc_size = 0usize;
+        let mut desc_version = 0u32;
+
+        // SAFETY: `self.raw` points to `self.raw_size` bytes of pool memory.
+        let status = unsafe {
+            (boot_services.get_memory_map)(
+                &mut map_size,
+                self.raw,
+                &mut map_key,
+                &mut desc_size,
+                &mut desc_version,
+            )
+        };
+        if uefi::is_error(status) || desc_size == 0 {
+            return None;
+        }
+
+        let count = map_size / desc_size;
+        if count > self.internal_capacity {
+            return None;
+        }
+        // SAFETY: `self.internal` has room for `internal_capacity` regions.
+        let out = unsafe { core::slice::from_raw_parts_mut(self.internal, count) };
+        // SAFETY: `self.raw` holds `count` descriptors of `desc_size` stride.
+        let written = unsafe { memmap::convert_all(self.raw, count, desc_size, out) };
+
+        let mut usable = 0u64;
+        for region in &out[..written] {
+            if region.kind.is_usable() {
+                usable = usable.saturating_add(region.len);
+            }
+        }
+
+        self.map_key = map_key;
+        Some((written, map_key, usable))
+    }
+
+    /// Physical address of the converted region array.
+    fn internal_address(&self) -> u64 {
+        self.internal as u64
+    }
 }
 
 /// Finds the ACPI RSDP in the configuration table.
@@ -348,22 +795,44 @@ fn rsdp_is_valid(address: u64) -> bool {
     checksum == 0
 }
 
-/// Writes formatted diagnostics to both the serial port and the UEFI console.
+/// Writes formatted diagnostics to the UEFI console.
+///
+/// The console is the human-facing boot display; the load-bearing markers (the
+/// memory map and the hand-off addresses) are written to the serial port
+/// separately so a headless run captures them exactly once. OVMF echoes the
+/// console to its serial port, so mirroring here would only duplicate the log.
 fn report(console: &mut Console, args: fmt::Arguments<'_>) {
     let _ = console.write_fmt(args);
-    serial::print(args);
 }
 
-/// Stops the loader.
-///
-/// With the `qemu-exit` feature the loader terminates the emulator through
-/// `isa-debug-exit` so a CI run ends with a status code; otherwise it halts.
-fn halt() -> ! {
+/// Reports an unrecoverable error and stops.
+fn fatal(message: &str) -> ! {
+    serial::write_str("fatal: ");
+    serial::write_str(message);
+    serial::write_str("\n");
     #[cfg(feature = "qemu-exit")]
-    serial::outb(0x0501, 0x10);
+    serial::outb(0x0501, 0x11);
     loop {
         core::hint::spin_loop();
     }
+}
+
+/// Encodes an ASCII string as a NUL-terminated UTF-16 array at compile time.
+const fn utf16z<const N: usize>(value: &str) -> [u16; N] {
+    let bytes = value.as_bytes();
+    assert!(
+        bytes.len() + 1 == N,
+        "UTF-16 literal length must match its array"
+    );
+
+    let mut result = [0_u16; N];
+    let mut index = 0;
+    while index < bytes.len() {
+        assert!(bytes[index].is_ascii(), "early boot text must be ASCII");
+        result[index] = bytes[index] as u16;
+        index += 1;
+    }
+    result
 }
 
 /// Buffered writer over the firmware's Simple Text Output Protocol.
@@ -419,5 +888,32 @@ impl fmt::Write for Console {
             });
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kernel_path_encodes_ascii_utf16() {
+        assert_eq!(KERNEL_PATH.last(), Some(&0));
+        assert_eq!(KERNEL_PATH[0], u16::from(b'\\'));
+        assert_eq!(KERNEL_PATH[9], u16::from(b'\\'));
+        let decoded = KERNEL_PATH
+            .iter()
+            .take_while(|unit| **unit != 0)
+            .map(|unit| *unit as u8)
+            .collect::<std::vec::Vec<_>>();
+        assert_eq!(decoded, b"\\EFI\\BOOT\\KERNEL.ELF");
+    }
+
+    #[test]
+    fn identity_map_covers_four_gibibytes() {
+        assert_eq!(IDENTITY_PAGE_DIRECTORIES, 4);
+        assert_eq!(
+            (IDENTITY_PAGE_DIRECTORIES as u64) * 512 * PAGE_2MIB,
+            IDENTITY_LIMIT
+        );
     }
 }

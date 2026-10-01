@@ -38,6 +38,16 @@ kernel and captured the final memory map; only then may it call
 `GetMemoryMap` and `ExitBootServices`, because any such call invalidates the
 map key.
 
+The kernel is a freestanding `x86_64-unknown-none` ELF (`ET_EXEC`) linked at
+the higher-half base `0xFFFFFFFF80000000`. Before `ExitBootServices` the loader
+allocates a 2 MiB-aligned physical frame for the kernel image and a 64 KiB
+stack, copies each `PT_LOAD` segment into the frame, and builds its own page
+tables: an identity map of `0..4 GiB` plus a 2 MiB huge page mapping the kernel
+base to the frame. It installs a 64-bit GDT, calls `ExitBootServices` with the
+final map key, then sets `CR3`, installs `rsp`, places the `BootInfo` pointer in
+`rdi`, and jumps to the kernel's `e_entry`. The kernel entry point is `_start`;
+interrupts stay disabled across the transition.
+
 ## IPC and authority
 
 ZC OS uses synchronous message passing initially. Kernel objects are referenced

@@ -1,0 +1,37 @@
+[package]
+name = "zc-kernel-image"
+description = "Bootable ZC OS kernel image for x86_64 bare metal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "zc-kernel"
+path = "src/main.rs"
+
+[dependencies]
+zc-abi = { path = "../../libs/zc-abi" }
+
+[features]
+# Terminate QEMU through isa-debug-exit so an automated boot test ends with a
+# status code. Never enable this for a real firmware build.
+qemu-exit = []
+
+[lints]
+workspace = true
+
+# When this crate is built standalone (outside the host workspace) it is its
+# own workspace root, so the `*.workspace = true` references in this manifest
+# and in `zc-abi` resolve to the concrete values below.
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/zc-os/zcos"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"

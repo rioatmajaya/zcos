@@ -27,8 +27,10 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y qemu-system-x86 ovmf mtools dosfstools
-    - name: Install UEFI target
-      run: rustup target add x86_64-unknown-uefi
+    - name: Install boot targets
+      run: |
+        rustup target add x86_64-unknown-uefi
+        rustup target add x86_64-unknown-none
     - name: Build bootable image
       run: ./tools/build-efi.sh --test
     - name: Boot test in QEMU
@@ -36,6 +38,10 @@ jobs:
     - name: Check boot diagnostics
       run: |
         cat build/boot.log
-        grep -q "memory map:" build/boot.log
+        grep -q "ZC OS UEFI loader" build/boot.log
         grep -q "framebuffer" build/boot.log
-        grep -q "ACPI RSDP" build/boot.log
+        grep -q "memory map:" build/boot.log
+        grep -q "entering kernel" build/boot.log
+        grep -q "ZC OS kernel" build/boot.log
+        grep -q "boot protocol v2 ok" build/boot.log
+        grep -q "kernel reached idle state" build/boot.log

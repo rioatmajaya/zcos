@@ -35,6 +35,13 @@ if command -v rustup >/dev/null 2>&1; then
         printf 'missing: x86_64-unknown-uefi target (install with: rustup target add x86_64-unknown-uefi)\n' >&2
         missing=1
     fi
+
+    if rustup target list --installed | grep -qx 'x86_64-unknown-none'; then
+        printf 'found: x86_64-unknown-none target\n'
+    else
+        printf 'missing: x86_64-unknown-none target (install with: rustup target add x86_64-unknown-none)\n' >&2
+        missing=1
+    fi
 fi
 
 if [ -d /usr/share/OVMF ] || [ -d /usr/share/ovmf ]; then
