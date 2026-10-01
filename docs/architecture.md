@@ -30,13 +30,6 @@ uses the Simple Text Output Protocol only for early diagnostics. It must retain
 boot-services ownership until it has loaded the kernel and captured the final
 memory map; only then may it call `ExitBootServices`.
 
-## Early physical memory
-
-Before a general allocator can exist, the kernel consumes only UEFI
-`EfiConventionalMemory` regions through a monotonic, page-aligned frame
-allocator. It never allocates from firmware-reserved regions and treats integer
-overflow in loader-supplied addresses as invalid memory rather than wrapping.
-
 ## IPC and authority
 
 ZC OS uses synchronous message passing initially. Kernel objects are referenced
