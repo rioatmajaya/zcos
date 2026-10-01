@@ -17,7 +17,6 @@
 #[cfg(not(target_os = "uefi"))]
 extern crate std;
 
-mod elf;
 mod memmap;
 mod serial;
 mod uefi;

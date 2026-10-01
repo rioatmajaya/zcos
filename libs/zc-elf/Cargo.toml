@@ -1,0 +1,10 @@
+[package]
+name = "zc-elf"
+description = "Minimal ELF64 reader shared by the loader and the kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

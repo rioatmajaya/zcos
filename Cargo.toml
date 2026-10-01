@@ -4,13 +4,17 @@ members = [
     "boot/uefi-loader",
     "kernel/zc-kernel",
     "libs/zc-abi",
+    "libs/zc-elf",
 ]
 
 # The kernel image is a freestanding `x86_64-unknown-none` binary. It is built
 # by the boot tooling with an explicit target, so it is excluded from the host
 # workspace (its `no_std`/`no_main` binary would otherwise fail `cargo test`).
+# The userspace tasks are freestanding for the same reason.
 exclude = [
     "kernel/zc-kernel-image",
+    "user/zc-tasks",
+    "user/zc-user",
 ]
 
 [workspace.package]

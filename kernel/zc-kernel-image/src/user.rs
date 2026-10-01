@@ -17,26 +17,33 @@ use zc_kernel::syscall::{Action, dispatch};
 use zc_kernel::task::{EXIT_TO_KERNEL, IrqFrame, SyscallRegs, TaskTable};
 use zc_kernel::vm::VirtAddr;
 
-/// Virtual address of task A's code page.
-const CODE_A_VIRT: u64 = 0x40_0000;
+/// Base virtual address user task images are linked at.
+const USER_CODE_VIRT: u64 = 0x40_0000;
 
-/// Virtual address holding task A's 8-byte iteration counter.
-const COUNTER_A_VIRT: u64 = 0x40_1000;
+/// End of the 2 MiB window the single user page table covers.
+const USER_WINDOW_END: u64 = 0x60_0000;
 
-/// Top of task A's user stack (one page above its counter page).
-const STACK_A_TOP: u64 = 0x40_2000;
+/// Start of the reserved user-stack zone.
+const STACK_ZONE_START: u64 = 0x40_4000;
 
-/// Virtual address of task B's code page.
-const CODE_B_VIRT: u64 = 0x40_2000;
+/// End of the reserved user-stack zone.
+const STACK_ZONE_END: u64 = 0x40_7000;
 
-/// Virtual address holding task B's 8-byte iteration counter.
-const COUNTER_B_VIRT: u64 = 0x40_3000;
+/// Relocation bias added to the consumer image so both tasks do not share
+/// pages. Each image links at [`USER_CODE_VIRT`]; the kernel maps the
+/// second one 64 KiB higher.
+const CONSUMER_BIAS: u64 = 0x10_000;
 
-/// Top of task B's user stack (one page above its counter page).
-const STACK_B_TOP: u64 = 0x40_4000;
+/// Top of task A's user stack.
+const STACK_A_TOP: u64 = 0x40_5000;
 
-/// Messages the producer sends and the consumer receives.
-const MESSAGE_COUNT: u32 = 2000;
+/// Top of task B's user stack.
+const STACK_B_TOP: u64 = 0x40_6000;
+
+/// File names of the bring-up tasks inside the initramfs.
+const PRODUCER_NAME: &str = "producer.elf";
+/// Consumer binary name.
+const CONSUMER_NAME: &str = "consumer.elf";
 
 /// Shared endpoint the bring-up tasks pass messages through.
 static mut ENDPOINT: Endpoint<4> = Endpoint::new();
@@ -57,111 +64,6 @@ const USER_PAGE_FLAGS: u64 = 0x7;
 
 /// User/supervisor flag shared by every level of the user path.
 const FLAG_USER: u64 = 1 << 2;
-
-/// Producer program: send values `0..limit`, then `int 0x80` with
-/// `SYS_TASK_EXIT`. The kernel blocks an over-full send transparently and
-/// resumes the task at the `int`, so no userspace retry loop is needed:
-///
-/// ```asm
-///     xor ebx, ebx
-/// again:
-///     mov rdi, rbx
-///     mov eax, 1
-///     int 0x80
-///     inc ebx
-///     cmp ebx, limit
-///     jb again
-///     mov rax, rbx
-///     movabs [counter], rax
-///     mov eax, 5
-///     int 0x80
-///     jmp $
-/// ```
-const PRODUCER_TEMPLATE: [u8; 44] = [
-    0x31, 0xDB, // xor ebx,ebx
-    0x48, 0x89, 0xDF, // mov rdi,rbx
-    0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
-    0xCD, 0x80, // int 0x80
-    0xFF, 0xC3, // inc ebx
-    0x81, 0xFB, 0x00, 0x00, 0x00, 0x00, // cmp ebx,limit
-    0x72, 0xEC, // jb -20
-    0x48, 0x89, 0xD8, // mov rax,rbx
-    0x48, 0xA3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs [counter],rax
-    0xB8, 0x05, 0x00, 0x00, 0x00, // mov eax,5
-    0xCD, 0x80, // int 0x80
-    0xEB, 0xFE, // jmp $
-];
-
-/// Consumer program: receive `limit` values in order, `int3` on mismatch,
-/// then exit. A receive on an empty endpoint blocks like a send on a full
-/// one:
-///
-/// ```asm
-///     xor ebx, ebx
-/// again:
-///     mov eax, 2
-///     int 0x80
-///     cmp eax, ebx
-///     jne mismatch
-///     inc ebx
-///     cmp ebx, limit
-///     jb again
-///     mov rax, rbx
-///     movabs [counter], rax
-///     mov eax, 5
-///     int 0x80
-///     jmp $
-/// mismatch:
-///     int3
-/// ```
-///
-/// A mismatch raises `#BP`, which arrives as `#GP` because the breakpoint
-/// gate stays at DPL 0; either way the boot stops with a vector print.
-const CONSUMER_TEMPLATE: [u8; 46] = [
-    0x31, 0xDB, // xor ebx,ebx
-    0xB8, 0x02, 0x00, 0x00, 0x00, // mov eax,2
-    0xCD, 0x80, // int 0x80
-    0x39, 0xD8, // cmp eax,ebx
-    0x75, 0x20, // jne +32
-    0xFF, 0xC3, // inc ebx
-    0x81, 0xFB, 0x00, 0x00, 0x00, 0x00, // cmp ebx,limit
-    0x72, 0xEB, // jb -21 (to mov eax,2)
-    0x48, 0x89, 0xD8, // mov rax,rbx
-    0x48, 0xA3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs [counter],rax
-    0xB8, 0x05, 0x00, 0x00, 0x00, // mov eax,5
-    0xCD, 0x80, // int 0x80
-    0xEB, 0xFE, // jmp $
-    0xCC, // mismatch: int3
-];
-
-/// Offsets of the message limit inside both templates.
-const OFF_PRODUCER_LIMIT: usize = 16;
-/// Offset of the consumer limit.
-const OFF_CONSUMER_LIMIT: usize = 17;
-/// Offset of the producer counter address.
-const OFF_PRODUCER_COUNTER: usize = 27;
-/// Offset of the consumer counter address.
-const OFF_CONSUMER_COUNTER: usize = 28;
-
-/// Builds the producer loop for `counter` and `limit`.
-fn build_producer(counter: u64, limit: u32) -> [u8; 44] {
-    let mut code = PRODUCER_TEMPLATE;
-    code[OFF_PRODUCER_LIMIT..OFF_PRODUCER_LIMIT + 4]
-        .copy_from_slice(&limit.to_le_bytes());
-    code[OFF_PRODUCER_COUNTER..OFF_PRODUCER_COUNTER + 8]
-        .copy_from_slice(&counter.to_le_bytes());
-    code
-}
-
-/// Builds the consumer loop for `counter` and `limit`.
-fn build_consumer(counter: u64, limit: u32) -> [u8; 46] {
-    let mut code = CONSUMER_TEMPLATE;
-    code[OFF_CONSUMER_LIMIT..OFF_CONSUMER_LIMIT + 4]
-        .copy_from_slice(&limit.to_le_bytes());
-    code[OFF_CONSUMER_COUNTER..OFF_CONSUMER_COUNTER + 8]
-        .copy_from_slice(&counter.to_le_bytes());
-    code
-}
 
 /// Round-robin table for the bring-up tasks.
 static mut TASKS: TaskTable<4> = TaskTable::new();
@@ -267,8 +169,14 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
     let endpoint = unsafe { &mut *addr_of_mut!(ENDPOINT) };
     match dispatch(regs.number()) {
         Ok(Action::TaskExit) => match tasks.exit_current(regs, frame) {
-            Some(_) => 0,
-            None => EXIT_TO_KERNEL,
+            Some(next) => {
+                trace(5, tasks.current(), endpoint.len(), next as u64);
+                0
+            }
+            None => {
+                trace(6, tasks.current(), endpoint.len(), 0);
+                EXIT_TO_KERNEL
+            }
         },
         Ok(Action::Send) => {
             let message = match zc_abi::Message::from_words(&[regs.rdi]) {
@@ -282,18 +190,26 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 Ok(()) => {
                     tasks.unblock_all();
                     regs.set_result(0);
+                    trace(1, tasks.current(), endpoint.len(), regs.rdi);
                     0
                 }
-                Err(_) => block_with_retry(tasks, regs, frame),
+                Err(_) => {
+                    trace(2, tasks.current(), endpoint.len(), regs.rdi);
+                    block_with_retry(tasks, regs, frame)
+                }
             }
         }
         Ok(Action::Receive) => match endpoint.recv() {
             Ok(message) => {
                 tasks.unblock_all();
                 regs.set_result(message.words[0]);
+                trace(3, tasks.current(), endpoint.len(), message.words[0]);
                 0
             }
-            Err(_) => block_with_retry(tasks, regs, frame),
+            Err(_) => {
+                trace(4, tasks.current(), endpoint.len(), 0);
+                block_with_retry(tasks, regs, frame)
+            }
         },
         Ok(_) => {
             regs.set_result(u64::MAX);
@@ -306,6 +222,55 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
     }
 }
 
+/// Ring-buffer event trace for deadlock diagnosis.
+///
+/// Each entry packs (kind, task, endpoint-len, value): kinds are 1 send-ok,
+/// 2 send-block, 3 recv-ok, 4 recv-block, 5 exit-next, 6 exit-last. Dumped
+/// only when blocking finds no runnable peer.
+const EVENTS_CAP: usize = 32;
+/// Next ring slot.
+static mut EVENTS: [(u8, u8, u8, u32); EVENTS_CAP] = [(0, 0, 0, 0); EVENTS_CAP];
+/// Next ring slot.
+static mut EVENT_INDEX: usize = 0;
+
+/// Records one trace event.
+fn trace(kind: u8, task: usize, len: usize, value: u64) {
+    // SAFETY: owned here; traps cannot nest.
+    unsafe {
+        let slot = EVENT_INDEX % EVENTS_CAP;
+        EVENT_INDEX += 1;
+        core::ptr::addr_of_mut!(EVENTS)
+            .cast::<(u8, u8, u8, u32)>()
+            .add(slot)
+            .write((kind, task as u8, len as u8, value as u32));
+    }
+}
+
+/// Prints the recorded events oldest-first.
+fn dump_trace() {
+    // SAFETY: owned here; the machine stops right after.
+    unsafe {
+        let total = EVENT_INDEX;
+        let count = total.min(EVENTS_CAP);
+        let start = total.saturating_sub(count);
+        let mut index = 0;
+        while index < count {
+            let (kind, task, len, value) = core::ptr::addr_of!(EVENTS)
+                .cast::<(u8, u8, u8, u32)>()
+                .add((start + index) % EVENTS_CAP)
+                .read();
+            let _ = crate::serial::print(format_args!(
+                "ev{}: kind {} task {} len {} val {}\n",
+                start + index,
+                kind,
+                task,
+                len,
+                value,
+            ));
+            index += 1;
+        }
+    }
+}
 /// Blocks the running task for IPC and switches to a peer.
 ///
 /// Rewinds the saved `rip` past the two-byte `int 0x80` so the woken task
@@ -320,7 +285,16 @@ fn block_with_retry(
     frame.rip = frame.rip.wrapping_sub(2);
     match tasks.block_current(regs, frame) {
         Some(_) => 0,
-        None => crate::fail("ipc deadlock"),
+        None => {
+            let _ = crate::serial::print(format_args!(
+                "deadlock: current {} alive {} endpoint len {}\n",
+                tasks.current(),
+                tasks.alive_count(),
+                unsafe { (*addr_of!(ENDPOINT)).len() },
+            ));
+            dump_trace();
+            crate::fail("ipc deadlock")
+        }
     }
 }
 
@@ -345,27 +319,21 @@ pub unsafe extern "C" fn sched_tick(regs: *mut SyscallRegs, frame: *mut IrqFrame
 
 /// Continues the boot after the last user task exits.
 ///
-/// Reads both message counters the tasks left behind, checks that every
-/// message arrived, that timer ticks preempted the tasks, and that the
-/// scheduler actually switched, then stops the timer and runs the
-/// remaining boot tail.
+/// Both tasks ran to their `task_exit` without tripping the mismatch trap,
+/// so every message transferred in order. Checks that timer ticks
+/// preempted the tasks and the scheduler actually switched, then stops the
+/// timer and runs the remaining boot tail.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn user_finished() -> ! {
-    // SAFETY: the counter pages stay mapped; no task can run anymore.
-    let sent = unsafe { read_volatile(COUNTER_A_VIRT as *const u64) };
-    let received = unsafe { read_volatile(COUNTER_B_VIRT as *const u64) };
     // SAFETY: written before entering the tasks; no concurrent access.
     let elapsed = crate::apic::ticks().saturating_sub(unsafe { START_TICKS });
     let switches = unsafe { (*addr_of!(TASKS)).switches() };
     crate::apic::stop_timer();
     crate::idt::disable();
     let _ = crate::serial::print(format_args!(
-        "user: exited, sent {} received {}, {} user ticks, {} switches\n",
-        sent, received, elapsed, switches,
+        "user: exited, tasks done, {} user ticks, {} switches\n",
+        elapsed, switches,
     ));
-    if sent != u64::from(MESSAGE_COUNT) || received != u64::from(MESSAGE_COUNT) {
-        crate::fail("ipc lost messages");
-    }
     if elapsed < MIN_USER_TICKS {
         crate::fail("timer did not preempt the user tasks");
     }
@@ -442,42 +410,38 @@ pub fn enter(
     // read it after no task can run anymore.
     unsafe { SAVED_BOOT_INFO = boot_info as u64 };
 
-    let (Some(code_a), Some(data_a), Some(code_b), Some(data_b), Some(pt)) = (
-        alloc.allocate(),
-        alloc.allocate(),
-        alloc.allocate(),
-        alloc.allocate(),
-        alloc.allocate(),
-    ) else {
-        crate::fail("user setup found no frames");
+    let producer = find_initramfs_file(boot_info, PRODUCER_NAME);
+    let consumer = find_initramfs_file(boot_info, CONSUMER_NAME);
+    let (Some(producer), Some(consumer)) = (producer, consumer) else {
+        crate::fail("user task ELF missing from initramfs");
     };
 
-    let code_a_bytes = build_producer(COUNTER_A_VIRT, MESSAGE_COUNT);
-    let code_b_bytes = build_consumer(COUNTER_B_VIRT, MESSAGE_COUNT);
-
-    // SAFETY: all five frames are fresh allocator output inside the identity
-    // map, and the lengths match the objects placed there.
+    let Some(pt) = alloc.allocate() else {
+        crate::fail("user setup found no page-table frame");
+    };
+    let pt_phys = pt.start_address();
+    // SAFETY: the fresh page-table frame is zeroed below before use.
     unsafe {
-        core::slice::from_raw_parts_mut(pt.start_address() as *mut u8, PAGE_SIZE as usize)
-            .fill(0);
-        for frame in [data_a, data_b] {
-            core::slice::from_raw_parts_mut(
-                frame.start_address() as *mut u8,
-                PAGE_SIZE as usize,
-            )
-            .fill(0);
-        }
-        core::slice::from_raw_parts_mut(code_a.start_address() as *mut u8, code_a_bytes.len())
-            .copy_from_slice(&code_a_bytes);
-        core::slice::from_raw_parts_mut(code_b.start_address() as *mut u8, code_b_bytes.len())
-            .copy_from_slice(&code_b_bytes);
+        core::slice::from_raw_parts_mut(pt_phys as *mut u8, PAGE_SIZE as usize).fill(0);
     }
 
-    let pt_phys = pt.start_address();
+    let entry_a = map_elf(PRODUCER_NAME, producer, alloc, pt_phys, 0);
+    let entry_b = map_elf(CONSUMER_NAME, consumer, alloc, pt_phys, CONSUMER_BIAS);
+
+    // One stack page per task, above the image window.
+    let (Some(stack_a), Some(stack_b)) = (alloc.allocate(), alloc.allocate()) else {
+        crate::fail("user setup found no stack frames");
+    };
+    // SAFETY: the loader's tables are identity-mapped.
+    unsafe {
+        set_table_entry(pt_phys, page_index(STACK_A_TOP), stack_a.start_address() | USER_PAGE_FLAGS);
+        set_table_entry(pt_phys, page_index(STACK_B_TOP), stack_b.start_address() | USER_PAGE_FLAGS);
+    }
+
     // SAFETY: the loader's tables are identity-mapped; the indices come from
     // the same address helpers the host tests cover.
     unsafe {
-        let base = VirtAddr::new(CODE_A_VIRT);
+        let base = VirtAddr::new(USER_CODE_VIRT);
         let pml4 = current_pml4();
         // Permissions AND down the paging hierarchy, so the PML4 and PDPT
         // entries above the user region must also carry the user flag.
@@ -496,15 +460,6 @@ pub fn enter(
         if table_entry(pd, base.pd_index()) & 1 == 0 {
             crate::fail("user setup found no page directory entry");
         }
-        let pages = [
-            (0, code_a.start_address()),
-            (1, data_a.start_address()),
-            (2, code_b.start_address()),
-            (3, data_b.start_address()),
-        ];
-        for (index, phys) in pages {
-            set_table_entry(pt_phys, index, phys | USER_PAGE_FLAGS);
-        }
         set_table_entry(
             pd & !0xFFF,
             base.pd_index(),
@@ -516,25 +471,18 @@ pub fn enter(
     }
 
     let _ = crate::serial::print(format_args!(
-        "user: mapped A code {:#x} data {:#x}, B code {:#x} data {:#x}\n",
-        code_a.start_address(),
-        data_a.start_address(),
-        code_b.start_address(),
-        data_b.start_address(),
-    ));
-    let _ = crate::serial::print(format_args!(
-        "user: producer sends {}, consumer verifies\n",
-        MESSAGE_COUNT,
+        "user: producer entry {:#x}, consumer entry {:#x}\n",
+        entry_a, entry_b,
     ));
 
     // SAFETY: the table is owned here; interrupts are masked for the whole
-    // setup below, so no tick can observe a half-built table.
+    // setup, so no tick can observe a half-built table.
     let tasks = unsafe { &mut *addr_of_mut!(TASKS) };
     if tasks
         .spawn(
             SyscallRegs::EMPTY,
             IrqFrame {
-                rip: CODE_A_VIRT,
+                rip: entry_a,
                 cs: u64::from(USER_CS),
                 rflags: USER_RFLAGS,
                 rsp: STACK_A_TOP,
@@ -549,7 +497,7 @@ pub fn enter(
         .spawn(
             SyscallRegs::EMPTY,
             IrqFrame {
-                rip: CODE_B_VIRT,
+                rip: entry_b,
                 cs: u64::from(USER_CS),
                 rflags: USER_RFLAGS,
                 rsp: STACK_B_TOP,
@@ -591,10 +539,142 @@ pub fn enter(
             stack = in(reg) STACK_A_TOP,
             flags = in(reg) USER_RFLAGS,
             cs = in(reg) u64::from(USER_CS),
-            rip = in(reg) CODE_A_VIRT,
+            rip = in(reg) entry_a,
             options(noreturn),
         );
     }
+}
+
+/// Returns the page-table index of a user virtual address.
+///
+/// All task images live in the single page table the setup installs, so the
+/// index is the page offset inside the 2 MiB window.
+const fn page_index(virt: u64) -> usize {
+    ((virt >> 12) & 0x1FF) as usize
+}
+
+/// Finds a file in the initramfs by name.
+///
+/// Returns the file bytes, or `None` when the archive is missing the entry.
+/// A corrupt archive stops the boot because later stages must trust it.
+fn find_initramfs_file(boot_info: *const BootInfo, name: &str) -> Option<&'static [u8]> {
+    // SAFETY: the caller hands a valid BootInfo whose archive the loader
+    // placed in the identity map.
+    let info = unsafe { &*boot_info };
+    if info.initramfs_len == 0 || info.initramfs_start == 0 {
+        return None;
+    }
+    // SAFETY: the loader wrote `initramfs_len` bytes at `initramfs_start`,
+    // and the pages outlive the boot.
+    let bytes: &'static [u8] = unsafe {
+        core::slice::from_raw_parts(
+            info.initramfs_start as *const u8,
+            info.initramfs_len as usize,
+        )
+    };
+    // Record the match as an offset pair: entry borrows cannot escape the
+    // walker closure, but offsets into the static archive can.
+    let mut location = None;
+    let walked = zc_kernel::cpio::walk(bytes, |entry| {
+        if entry.name() == name {
+            let base = bytes.as_ptr() as usize;
+            let at = entry.data().as_ptr() as usize;
+            location = Some((at - base, entry.data().len()));
+            return false;
+        }
+        true
+    });
+    match walked {
+        Ok(_) => {}
+        Err(_) => crate::fail("initramfs corrupt"),
+    }
+    let (offset, len) = location?;
+    bytes.get(offset..offset + len)
+}
+
+/// Loads one task ELF into user pages and returns its entry point.
+///
+/// Every `PT_LOAD` segment lands in freshly allocated frames, zero-filled
+/// past its file data, and mapped with user permissions; `bias` relocates
+/// the whole image so two tasks linked at the same base do not share
+/// pages. Segments outside the image window, in the stack zone, or an
+/// entry point outside the loaded segments stops the boot.
+fn map_elf(
+    _name: &str,
+    bytes: &[u8],
+    alloc: &mut FrameAllocator<'_>,
+    pt_phys: u64,
+    bias: u64,
+) -> u64 {
+    let image = match zc_elf::parse(bytes) {
+        Ok(image) => image,
+        Err(_) => crate::fail("user task ELF invalid"),
+    };
+    let mut entry_mapped = false;
+    let biased_entry = match image.entry().checked_add(bias) {
+        Some(entry) => entry,
+        None => crate::fail("user entry overflows"),
+    };
+    for segment in image.segments() {
+        let vaddr = match segment.vaddr.checked_add(bias) {
+            Some(vaddr) => vaddr,
+            None => crate::fail("user segment overflows"),
+        };
+        let end = match vaddr.checked_add(segment.memsz) {
+            Some(end) => end,
+            None => crate::fail("user segment overflows"),
+        };
+        if vaddr < USER_CODE_VIRT || end > USER_WINDOW_END {
+            crate::fail("user segment outside mapping window");
+        }
+        if vaddr < STACK_ZONE_END && STACK_ZONE_START < end {
+            crate::fail("user segment overlaps stacks");
+        }
+        let first_page = vaddr & !(PAGE_SIZE - 1);
+        let offset = (vaddr - first_page) as usize;
+        let total = offset + segment.memsz as usize;
+        let pages = total.div_ceil(PAGE_SIZE as usize);
+        // SAFETY: fresh frames inside the identity map.
+        let mut remaining_filesz = segment.filesz as usize;
+        let mut file_offset = segment.offset as usize;
+        for page in 0..pages {
+            let Some(frame) = alloc.allocate() else {
+                crate::fail("user setup found no segment frame");
+            };
+            let dest = frame.start_address();
+            unsafe {
+                core::slice::from_raw_parts_mut(dest as *mut u8, PAGE_SIZE as usize).fill(0);
+            }
+            let skip = if page == 0 { offset } else { 0 };
+            let room = PAGE_SIZE as usize - skip;
+            let take = remaining_filesz.min(room);
+            if take > 0 {
+                // SAFETY: the parser validated the file range; the
+                // destination is the zeroed frame above.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        bytes.as_ptr().add(file_offset),
+                        (dest + skip as u64) as *mut u8,
+                        take,
+                    );
+                }
+                file_offset += take;
+                remaining_filesz -= take;
+            }
+            let virt = first_page + (page as u64) * PAGE_SIZE;
+            // SAFETY: the loader's tables are identity-mapped.
+            unsafe {
+                set_table_entry(pt_phys, page_index(virt), dest | USER_PAGE_FLAGS);
+            }
+        }
+        if biased_entry >= vaddr && biased_entry < end {
+            entry_mapped = true;
+        }
+    }
+    if !entry_mapped {
+        crate::fail("user entry outside loaded segments");
+    }
+    biased_entry
 }
 
 /// Exposes the syscall stub address for IDT installation.

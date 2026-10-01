@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 zc-abi = { path = "../../libs/zc-abi" }
+zc-elf = { path = "../../libs/zc-elf" }
 
 [features]
 # Terminate QEMU through isa-debug-exit so an automated boot test ends with a

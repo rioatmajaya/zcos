@@ -2,19 +2,20 @@
 # Pack initramfs/ into a deterministic cpio newc archive for the boot image.
 #
 # Usage: tools/mkinitramfs.sh
-#   Reads initramfs/, writes build/initramfs.cpio. Timestamps, owners, and
-#   entry order are fixed so repeated builds are byte-identical.
+#   Reads initramfs/ plus any extra files passed as src:arcname pairs,
+#   writes build/initramfs.cpio. Timestamps, owners, and entry order are
+#   fixed so repeated builds are byte-identical.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
 mkdir -p build
-python3 - "$root/initramfs" "$root/build/initramfs.cpio" <<'EOF'
+python3 - "$root/initramfs" "$root/build/initramfs.cpio" "$@" <<'EOF'
 import os
 import sys
 
-source, output = sys.argv[1], sys.argv[2]
+source, output, extras = sys.argv[1], sys.argv[2], sys.argv[3:]
 
 entries = []
 for dirpath, _dirnames, filenames in os.walk(source):
@@ -23,6 +24,10 @@ for dirpath, _dirnames, filenames in os.walk(source):
         arc = os.path.relpath(full, source).replace(os.sep, "/")
         with open(full, "rb") as handle:
             entries.append((arc, handle.read()))
+for extra in extras:
+    src, arc = extra.split(":", 1)
+    with open(src, "rb") as handle:
+        entries.append((arc, handle.read()))
 entries.sort()
 entries.append(("TRAILER!!!", b""))
 

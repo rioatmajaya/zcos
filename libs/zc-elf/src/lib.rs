@@ -1,10 +1,12 @@
-//! Minimal ELF64 reader for the kernel image.
+#![no_std]
+
+//! Minimal ELF64 reader shared by the loader and the kernel.
 //!
-//! The loader only needs enough of the format to place `PT_LOAD` segments at
-//! their physical destinations and find the entry point. Parsing is done with
-//! explicit little-endian reads rather than by casting the buffer to a
-//! `#[repr(C)]` struct, so the code is alignment-independent and can be tested
-//! on the host with a synthetic image.
+//! Both need only enough of the format to place `PT_LOAD` segments and find
+//! the entry point. Parsing is done with explicit little-endian reads rather
+//! than by casting the buffer to a `#[repr(C)]` struct, so the code is
+//! alignment-independent and can be tested on the host with a synthetic
+//! image.
 
 /// The 2 MiB page size the kernel image must fit inside.
 pub const PAGE_2MIB: u64 = 2 * 1024 * 1024;
@@ -260,6 +262,9 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     raw.copy_from_slice(&bytes[offset..offset + 8]);
     u64::from_le_bytes(raw)
 }
+
+#[cfg(test)]
+extern crate std;
 
 #[cfg(test)]
 mod tests {

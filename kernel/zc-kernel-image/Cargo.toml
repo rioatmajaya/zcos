@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 zc-abi = { path = "../../libs/zc-abi" }
+zc-elf = { path = "../../libs/zc-elf" }
 zc-kernel = { path = "../zc-kernel" }
 
 [features]

@@ -52,5 +52,5 @@ jobs:
         grep -q "user: exited" build/boot.log
         grep -q "switches" build/boot.log
         grep -q "acpi: rsdp v2" build/boot.log
-        grep -q "initramfs: 2 files" build/boot.log
+        grep -q "initramfs: 4 files" build/boot.log
         grep -q "kernel reached idle state" build/boot.log

@@ -72,6 +72,13 @@
   verifies them; full/empty operations transparently block (rewinding
   past `int 0x80` for retry) and wake peers, with a deadlock fail-stop
   and a timeout watchdog as backstops (~1000 switches per boot).
+- Landed as Milestone 3c: userspace ELF loading. The hand-assembled
+  bytecode is gone: `user/zc-user` (syscall wrappers, panic handler) and
+  `user/zc-tasks` (producer/consumer) build as freestanding ET_EXEC
+  binaries packed into the initramfs, the ELF parser moved to a shared
+  `libs/zc-elf` crate, and the kernel maps each task image (relocating
+  the second so identical link bases do not share pages) with per-task
+  stacks before entering ring 3.
 
 ## Milestone 3 — desktop base
 

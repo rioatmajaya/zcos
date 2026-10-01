@@ -14,7 +14,7 @@ use zc_abi::{
     BOOT_INFO_MAGIC, BOOT_PROTOCOL_VERSION, BootInfo, FramebufferInfo, MemoryRegion, PixelFormat,
 };
 
-use crate::elf::{self, ElfImage};
+use zc_elf::{self, ElfImage};
 use crate::memmap;
 use crate::serial;
 use crate::uefi::{
@@ -128,7 +128,7 @@ pub unsafe extern "efiapi" fn efi_main(
     let Some(kernel_bytes) = read_file(image_handle, boot_services, &KERNEL_PATH, KERNEL_BUFFER_PAGES) else {
         fatal("cannot read \\EFI\\BOOT\\KERNEL.ELF");
     };
-    let image = match elf::parse(kernel_bytes) {
+    let image = match zc_elf::parse(kernel_bytes) {
         Ok(image) => image,
         Err(_) => fatal("kernel image is not a valid ELF64"),
     };

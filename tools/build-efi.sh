@@ -56,7 +56,13 @@ fi
 
 mkdir -p build
 rm -f "$image"
-./tools/mkinitramfs.sh
+
+# Userspace tasks are freestanding ELFs packed into the initramfs.
+cargo build --manifest-path user/zc-tasks/Cargo.toml \
+    --target "$none_target" --target-dir target --release
+./tools/mkinitramfs.sh \
+    "target/$none_target/release/producer:producer.elf" \
+    "target/$none_target/release/consumer:consumer.elf"
 dd if=/dev/zero of="$image" bs=1M count="$esp_size_mib" status=none
 mkfs.vfat "$image" >/dev/null
 mmd -i "$image" ::EFI ::EFI/BOOT

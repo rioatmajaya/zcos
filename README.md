@@ -22,9 +22,9 @@ image validates through `zc-kernel`, installs its own GDT/TSS and a 256-gate
 IDT, proves the APIC timer path by counting 16 ticks, runs a first
 userspace task in ring 3 (50M iterations preempted by 100+ ticks, exited
 via `int 0x80`), ACPI topology (`acpi: rsdp v2, …`), a calibrated APIC bus,
-an initramfs walked and listed (`initramfs: 2 files, …`), two preemptively
-scheduled ring-3 tasks exchanging 2000 IPC messages (`user: exited, sent …
-received … switches`), and a
+an initramfs walked and listed (`initramfs: … files, …`), two preemptively
+scheduled ring-3 tasks loaded as Rust ELFs from the initramfs
+(`user: producer entry …, consumer entry …`, `user: exited, tasks done … switches`), and a
 mechanisms self-test on live loader data (`gdt:` / `traps:` /
 `syscall gate probe:` / `timer:` / `user:` / `mechanisms self-test ok` in
 the serial log).
