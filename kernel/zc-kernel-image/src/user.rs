@@ -28,7 +28,7 @@ const USER_WINDOW_END: u64 = 0x60_0000;
 const STACK_ZONE_START: u64 = 0x40_4000;
 
 /// End of the reserved user-stack zone.
-const STACK_ZONE_END: u64 = 0x40_8000;
+const STACK_ZONE_END: u64 = 0x40_A000;
 
 /// Each task links at its own base (producer at [`USER_CODE_VIRT`], the
 /// consumer 64 KiB higher), so images never share pages and absolute
@@ -57,6 +57,12 @@ const STACK_D_TOP: u64 = 0x40_8000;
 /// Framebuffer-task stack page backing that top.
 const STACK_D_PAGE: u64 = STACK_D_TOP - PAGE_SIZE;
 
+/// Top of the block driver domain's user stack.
+const STACK_E_TOP: u64 = 0x40_9000;
+
+/// Driver stack page backing that top.
+const STACK_E_PAGE: u64 = STACK_E_TOP - PAGE_SIZE;
+
 /// File names of the bring-up tasks inside the initramfs.
 const PRODUCER_NAME: &str = "producer.elf";
 /// Consumer binary name.
@@ -65,6 +71,8 @@ const CONSUMER_NAME: &str = "consumer.elf";
 const SHELL_NAME: &str = "shell.elf";
 /// Framebuffer task binary name.
 const FB_NAME: &str = "fb.elf";
+/// Block driver domain binary name.
+const BLK_NAME: &str = "blk.elf";
 
 /// User virtual address the display framebuffer is mapped at.
 const FB_VIRT: u64 = 0x10_00000;
@@ -94,13 +102,13 @@ const USER_PAGE_FLAGS: u64 = 0x7;
 const FLAG_USER: u64 = 1 << 2;
 
 /// Round-robin table for the bring-up tasks.
-static mut TASKS: TaskTable<4> = TaskTable::new();
+static mut TASKS: TaskTable<8> = TaskTable::new();
 
 /// Mounted initramfs filesystem, shared read-only by all tasks.
 static mut FS: Option<Fs<'static>> = None;
 
 /// Per-task descriptor tables, indexed by task index.
-static mut FDS: [FdTable<'static>; 4] = [FdTable::new(); 4];
+static mut FDS: [FdTable<'static>; 8] = [FdTable::new(); 8];
 
 /// Physical address of the user page table, for buffer validation.
 static mut USER_PT: u64 = 0;
@@ -470,7 +478,7 @@ fn dump_trace() {
 /// protocol guarantees the retry succeeds: an unblock always follows a
 /// complementary operation that freed a slot or queued a message.
 fn block_with_retry(
-    tasks: &mut TaskTable<4>,
+    tasks: &mut TaskTable<8>,
     regs: &mut SyscallRegs,
     frame: &mut IrqFrame,
 ) -> u64 {
@@ -728,8 +736,9 @@ pub fn enter(
     let consumer = find_initramfs_file(boot_info, CONSUMER_NAME);
     let shell = find_initramfs_file(boot_info, SHELL_NAME);
     let fb = find_initramfs_file(boot_info, FB_NAME);
-    let (Some(producer), Some(consumer), Some(shell), Some(fb)) =
-        (producer, consumer, shell, fb)
+    let blk = find_initramfs_file(boot_info, BLK_NAME);
+    let (Some(producer), Some(consumer), Some(shell), Some(fb), Some(blk)) =
+        (producer, consumer, shell, fb, blk)
     else {
         crate::fail("user task ELF missing from initramfs");
     };
@@ -751,6 +760,11 @@ pub fn enter(
     let entry_b = map_elf(CONSUMER_NAME, consumer, alloc, pt_phys);
     let entry_c = map_elf(SHELL_NAME, shell, alloc, pt_phys);
     let entry_d = map_elf(FB_NAME, fb, alloc, pt_phys);
+    let entry_e = map_elf(BLK_NAME, blk, alloc, pt_phys);
+
+    // Publish the driver's DMA area: three contiguous frames plus a
+    // descriptor page holding their physical addresses.
+    publish_driver_area(alloc, pt_phys);
 
     // Publish the firmware framebuffer for the info syscall and mapping.
     // SAFETY: `boot_info` is the loader structure validated on entry.
@@ -776,7 +790,8 @@ pub fn enter(
     }
 
     // One stack page per task, above the image window.
-    let (Some(stack_a), Some(stack_b), Some(stack_c), Some(stack_d)) = (
+    let (Some(stack_a), Some(stack_b), Some(stack_c), Some(stack_d), Some(stack_e)) = (
+        alloc.allocate(),
         alloc.allocate(),
         alloc.allocate(),
         alloc.allocate(),
@@ -790,6 +805,7 @@ pub fn enter(
         set_table_entry(pt_phys, page_index(STACK_B_PAGE), stack_b.start_address() | USER_PAGE_FLAGS);
         set_table_entry(pt_phys, page_index(STACK_C_PAGE), stack_c.start_address() | USER_PAGE_FLAGS);
         set_table_entry(pt_phys, page_index(STACK_D_PAGE), stack_d.start_address() | USER_PAGE_FLAGS);
+        set_table_entry(pt_phys, page_index(STACK_E_PAGE), stack_e.start_address() | USER_PAGE_FLAGS);
     }
 
     // SAFETY: the loader's tables are identity-mapped; the indices come from
@@ -826,34 +842,35 @@ pub fn enter(
     }
 
     let _ = crate::serial::print(format_args!(
-        "user: producer entry {:#x}, consumer entry {:#x}, shell entry {:#x}, fb entry {:#x}\n",
-        entry_a, entry_b, entry_c, entry_d,
+        "user: producer entry {:#x}, consumer entry {:#x}, shell entry {:#x}, fb entry {:#x}, blk entry {:#x}\n",
+        entry_a, entry_b, entry_c, entry_d, entry_e,
     ));
 
     // SAFETY: the table is owned here; interrupts are masked for the whole
     // setup, so no tick can observe a half-built table.
     let tasks = unsafe { &mut *addr_of_mut!(TASKS) };
     let initial = [
-        (entry_a, STACK_A_TOP),
-        (entry_b, STACK_B_TOP),
-        (entry_c, STACK_C_TOP),
-        (entry_d, STACK_D_TOP),
+        (entry_a, STACK_A_TOP, USER_RFLAGS),
+        (entry_b, STACK_B_TOP, USER_RFLAGS),
+        (entry_c, STACK_C_TOP, USER_RFLAGS),
+        (entry_d, STACK_D_TOP, USER_RFLAGS),
+        (entry_e, STACK_E_TOP, USER_RFLAGS),
     ];
-    for (entry, stack) in initial {
+    for (entry, stack, flags) in initial {
         if tasks
             .spawn(
                 SyscallRegs::EMPTY,
                 IrqFrame {
                     rip: entry,
                     cs: u64::from(USER_CS),
-                    rflags: USER_RFLAGS,
+                    rflags: flags,
                     rsp: stack,
                     ss: u64::from(USER_SS),
                 },
             )
             .is_err()
         {
-            crate::fail("task table holds four tasks");
+            crate::fail("task table holds five tasks");
         }
     }
 
@@ -1110,6 +1127,72 @@ fn map_elf(
         }
     }
     entry
+}
+
+/// Publishes the driver domain's DMA area and descriptor.
+///
+/// Allocates three contiguous frames for the virtqueue plus one descriptor
+/// page, maps them at the ABI addresses, zeroes everything, and records
+/// the frame physical addresses the device needs for descriptors.
+fn publish_driver_area(alloc: &mut FrameAllocator<'_>, pt_phys: u64) {
+    use zc_abi::{INFO_QUEUE0, INFO_VIRT, QUEUE_VIRT};
+
+    let mut first = [0u64; 12];
+    let mut count = 0;
+    for _ in 0..12 {
+        let Some(frame) = alloc.allocate() else {
+            crate::fail("driver setup found no frames");
+        };
+        first[count] = frame.start_address();
+        count += 1;
+    }
+    let mut queue = None;
+    let mut start = 0;
+    while start + 3 <= count {
+        if first[start + 1] == first[start] + PAGE_SIZE
+            && first[start + 2] == first[start] + 2 * PAGE_SIZE
+        {
+            queue = Some(first[start]);
+            break;
+        }
+        start += 1;
+    }
+    let Some(queue) = queue else {
+        crate::fail("driver needs contiguous pages");
+    };
+    let Some(info) = alloc.allocate() else {
+        crate::fail("driver setup found no descriptor frame");
+    };
+    let info_phys = info.start_address();
+    // SAFETY: fresh frames inside the identity map; the user mappings go
+    // in before anything is written through them. The descriptor is
+    // written through the physical address because the new mappings only
+    // take effect at the later CR3 reload.
+    unsafe {
+        let mut page = 0u64;
+        while page < 3 {
+            let phys = queue + page * PAGE_SIZE;
+            core::slice::from_raw_parts_mut(phys as *mut u8, PAGE_SIZE as usize).fill(0);
+            set_table_entry(
+                pt_phys,
+                page_index(zc_abi::QUEUE_VIRT + page * PAGE_SIZE),
+                phys | USER_PAGE_FLAGS,
+            );
+            page += 1;
+        }
+        core::slice::from_raw_parts_mut(info_phys as *mut u8, PAGE_SIZE as usize).fill(0);
+        set_table_entry(pt_phys, page_index(INFO_VIRT), info_phys | USER_PAGE_FLAGS);
+        let base = info_phys as *mut u64;
+        base.add(INFO_QUEUE0 / 8).write_volatile(queue);
+        base.add((INFO_QUEUE0 + 8) / 8).write_volatile(queue + PAGE_SIZE);
+        base
+            .add((INFO_QUEUE0 + 16) / 8)
+            .write_volatile(queue + 2 * PAGE_SIZE);
+    }
+    let _ = crate::serial::print(format_args!(
+        "driver: queue at {:#x}, info at {:#x}\n",
+        QUEUE_VIRT, INFO_VIRT
+    ));
 }
 
 /// Exposes the syscall stub address for IDT installation.

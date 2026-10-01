@@ -44,7 +44,9 @@ cp "$vars_src" "$vars"
 common="-machine q35 -m 512M -net none -vga std -no-reboot
 -drive if=pflash,format=raw,readonly=on,file=$code
 -drive if=pflash,format=raw,file=$vars
--drive if=virtio,format=raw,file=$image"
+-drive if=virtio,format=raw,file=$image
+-drive file=$root/build/disk.img,format=raw,if=none,id=vdisk
+-device virtio-blk-pci,disable-modern=on,drive=vdisk"
 
 if [ "${1:-}" = "--test" ]; then
     # isa-debug-exit turns the loader's port write into a process exit code;

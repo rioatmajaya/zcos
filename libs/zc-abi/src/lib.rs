@@ -11,10 +11,12 @@
 
 #![no_std]
 
+pub mod driver;
 pub mod fb;
 pub mod ipc;
 pub mod syscall;
 
+pub use driver::{INFO_LEN, INFO_QUEUE0, INFO_QUEUE1, INFO_QUEUE2, INFO_VIRT, QUEUE_VIRT};
 pub use fb::{BAR_COUNT, bar_at, bar_color, encode};
 pub use ipc::{MESSAGE_WORDS, Message};
 pub use syscall::{

@@ -64,8 +64,7 @@ pub fn syscall2(number: u64, arg0: u64, arg1: u64) -> u64 {
     result
 }
 
-/// Issues a syscall with three arguments in `rdi`, `rsi`, and `rdx`.
-#[inline(always)]
+/// Issues a syscall with three arguments in `rdi`, `rsi`, and `rdx`.#[inline(always)]
 pub fn syscall3(number: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
     let result: u64;
     // SAFETY: as in `syscall0`; `rdx` carries the third argument.
@@ -171,4 +170,76 @@ pub fn abort() -> ! {
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
     abort()
+}
+
+/// Writes a byte to an I/O port.
+///
+/// Driver domains run with I/O privilege; other tasks fault on these.
+#[inline(always)]
+pub fn port_outb(port: u16, value: u8) {
+    // SAFETY: ring-3 driver domains own IOPL 3; the port is the caller's.
+    unsafe {
+        asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags));
+    }
+}
+
+/// Reads a byte from an I/O port.
+///
+/// See [`port_outb`].
+#[inline(always)]
+pub fn port_inb(port: u16) -> u8 {
+    let value: u8;
+    // SAFETY: as in `port_outb`.
+    unsafe {
+        asm!("in al, dx", out("al") value, in("dx") port, options(nomem, nostack, preserves_flags));
+    }
+    value
+}
+
+/// Writes a 16-bit word to an I/O port.
+///
+/// See [`port_outb`].
+#[inline(always)]
+pub fn port_outw(port: u16, value: u16) {
+    // SAFETY: as in `port_outb`.
+    unsafe {
+        asm!("out dx, ax", in("dx") port, in("ax") value, options(nomem, nostack, preserves_flags));
+    }
+}
+
+/// Reads a 16-bit word from an I/O port.
+///
+/// See [`port_outb`].
+#[inline(always)]
+pub fn port_inw(port: u16) -> u16 {
+    let value: u16;
+    // SAFETY: as in `port_outb`.
+    unsafe {
+        asm!("in ax, dx", out("ax") value, in("dx") port, options(nomem, nostack, preserves_flags));
+    }
+    value
+}
+
+/// Writes a 32-bit doubleword to an I/O port.
+///
+/// See [`port_outb`].
+#[inline(always)]
+pub fn port_outl(port: u16, value: u32) {
+    // SAFETY: as in `port_outb`.
+    unsafe {
+        asm!("out dx, eax", in("dx") port, in("eax") value, options(nomem, nostack, preserves_flags));
+    }
+}
+
+/// Reads a 32-bit doubleword from an I/O port.
+///
+/// See [`port_outb`].
+#[inline(always)]
+pub fn port_inl(port: u16) -> u32 {
+    let value: u32;
+    // SAFETY: as in `port_outb`.
+    unsafe {
+        asm!("in eax, dx", out("eax") value, in("dx") port, options(nomem, nostack, preserves_flags));
+    }
+    value
 }

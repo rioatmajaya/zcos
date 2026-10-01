@@ -32,6 +32,7 @@ mod apic;
 mod gdt;
 mod hpet;
 mod kbd;
+mod pci;
 mod serial;
 mod idt;
 mod smp;
@@ -121,6 +122,20 @@ fn kernel_main(boot_info: *const BootInfo) -> ! {
     exercise_traps_and_timer();
     acpi::describe(info.rsdp);
     report_initramfs(info);
+    let devices = pci::enumerate();
+    if let Some(blk) = pci::find_blk(&devices) {
+        let _ = serial::print(format_args!(
+            "pci: blk device {:02x}:{:02x}.{} claimed by driver task\n",
+            blk.bus, blk.device, blk.function,
+        ));
+        // PCI type-1 config ports plus the device's own BAR window: the
+        // only ports the block driver may touch. Everything else still
+        // faults, replacing blanket IOPL for this domain.
+        gdt::allow_io_range(0xCF8, 8);
+        if zc_kernel::pci::bar_is_io(blk.bar0) {
+            gdt::allow_io_range((zc_kernel::pci::bar_base(blk.bar0) & 0xFFFF) as u16, 0x100);
+        }
+    }
     smp::bring_up(&mut alloc);
     user::enter(&mut alloc, boot_info);
 }

@@ -39,6 +39,11 @@ pub const TSS_SELECTOR: u16 = 0x28;
 /// RFLAGS value loaded on entry to userspace: reserved bit 1 plus IF.
 pub const USER_RFLAGS: u64 = 0x202;
 
+/// RFLAGS for driver domains: as above plus I/O privilege level 3, so the
+/// task may use port I/O directly. Coarse by design: per-port permission
+/// bitmaps arrive with the capability model.
+pub const USER_RFLAGS_IOPL: u64 = 0x3202;
+
 /// Number of `u64` slots in the kernel GDT: five segments plus two for TSS.
 pub const GDT_SLOTS: usize = 7;
 
@@ -120,5 +125,8 @@ mod tests {
     fn user_entry_flags_enable_interrupts() {
         assert_eq!(USER_RFLAGS & 0x200, 0x200);
         assert_eq!(USER_RFLAGS & 0x2, 0x2);
+        assert_eq!(USER_RFLAGS_IOPL & 0x200, 0x200);
+        assert_eq!((USER_RFLAGS_IOPL >> 12) & 3, 3);
+        assert_eq!(USER_RFLAGS_IOPL & !0x3000, USER_RFLAGS);
     }
 }

@@ -11,6 +11,7 @@ use core::ptr::{addr_of, addr_of_mut};
 use zc_kernel::gdt::{
     GDT_SLOTS, KERNEL_CODE, KERNEL_DATA, NULL, USER_CODE, USER_DATA, tss_descriptor,
 };
+use zc_kernel::iomap::{self, BITMAP_BYTES, BITMAP_OFFSET, TSS_BITMAP_SIZE};
 
 /// 16 KiB ring-0 stack used when traps arrive from userspace.
 static mut RSP0_STACK: [u8; 16_384] = [0; 16_384];
@@ -21,11 +22,12 @@ static mut IST1_STACK: [u8; 16_384] = [0; 16_384];
 /// The kernel's GDT: five segments plus a two-slot TSS descriptor.
 static mut GDT: [u64; GDT_SLOTS] = [0; GDT_SLOTS];
 
-/// 104-byte Task State Segment: RSP0 at offset 4, IST1 at offset 36.
+/// 104-byte Task State Segment plus I/O bitmap, grown once here.
 ///
-/// The first four bytes are reserved, so RSP0 starts at byte 4 and the
-/// seven IST slots start at byte 36 (after RSP0-RSP2 and a reserved qword).
-static mut TSS: [u8; 104] = [0; 104];
+/// Layout: RSP0 at offset 4, IST1 at offset 36 (after RSP0-RSP2 and a
+/// reserved qword), the 8 KiB port bitmap at offset 104, and a terminating
+/// `0xFF` byte. The first four bytes are reserved.
+static mut TSS: [u8; TSS_BITMAP_SIZE] = [0; TSS_BITMAP_SIZE];
 
 /// Returns `base + len` rounded down to a 16-byte boundary.
 const fn aligned_top(base: u64, len: u64) -> u64 {
@@ -56,6 +58,24 @@ pub fn table_address() -> u64 {
     addr_of!(GDT) as u64
 }
 
+/// Allows one I/O port range for ring-3 driver domains.
+///
+/// Safe to call after [`install`]: the CPU re-reads the bitmap from the
+/// loaded TSS on every port access, so no GDT reload is needed. Ports
+/// outside every allowed range keep faulting with `#GP`.
+pub fn allow_io_range(start: u16, len: u16) {
+    // SAFETY: the bitmap belongs to this module; ring-3 tasks can only
+    // gain ports, and setup calls this before any task runs.
+    unsafe {
+        let tss = addr_of_mut!(TSS).cast::<u8>();
+        let map = core::slice::from_raw_parts_mut(
+            tss.add(BITMAP_OFFSET),
+            BITMAP_BYTES,
+        );
+        iomap::allow_range(map, start, len);
+    }
+}
+
 /// Installs the kernel GDT/TSS and switches to them.
 ///
 /// After this returns, ring-3 segments are usable, `ltr` has loaded the TSS,
@@ -69,8 +89,17 @@ pub fn install() {
         let tss = addr_of_mut!(TSS).cast::<u8>();
         write_u64(tss, 4, rsp0_top);
         write_u64(tss, 36, ist1_top);
+        // I/O map base points past the base structure; the whole bitmap
+        // starts denied and the trailing byte stays 0xFF-terminated.
+        tss.add(102).cast::<u16>().write_unaligned(BITMAP_OFFSET as u16);
+        let map = core::slice::from_raw_parts_mut(
+            tss.add(BITMAP_OFFSET),
+            BITMAP_BYTES + 1,
+        );
+        map.fill(0xFF);
 
-        let [tss_lo, tss_hi] = tss_descriptor(addr_of!(TSS) as u64, 103);
+        let [tss_lo, tss_hi] =
+            tss_descriptor(addr_of!(TSS) as u64, (TSS_BITMAP_SIZE - 1) as u32);
         let gdt = addr_of_mut!(GDT).cast::<u64>();
         gdt.add(0).write(NULL);
         gdt.add(1).write(KERNEL_CODE);

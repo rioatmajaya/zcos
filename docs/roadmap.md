@@ -102,6 +102,23 @@
   loopback on hardware. QEMU monitor injection does not deliver in this
   environment (accepted but lost before the controller), so scripted
   typing stays a follow-up; interactive keyboards share the proven path.
+- Landed as Milestone 3i: PCI enumeration plus virtio-blk storage. Bus
+  zero is walked through type-1 configuration space, a 1 MiB test disk
+  is attached, and the driver negotiates the transitional PIO transport,
+  builds a descriptor chain in contiguous frames, and reads sector zero
+  with matching magic and capacity (2048 sectors).
+- Landed as Milestone 4a: first driver in userspace. The kernel-side
+  virtio-blk driver is deleted; a `user/zc-blk` domain drives the same
+  device from ring 3 with I/O privilege, DMA frames plus their physical
+  addresses published through a provisional ABI, and PCI discovery of its
+  own. Remaining toward real driver domains: IRQ-to-IPC delivery, I/O
+  port bitmaps instead of blanket IOPL, and per-task address spaces.
+- Landed as Milestone 4b: I/O permission bitmap. The TSS grows an 8 KiB
+  deny-by-default bitmap (pure builder logic host-tested in
+  `zc-kernel/iomap`); the block domain keeps exactly its PCI config
+  ports plus its BAR window and drops blanket IOPL, so any stray port
+  access faults — which promptly caught a leftover debug read of port 0
+  in the driver.
 
 ## Milestone 3 — desktop base
 
