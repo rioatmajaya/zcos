@@ -150,6 +150,8 @@ pub struct Task {
     frame: IrqFrame,
     alive: bool,
     blocked: bool,
+    /// Page-table root the task runs under; loaded into CR3 on switch.
+    cr3: u64,
 }
 
 impl Task {
@@ -175,6 +177,12 @@ impl Task {
     #[must_use]
     pub const fn is_blocked(self) -> bool {
         self.blocked
+    }
+
+    /// Returns the page-table root the task runs under.
+    #[must_use]
+    pub const fn cr3(self) -> u64 {
+        self.cr3
     }
 }
 
@@ -211,8 +219,13 @@ impl<const N: usize> TaskTable<N> {
         }
     }
 
-    /// Adds a task with its first-run registers and frame.
-    pub fn spawn(&mut self, regs: SyscallRegs, frame: IrqFrame) -> Result<usize, TaskError> {
+    /// Adds a task with its first-run registers, frame, and page-table root.
+    pub fn spawn(
+        &mut self,
+        regs: SyscallRegs,
+        frame: IrqFrame,
+        cr3: u64,
+    ) -> Result<usize, TaskError> {
         let Some(index) = self.tasks.iter().position(|slot| slot.is_none()) else {
             return Err(TaskError::TableFull);
         };
@@ -221,6 +234,7 @@ impl<const N: usize> TaskTable<N> {
             frame,
             alive: true,
             blocked: false,
+            cr3,
         });
         Ok(index)
     }
@@ -229,6 +243,23 @@ impl<const N: usize> TaskTable<N> {
     #[must_use]
     pub const fn current(&self) -> usize {
         self.current
+    }
+
+    /// Returns the page-table root of the running task.
+    ///
+    /// Every spawned slot keeps its root for life, so this never fails for
+    /// a table the kernel itself filled.
+    #[must_use]
+    pub fn current_cr3(&self) -> u64 {
+        self.tasks[self.current].map_or(0, |task| task.cr3)
+    }
+
+    /// Returns the page-table root of a task slot, if it is live.
+    #[must_use]
+    pub fn cr3_of(&self, index: usize) -> Option<u64> {
+        self.tasks
+            .get(index)
+            .and_then(|slot| slot.map(|task| task.cr3))
     }
 
     /// Returns how many context switches happened so far.
@@ -374,8 +405,8 @@ mod task_table_tests {
     #[test]
     fn switch_cycles_alive_tasks() {
         let mut table = TaskTable::<4>::new();
-        let zero = table.spawn(SyscallRegs::EMPTY, frame(0x100)).unwrap();
-        let one = table.spawn(SyscallRegs::EMPTY, frame(0x200)).unwrap();
+        let zero = table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000).unwrap();
+        let one = table.spawn(SyscallRegs::EMPTY, frame(0x200), 0x1000).unwrap();
         assert_eq!(table.alive_count(), 2);
 
         let mut regs = SyscallRegs::EMPTY;
@@ -393,10 +424,32 @@ mod task_table_tests {
     }
 
     #[test]
+    fn current_cr3_tracks_switches() {
+        let mut table = TaskTable::<4>::new();
+        assert_eq!(table.current_cr3(), 0);
+        table
+            .spawn(SyscallRegs::EMPTY, frame(0x100), 0xA000)
+            .unwrap();
+        table
+            .spawn(SyscallRegs::EMPTY, frame(0x200), 0xB000)
+            .unwrap();
+        // Fresh spawns do not move `current` until the first switch.
+        assert_eq!(table.current(), 0);
+        assert_eq!(table.current_cr3(), 0xA000);
+
+        let mut regs = SyscallRegs::EMPTY;
+        let mut irq = IrqFrame::EMPTY;
+        assert_eq!(table.switch_from(&mut regs, &mut irq), Ok(1));
+        assert_eq!(table.current_cr3(), 0xB000);
+        assert_eq!(table.switch_from(&mut regs, &mut irq), Ok(0));
+        assert_eq!(table.current_cr3(), 0xA000);
+    }
+
+    #[test]
     fn exit_skips_dead_tasks_and_ends() {
         let mut table = TaskTable::<4>::new();
-        table.spawn(SyscallRegs::EMPTY, frame(0x100)).unwrap();
-        table.spawn(SyscallRegs::EMPTY, frame(0x200)).unwrap();
+        table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000).unwrap();
+        table.spawn(SyscallRegs::EMPTY, frame(0x200), 0x1000).unwrap();
 
         let mut regs = SyscallRegs::EMPTY;
         let mut irq = IrqFrame::EMPTY;
@@ -410,8 +463,8 @@ mod task_table_tests {
     #[test]
     fn blocked_tasks_are_skipped_until_woken() {
         let mut table = TaskTable::<4>::new();
-        table.spawn(SyscallRegs::EMPTY, frame(0x100)).unwrap();
-        table.spawn(SyscallRegs::EMPTY, frame(0x200)).unwrap();
+        table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000).unwrap();
+        table.spawn(SyscallRegs::EMPTY, frame(0x200), 0x1000).unwrap();
 
         let mut regs = SyscallRegs::EMPTY;
         let mut irq = IrqFrame::EMPTY;
@@ -436,9 +489,9 @@ mod task_table_tests {
         );
 
         let mut table = TaskTable::<1>::new();
-        table.spawn(SyscallRegs::EMPTY, frame(0)).unwrap();
+        table.spawn(SyscallRegs::EMPTY, frame(0), 0x1000).unwrap();
         assert_eq!(
-            table.spawn(SyscallRegs::EMPTY, frame(0)),
+            table.spawn(SyscallRegs::EMPTY, frame(0), 0x1000),
             Err(TaskError::TableFull)
         );
     }

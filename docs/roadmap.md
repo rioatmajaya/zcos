@@ -111,14 +111,33 @@
   virtio-blk driver is deleted; a `user/zc-blk` domain drives the same
   device from ring 3 with I/O privilege, DMA frames plus their physical
   addresses published through a provisional ABI, and PCI discovery of its
-  own. Remaining toward real driver domains: IRQ-to-IPC delivery, I/O
-  port bitmaps instead of blanket IOPL, and per-task address spaces.
+  own. Remaining toward real driver domains: IRQ-to-IPC delivery (4c), I/O
+  port bitmaps instead of blanket IOPL (4b), and per-task address spaces
+  (4d).
 - Landed as Milestone 4b: I/O permission bitmap. The TSS grows an 8 KiB
   deny-by-default bitmap (pure builder logic host-tested in
   `zc-kernel/iomap`); the block domain keeps exactly its PCI config
   ports plus its BAR window and drops blanket IOPL, so any stray port
   access faults — which promptly caught a leftover debug read of port 0
   in the driver.
+- Landed as Milestone 4d: per-task address spaces. Every task gets a
+  private PML4/PDPT/PD cloned from the loader tables plus its own user
+  page table, while the framebuffer tables stay shared; `CR3` is loaded
+  on every task switch (timer and syscall stubs reload the published root
+  before `iretq`, and syscall-buffer validation walks the *running*
+  task's tables). The boot self-check proves no task maps another task's
+  image, stack, or the driver's DMA window.
+- Landed as Milestone 4c: IRQ-to-IPC delivery. The kernel handler for the
+  keyboard vector now does no device work: it records one interrupt and
+  EOIs. A new `user/zc-kbd` domain claims the source — which is what grants
+  it the 8042 ports through the bitmap plus one shared ring page — blocks in
+  `irq_wait`, and only then drains the controller, translates scancodes, and
+  appends ASCII to the ring the kernel drains into the input stream. Counting
+  rather than queueing is deliberate: coalescing cannot overflow, and a
+  driver drains every pending byte anyway. Delivery is proven by the domain
+  raising its own vector, so the real self-IPI, gate, handler, and EOI path
+  runs even where no keystroke can be typed. Remaining toward real driver
+  domains: a userspace device manager and per-task port bitmaps.
 
 ## Milestone 3 — desktop base
 

@@ -48,6 +48,34 @@ final map key, then sets `CR3`, installs `rsp`, places the `BootInfo` pointer in
 `rdi`, and jumps to the kernel's `e_entry`. The kernel entry point is `_start`;
 interrupts stay disabled across the transition.
 
+## Address spaces and authority
+
+Privilege separation is per task, not global. During boot each task's
+address space is built as a private PML4, PDPT, and PD cloned from the loader's
+tables, plus one private page table for the 2 MiB user window; the kernel half
+and the framebuffer tables stay shared, so display memory costs one copy
+instead of one per task. `TaskTable` keeps each root, and the timer and
+syscall stubs reload `CR3` from a published value before `iretq`, so a
+context switch can never leave the previous task's TLB live. Syscall buffer
+validation walks the *running* task's page tables rather than a single global
+one, which is what makes the check meaningful once the tables differ.
+
+Port I/O authority follows the same split: the TSS carries an 8 KiB
+deny-by-default I/O bitmap, so a driver domain holds exactly the PCI
+configuration ports and its own BAR window and faults on anything else,
+instead of running with blanket `IOPL`. Driver DMA areas are allocated by the
+kernel and published to one domain as a descriptor page of physical addresses.
+
+Interrupts are messages, not kernel-side device work. A handler records a
+coalesced count per source and EOIs; the domain that claimed that source
+blocks in `irq_wait` and drains the device itself. Coalescing rather than
+queueing is deliberate: a driver drains every pending byte on wake, so
+"arrived N times" carries strictly more information than N separate messages,
+and a burst can never overflow the table. Claiming a source is what grants
+the device's authority — the keyboard domain gets the 8042 ports plus one
+shared ring page, and nothing else — which keeps "who may touch this device"
+and "who is told when it fires" the same decision.
+
 ## IPC and authority
 
 ZC OS uses synchronous message passing initially. Kernel objects are referenced

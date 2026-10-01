@@ -122,15 +122,12 @@ impl Write for Writer {
     }
 }
 
-/// Bytes buffered from COM1 for task input.
-const INPUT_CAP: usize = 256;
-
 /// Receive ring drained by the timer poll.
-static mut INPUT_RING: [u8; INPUT_CAP] = [0; INPUT_CAP];
-/// Oldest buffered byte index.
-static mut INPUT_HEAD: usize = 0;
-/// Buffered byte count.
-static mut INPUT_LEN: usize = 0;
+///
+/// Bytes from COM1 and from the keyboard driver domain share one ring, so a
+/// task reading serial input sees one stream regardless of origin. The ring
+/// type is shared with the driver domain across the privilege boundary.
+static mut INPUT_RING: zc_kernel::irq::SharedInputRing = zc_kernel::irq::SharedInputRing::new();
 
 /// Reads one pending byte without blocking.
 ///
@@ -148,66 +145,36 @@ fn try_read_byte() -> Option<u8> {
 /// dropped newest-first so early keystrokes survive bursts.
 pub fn poll_input() {
     // SAFETY: owned here; the poll runs with interrupts masked.
-    unsafe {
-        loop {
-            let len = core::ptr::addr_of!(INPUT_LEN).read();
-            if len >= INPUT_CAP {
-                break;
-            }
-            let Some(byte) = try_read_byte() else {
-                break;
-            };
-            let head = core::ptr::addr_of!(INPUT_HEAD).read();
-            core::ptr::addr_of_mut!(INPUT_RING)
-                .cast::<u8>()
-                .add((head + len) % INPUT_CAP)
-                .write(byte);
-            core::ptr::addr_of_mut!(INPUT_LEN).write(len + 1);
+    let ring = unsafe { &mut *core::ptr::addr_of_mut!(INPUT_RING) };
+    while let Some(byte) = try_read_byte() {
+        if !ring.push(byte) {
+            break;
         }
+    }
+}
+
+/// Appends bytes a driver domain produced into the shared ring.
+///
+/// Called from the timer tick so a domain's translated keystrokes reach the
+/// same stream COM1 bytes use, without the driver writing kernel memory.
+pub fn push_input(bytes: &[u8]) {
+    // SAFETY: owned here; the caller runs with interrupts masked and the
+    // kernel is the only consumer, so the ring has a single producer per
+    // wakeup.
+    let ring = unsafe { &mut *core::ptr::addr_of_mut!(INPUT_RING) };
+    for byte in bytes {
+        ring.push(*byte);
     }
 }
 
 /// Returns whether the receive ring holds a byte.
 pub fn input_available() -> bool {
     // SAFETY: read-only and interrupt-masked here.
-    unsafe { core::ptr::addr_of!(INPUT_LEN).read() > 0 }
+    unsafe { !core::ptr::addr_of!(INPUT_RING).read().is_empty() }
 }
 
 /// Removes and returns the oldest buffered byte, if any.
 pub fn read_input() -> Option<u8> {
     // SAFETY: owned here; the poll runs with interrupts masked.
-    unsafe {
-        let len = core::ptr::addr_of!(INPUT_LEN).read();
-        if len == 0 {
-            return None;
-        }
-        let head = core::ptr::addr_of!(INPUT_HEAD).read();
-        let byte = core::ptr::addr_of!(INPUT_RING)
-            .cast::<u8>()
-            .add(head)
-            .read();
-        core::ptr::addr_of_mut!(INPUT_HEAD).write((head + 1) % INPUT_CAP);
-        core::ptr::addr_of_mut!(INPUT_LEN).write(len - 1);
-        Some(byte)
-    }
-}
-
-/// Buffers one byte from another source, dropping when full.
-///
-/// Keyboard interrupts share the serial ring so every task sees one
-/// input stream regardless of which device the keystroke arrived on.
-pub fn push_input_byte(byte: u8) {
-    // SAFETY: owned here; producers run with interrupts masked.
-    unsafe {
-        let len = core::ptr::addr_of!(INPUT_LEN).read();
-        if len >= INPUT_CAP {
-            return;
-        }
-        let head = core::ptr::addr_of!(INPUT_HEAD).read();
-        core::ptr::addr_of_mut!(INPUT_RING)
-            .cast::<u8>()
-            .add((head + len) % INPUT_CAP)
-            .write(byte);
-        core::ptr::addr_of_mut!(INPUT_LEN).write(len + 1);
-    }
+    unsafe { (&mut *core::ptr::addr_of_mut!(INPUT_RING)).pop() }
 }

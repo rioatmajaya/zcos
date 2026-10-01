@@ -153,6 +153,8 @@ unsafe extern "C" fn timer_tick() {
         "lea rsi, [rbx + 248]",
         "and rsp, -16",
         "call sched_tick",
+        "mov rax, [rip + NEXT_CR3]",
+        "mov cr3, rax",
         "mov rsp, rbx",
         "pop r15",
         "pop r14",

@@ -18,6 +18,7 @@ pub mod fs;
 pub mod gdt;
 pub mod ipc;
 pub mod iomap;
+pub mod irq;
 pub mod kbd;
 pub mod memory;
 pub mod pci;

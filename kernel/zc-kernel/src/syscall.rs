@@ -7,8 +7,9 @@
 //! which numbers exist.
 
 use zc_abi::{
-    SYS_CAP_DELEGATE, SYS_CLOSE, SYS_FB_INFO, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_OPEN, SYS_READ,
-    SYS_RECV, SYS_SEND, SYS_SERIAL_READ, SYS_TASK_EXIT, SYS_YIELD, SyscallError,
+    SYS_CAP_DELEGATE, SYS_CLOSE, SYS_FB_INFO, SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT,
+    SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_OPEN, SYS_READ, SYS_RECV, SYS_SEND, SYS_SERIAL_READ,
+    SYS_TASK_EXIT, SYS_YIELD, SyscallError,
 };
 
 /// The kernel operation a syscall number requests.
@@ -41,6 +42,12 @@ pub enum Action {
     FbInfo,
     /// Close an open file.
     Close,
+    /// Claim an interrupt source for the calling task.
+    IrqClaim,
+    /// Block until an interrupt arrives on a claimed source.
+    IrqWait,
+    /// Raise the caller's own claimed source on this CPU.
+    IrqTest,
 }
 
 /// Maps a raw syscall number to its [`Action`].
@@ -61,6 +68,9 @@ pub const fn dispatch(number: u64) -> Result<Action, SyscallError> {
         SYS_SERIAL_READ => Ok(Action::SerialRead),
         SYS_FB_INFO => Ok(Action::FbInfo),
         SYS_CLOSE => Ok(Action::Close),
+        SYS_IRQ_CLAIM => Ok(Action::IrqClaim),
+        SYS_IRQ_WAIT => Ok(Action::IrqWait),
+        SYS_IRQ_TEST => Ok(Action::IrqTest),
         _ => Err(SyscallError::InvalidNumber),
     }
 }
@@ -83,12 +93,15 @@ mod tests {
         assert_eq!(dispatch(SYS_SERIAL_READ), Ok(Action::SerialRead));
         assert_eq!(dispatch(SYS_FB_INFO), Ok(Action::FbInfo));
         assert_eq!(dispatch(SYS_CLOSE), Ok(Action::Close));
+        assert_eq!(dispatch(SYS_IRQ_CLAIM), Ok(Action::IrqClaim));
+        assert_eq!(dispatch(SYS_IRQ_WAIT), Ok(Action::IrqWait));
+        assert_eq!(dispatch(SYS_IRQ_TEST), Ok(Action::IrqTest));
     }
 
     #[test]
     fn unknown_numbers_are_rejected() {
         assert_eq!(
-            dispatch(12),
+            dispatch(15),
             Err(SyscallError::InvalidNumber)
         );
         assert_eq!(

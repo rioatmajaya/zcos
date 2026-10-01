@@ -273,6 +273,9 @@ fn exercise_traps_and_timer() {
     gdt::install();
     serial::write_str("gdt: installed (tss rsp0 ist1)\n");
 
+    // The stubs reload CR3 from `user.rs`, so the gate probe below needs a
+    // valid root before any task exists.
+    user::init_trap_cr3();
     idt::install();
     let _ = serial::print(format_args!(
         "traps: idt installed ({} vectors)\n",

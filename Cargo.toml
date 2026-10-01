@@ -15,6 +15,7 @@ exclude = [
     "kernel/zc-kernel-image",
     "user/zc-blk",
     "user/zc-consumer",
+    "user/zc-kbd",
     "user/zc-fb",
     "user/zc-producer",
     "user/zc-shell",

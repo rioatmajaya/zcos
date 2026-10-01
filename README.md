@@ -28,6 +28,16 @@ communicate over syscalls — blocking IPC messages, logging, and file
 reads (`task 0: manifest ok`, `task 1: hello verified`,
 `task 0: producer sent 2000`, `task 1: consumer received 2000`).
 
+Milestone 4 driver-domain work has started: the virtio-blk driver runs as
+its own ring-3 domain (`user/zc-blk`) with PCI discovery of its own, an
+8 KiB deny-by-default TSS I/O bitmap instead of blanket IOPL, and per-task
+address spaces (six private page-table roots, loaded on every context
+switch, with a boot self-check proving no task maps another's pages).
+Interrupts reach a domain as a message too: the keyboard handler only counts
+and EOIs, and `user/zc-kbd` claims the source, blocks until the interrupt
+arrives, then drains the 8042 itself and publishes ASCII through a shared
+ring page.
+
 The kernel crate provides the mechanisms — boot-contract validation, a
 physical frame allocator with recycling, virtual-memory helpers, task and
 scheduler tables, bounded IPC endpoints, a read-only initramfs filesystem,

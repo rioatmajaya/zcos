@@ -8,8 +8,6 @@
 
 use core::ptr::{read_volatile, write_volatile};
 
-use zc_kernel::kbd::Modifiers;
-
 /// Default physical base of the I/O APIC register window.
 pub const IOAPIC_BASE: u64 = 0xFEC0_0000;
 
@@ -76,37 +74,8 @@ const DEV_ACK: u8 = 0xFA;
 /// Bounded spins before an 8042 wait gives up.
 const IO_TIMEOUT: u32 = 100_000;
 
-/// Status bit set when the byte came from the auxiliary (mouse) port.
-const AUX_DATA: u8 = 0x20;
-
-/// Scancode translation state shared with the interrupt handler.
-static mut MODS: Modifiers = Modifiers::new();
-
 /// Set by the interrupt handler to prove delivery.
 static mut IRQ_FIRED: bool = false;
-
-/// Drains pending controller bytes into the input ring.
-///
-/// Shared by the interrupt handler and the timer poll: whoever runs first
-/// consumes each byte exactly once, so a lost IRQ degrades to a 1 ms
-/// polling delay instead of a stuck shell.
-pub fn drain_controller() {
-    // SAFETY: single early-boot owner; both callers run masked.
-    let mods = unsafe { &mut *core::ptr::addr_of_mut!(MODS) };
-    loop {
-        let status = crate::serial::inb(STATUS);
-        if status & OUTPUT_FULL == 0 {
-            break;
-        }
-        let code = crate::serial::inb(DATA);
-        if status & AUX_DATA != 0 {
-            continue;
-        }
-        if let Some(byte) = mods.feed(code) {
-            crate::serial::push_input_byte(byte);
-        }
-    }
-}
 
 /// Reads one I/O APIC register.
 ///
@@ -234,45 +203,53 @@ pub fn init() {
 /// self-IPI above, and translation plus ring handling right here on live
 /// hardware with make, break, and shift sequences.
 fn self_test_translation() {
+    use zc_kernel::irq::SharedInputRing;
     use zc_kernel::kbd::Modifiers;
 
     let mut mods = Modifiers::new();
     let sequence = [0x1Eu8, 0x9E, 0x2A, 0x1E, 0xAA, 0x1E, 0xE0, 0x48];
-    let mut collected = [0u8; 8];
-    let mut count = 0;
+    let mut ring = SharedInputRing::new();
     for code in sequence {
         if let Some(byte) = mods.feed(code) {
-            if count < collected.len() {
-                collected[count] = byte;
-                count += 1;
-            }
+            ring.push(byte);
         }
-    }
-    for index in 0..count {
-        crate::serial::push_input_byte(collected[index]);
     }
     // Expect exactly "aAa": press, release (silent), shift+press,
     // unshift+press, then a dropped extended arrow.
-    if count != 3 || collected[0] != b'a' || collected[1] != b'A' || collected[2] != b'a' {
+    let collected: [u8; 3] = match (ring.pop(), ring.pop(), ring.pop()) {
+        (Some(a), Some(b), Some(c)) => [a, b, c],
+        _ => crate::fail("keyboard translation mismatch"),
+    };
+    if collected != [b'a', b'A', b'a'] || ring.pop().is_some() {
         crate::fail("keyboard translation mismatch");
     }
-    // The self-test bytes must not leak into the shell session.
-    while crate::serial::read_input().is_some() {}
     crate::serial::write_str("input: loopback ok\n");
 }
 
-/// Handles one keyboard interrupt: translates waiting scancodes.
+/// Handles one keyboard interrupt: records it and acknowledges.
 ///
 /// Assembly entry point for the keyboard vector stub (called from naked
-/// assembly with no arguments); runs with interrupts masked.
+/// assembly with no arguments); runs with interrupts masked. The handler
+/// touches no controller register: since Milestone 4c the interrupt is a
+/// message to the keyboard driver domain, which owns the 8042 and drains it
+/// after waking. The kernel only counts and EOIs.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kbd_irq() {
     // SAFETY: single early-boot owner; the stub serializes interrupts.
     unsafe {
         core::ptr::addr_of_mut!(IRQ_FIRED).write(true);
     }
-    drain_controller();
+    crate::user::irq_post(zc_abi::IRQ_KEYBOARD);
     crate::apic::eoi();
+}
+
+/// Raises the keyboard vector on this CPU.
+///
+/// The domain's own self-test path: the interrupt is genuinely delivered by
+/// the local APIC and travels the whole handler, but no keystroke needs to
+/// exist, which is what makes it usable in a headless boot test.
+pub fn raise() {
+    crate::apic::self_ipi(zc_kernel::trap::KBD_VECTOR);
 }
 
 /// Proves the keyboard vector delivers end to end.

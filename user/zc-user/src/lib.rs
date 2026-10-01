@@ -11,8 +11,9 @@
 use core::arch::asm;
 
 pub use zc_abi::{
-    SYS_CAP_DELEGATE, SYS_CLOSE, SYS_FB_INFO, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_OPEN, SYS_READ,
-    SYS_RECV, SYS_SEND, SYS_SERIAL_READ, SYS_TASK_EXIT, SYS_YIELD, SyscallError,
+    SYS_CAP_DELEGATE, SYS_CLOSE, SYS_FB_INFO, SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT,
+    SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_OPEN, SYS_READ, SYS_RECV, SYS_SEND, SYS_SERIAL_READ,
+    SYS_TASK_EXIT, SYS_YIELD, SyscallError,
 };
 
 /// Issues a syscall with no arguments.
@@ -144,6 +145,36 @@ pub fn framebuffer_info(info: &mut zc_abi::FramebufferInfo) -> bool {
         core::mem::size_of::<zc_abi::FramebufferInfo>() as u64,
     );
     code == 0
+}
+
+/// Claims an interrupt source for this task, returning 0 or `u64::MAX`.
+///
+/// A successful claim is what grants the device's authority: for the
+/// keyboard that means the 8042 ports plus the shared input ring page.
+#[inline(always)]
+pub fn irq_claim(source: u64) -> u64 {
+    syscall1(SYS_IRQ_CLAIM, source)
+}
+
+/// Blocks until an interrupt arrives on a claimed source.
+///
+/// Returns how many interrupts were coalesced since the last wait, or
+/// `u64::MAX` when the caller does not own the source. The call retries
+/// internally, so it returns only once an interrupt really arrived.
+#[inline(always)]
+pub fn irq_wait(source: u64) -> u64 {
+    syscall1(SYS_IRQ_WAIT, source)
+}
+
+/// Raises the caller's own claimed source on this CPU, returning 0 or
+/// `u64::MAX`.
+///
+/// Only the owner may raise its source, so a domain can never fabricate an
+/// interrupt for somebody else's device. This is how the delivery path is
+/// proven when the hardware cannot produce the event.
+#[inline(always)]
+pub fn irq_test(source: u64) -> u64 {
+    syscall1(SYS_IRQ_TEST, source)
 }
 
 /// Terminates the calling task; never returns.

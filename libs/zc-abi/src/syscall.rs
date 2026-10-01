@@ -31,6 +31,15 @@ pub const SYS_SERIAL_READ: u64 = 9;
 pub const SYS_FB_INFO: u64 = 10;
 /// Closes a descriptor: arg is the descriptor; returns 0 or `u64::MAX`.
 pub const SYS_CLOSE: u64 = 11;
+/// Claims an interrupt source for the calling task: arg is the source index;
+/// returns 0, or `u64::MAX` when another task already owns it.
+pub const SYS_IRQ_CLAIM: u64 = 12;
+/// Waits for an interrupt on a claimed source: arg is the source index;
+/// blocks until one arrives and returns how many were coalesced.
+pub const SYS_IRQ_WAIT: u64 = 13;
+/// Raises the calling task's own claimed source on this CPU, used to prove
+/// the delivery path without hardware: returns 0 or `u64::MAX`.
+pub const SYS_IRQ_TEST: u64 = 14;
 
 /// Error codes returned by failed syscalls.
 ///
@@ -98,6 +107,9 @@ mod tests {
         assert_eq!(SYS_SERIAL_READ, 9);
         assert_eq!(SYS_FB_INFO, 10);
         assert_eq!(SYS_CLOSE, 11);
+        assert_eq!(SYS_IRQ_CLAIM, 12);
+        assert_eq!(SYS_IRQ_WAIT, 13);
+        assert_eq!(SYS_IRQ_TEST, 14);
     }
 
     #[test]
