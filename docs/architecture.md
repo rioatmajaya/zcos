@@ -25,6 +25,11 @@ convention argument when it enters the kernel. The ABI is C-compatible
 version. The kernel must reject an unsupported version before consuming other
 fields.
 
+The UEFI entry point is implemented with the `efiapi` calling convention and
+uses the Simple Text Output Protocol only for early diagnostics. It must retain
+boot-services ownership until it has loaded the kernel and captured the final
+memory map; only then may it call `ExitBootServices`.
+
 ## IPC and authority
 
 ZC OS uses synchronous message passing initially. Kernel objects are referenced

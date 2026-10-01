@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["libs/zc-abi"]
+members = [
+    "boot/uefi-loader",
+    "libs/zc-abi",
+]
 
 [workspace.package]
 version = "0.1.0"
