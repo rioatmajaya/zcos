@@ -7,6 +7,13 @@ name = "zc-abi"
 version = "0.1.0"
 
 [[package]]
+name = "zc-kernel"
+version = "0.1.0"
+dependencies = [
+ "zc-abi",
+]
+
+[[package]]
 name = "zc-uefi-loader"
 version = "0.1.0"
 dependencies = [
