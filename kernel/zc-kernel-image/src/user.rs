@@ -29,16 +29,20 @@ const STACK_ZONE_START: u64 = 0x40_4000;
 /// End of the reserved user-stack zone.
 const STACK_ZONE_END: u64 = 0x40_7000;
 
-/// Relocation bias added to the consumer image so both tasks do not share
-/// pages. Each image links at [`USER_CODE_VIRT`]; the kernel maps the
-/// second one 64 KiB higher.
-const CONSUMER_BIAS: u64 = 0x10_000;
+/// Each task links at its own base (producer at [`USER_CODE_VIRT`], the
+/// consumer 64 KiB higher), so images never share pages and absolute
+/// addresses in code and data stay valid without runtime relocation.
 
 /// Top of task A's user stack.
 const STACK_A_TOP: u64 = 0x40_5000;
 
 /// Top of task B's user stack.
 const STACK_B_TOP: u64 = 0x40_6000;
+
+/// User stack pages backing those tops.
+const STACK_A_PAGE: u64 = STACK_A_TOP - PAGE_SIZE;
+/// Task B stack page.
+const STACK_B_PAGE: u64 = STACK_B_TOP - PAGE_SIZE;
 
 /// File names of the bring-up tasks inside the initramfs.
 const PRODUCER_NAME: &str = "producer.elf";
@@ -67,6 +71,12 @@ const FLAG_USER: u64 = 1 << 2;
 
 /// Round-robin table for the bring-up tasks.
 static mut TASKS: TaskTable<4> = TaskTable::new();
+
+/// Physical address of the user page table, for buffer validation.
+static mut USER_PT: u64 = 0;
+
+/// Longest single log write accepted from userspace.
+const MAX_LOG_LEN: u64 = 512;
 
 /// Kernel stack pointer restored when leaving userspace for good.
 #[unsafe(no_mangle)]
@@ -211,6 +221,28 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 block_with_retry(tasks, regs, frame)
             }
         },
+        Ok(Action::LogWrite) => {
+            let me = tasks.current();
+            match validate_user_slice(regs.rdi, regs.rsi) {
+                Some(bytes) => match core::str::from_utf8(bytes) {
+                    Ok(text) => {
+                        let _ = crate::serial::print(format_args!("task {}: {}", me, text));
+                    }
+                    Err(_) => {
+                        let _ = crate::serial::print(format_args!(
+                            "task {}: <invalid utf-8>\n",
+                            me
+                        ));
+                    }
+                },
+                None => {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+            }
+            regs.set_result(regs.rsi);
+            0
+        }
         Ok(_) => {
             regs.set_result(u64::MAX);
             0
@@ -420,13 +452,17 @@ pub fn enter(
         crate::fail("user setup found no page-table frame");
     };
     let pt_phys = pt.start_address();
+    // SAFETY: published once for later buffer validation; no task exists yet.
+    unsafe {
+        core::ptr::addr_of_mut!(USER_PT).write(pt_phys);
+    }
     // SAFETY: the fresh page-table frame is zeroed below before use.
     unsafe {
         core::slice::from_raw_parts_mut(pt_phys as *mut u8, PAGE_SIZE as usize).fill(0);
     }
 
-    let entry_a = map_elf(PRODUCER_NAME, producer, alloc, pt_phys, 0);
-    let entry_b = map_elf(CONSUMER_NAME, consumer, alloc, pt_phys, CONSUMER_BIAS);
+    let entry_a = map_elf(PRODUCER_NAME, producer, alloc, pt_phys);
+    let entry_b = map_elf(CONSUMER_NAME, consumer, alloc, pt_phys);
 
     // One stack page per task, above the image window.
     let (Some(stack_a), Some(stack_b)) = (alloc.allocate(), alloc.allocate()) else {
@@ -434,8 +470,8 @@ pub fn enter(
     };
     // SAFETY: the loader's tables are identity-mapped.
     unsafe {
-        set_table_entry(pt_phys, page_index(STACK_A_TOP), stack_a.start_address() | USER_PAGE_FLAGS);
-        set_table_entry(pt_phys, page_index(STACK_B_TOP), stack_b.start_address() | USER_PAGE_FLAGS);
+        set_table_entry(pt_phys, page_index(STACK_A_PAGE), stack_a.start_address() | USER_PAGE_FLAGS);
+        set_table_entry(pt_phys, page_index(STACK_B_PAGE), stack_b.start_address() | USER_PAGE_FLAGS);
     }
 
     // SAFETY: the loader's tables are identity-mapped; the indices come from
@@ -553,6 +589,43 @@ const fn page_index(virt: u64) -> usize {
     ((virt >> 12) & 0x1FF) as usize
 }
 
+/// Views a userspace byte range after validating it.
+///
+/// Checks the range against the user window and every covered page-table
+/// entry, so a wild pointer becomes a failed syscall instead of a kernel
+/// read across arbitrary memory. Returns `None` for empty, over-long,
+/// overflowing, out-of-window, or unmapped ranges.
+fn validate_user_slice(ptr: u64, len: u64) -> Option<&'static [u8]> {
+    if len == 0 || len > MAX_LOG_LEN {
+        return None;
+    }
+    let end = ptr.checked_add(len)?;
+    if ptr < USER_CODE_VIRT || end > USER_WINDOW_END {
+        return None;
+    }
+    // SAFETY: written once during setup before any task can issue syscalls.
+    let pt = unsafe { core::ptr::addr_of!(USER_PT).read() };
+    if pt == 0 {
+        return None;
+    }
+    let mut page = ptr & !(PAGE_SIZE - 1);
+    let last = (end - 1) & !(PAGE_SIZE - 1);
+    loop {
+        // SAFETY: `pt` is the installed user table; the index stays inside
+        // the single page because the range passed the window check above.
+        let entry = unsafe { table_entry(pt, page_index(page)) };
+        if entry & 1 == 0 {
+            return None;
+        }
+        if page == last {
+            break;
+        }
+        page += PAGE_SIZE;
+    }
+    // SAFETY: every covered page is present with user permissions.
+    Some(unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) })
+}
+
 /// Finds a file in the initramfs by name.
 ///
 /// Returns the file bytes, or `None` when the archive is missing the entry.
@@ -597,29 +670,25 @@ fn find_initramfs_file(boot_info: *const BootInfo, name: &str) -> Option<&'stati
 /// Every `PT_LOAD` segment lands in freshly allocated frames, zero-filled
 /// past its file data, and mapped with user permissions; `bias` relocates
 /// the whole image so two tasks linked at the same base do not share
-/// pages. Segments outside the image window, in the stack zone, or an
-/// entry point outside the loaded segments stops the boot.
+/// pages. Segments sharing one virtual page merge into a single frame, so
+/// split layouts (code straddling a segment boundary) stay intact.
+/// Segments outside the image window, in the stack zone, or an entry
+/// point outside the loaded segments stops the boot.
 fn map_elf(
     _name: &str,
     bytes: &[u8],
     alloc: &mut FrameAllocator<'_>,
     pt_phys: u64,
-    bias: u64,
 ) -> u64 {
     let image = match zc_elf::parse(bytes) {
         Ok(image) => image,
         Err(_) => crate::fail("user task ELF invalid"),
     };
+    // First pass: validate every segment and collect the entry point.
+    let entry = image.entry();
     let mut entry_mapped = false;
-    let biased_entry = match image.entry().checked_add(bias) {
-        Some(entry) => entry,
-        None => crate::fail("user entry overflows"),
-    };
     for segment in image.segments() {
-        let vaddr = match segment.vaddr.checked_add(bias) {
-            Some(vaddr) => vaddr,
-            None => crate::fail("user segment overflows"),
-        };
+        let vaddr = segment.vaddr;
         let end = match vaddr.checked_add(segment.memsz) {
             Some(end) => end,
             None => crate::fail("user segment overflows"),
@@ -630,51 +699,87 @@ fn map_elf(
         if vaddr < STACK_ZONE_END && STACK_ZONE_START < end {
             crate::fail("user segment overlaps stacks");
         }
-        let first_page = vaddr & !(PAGE_SIZE - 1);
-        let offset = (vaddr - first_page) as usize;
-        let total = offset + segment.memsz as usize;
-        let pages = total.div_ceil(PAGE_SIZE as usize);
-        // SAFETY: fresh frames inside the identity map.
-        let mut remaining_filesz = segment.filesz as usize;
-        let mut file_offset = segment.offset as usize;
-        for page in 0..pages {
-            let Some(frame) = alloc.allocate() else {
-                crate::fail("user setup found no segment frame");
-            };
-            let dest = frame.start_address();
-            unsafe {
-                core::slice::from_raw_parts_mut(dest as *mut u8, PAGE_SIZE as usize).fill(0);
-            }
-            let skip = if page == 0 { offset } else { 0 };
-            let room = PAGE_SIZE as usize - skip;
-            let take = remaining_filesz.min(room);
-            if take > 0 {
-                // SAFETY: the parser validated the file range; the
-                // destination is the zeroed frame above.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        bytes.as_ptr().add(file_offset),
-                        (dest + skip as u64) as *mut u8,
-                        take,
-                    );
-                }
-                file_offset += take;
-                remaining_filesz -= take;
-            }
-            let virt = first_page + (page as u64) * PAGE_SIZE;
-            // SAFETY: the loader's tables are identity-mapped.
-            unsafe {
-                set_table_entry(pt_phys, page_index(virt), dest | USER_PAGE_FLAGS);
-            }
-        }
-        if biased_entry >= vaddr && biased_entry < end {
+        if entry >= vaddr && entry < end {
             entry_mapped = true;
         }
     }
     if !entry_mapped {
         crate::fail("user entry outside loaded segments");
     }
-    biased_entry
+    // Second pass: one frame per virtual page, then copy each segment's
+    // file bytes at its page offset so shared pages merge correctly.
+    // A virtual page number plus its frame address per entry.
+    let mut pages: [(u64, u64); 64] = [(0, 0); 64];
+    let mut page_count = 0usize;
+    for segment in image.segments() {
+        let vaddr = segment.vaddr;
+        if segment.memsz == 0 {
+            continue;
+        }
+        let first = vaddr & !(PAGE_SIZE - 1);
+        let last = (vaddr + segment.memsz - 1) & !(PAGE_SIZE - 1);
+        let mut page = first;
+        loop {
+            if !pages[..page_count].iter().any(|(vpn, _)| *vpn == page) {
+                if page_count >= pages.len() {
+                    crate::fail("user image too large");
+                }
+                let Some(frame) = alloc.allocate() else {
+                    crate::fail("user setup found no segment frame");
+                };
+                // SAFETY: fresh frame inside the identity map.
+                unsafe {
+                    core::slice::from_raw_parts_mut(
+                        frame.start_address() as *mut u8,
+                        PAGE_SIZE as usize,
+                    )
+                    .fill(0);
+                }
+                // SAFETY: the loader's tables are identity-mapped.
+                unsafe {
+                    set_table_entry(
+                        pt_phys,
+                        page_index(page),
+                        frame.start_address() | USER_PAGE_FLAGS,
+                    );
+                }
+                pages[page_count] = (page, frame.start_address());
+                page_count += 1;
+            }
+            if page == last {
+                break;
+            }
+            page += PAGE_SIZE;
+        }
+    }
+    for segment in image.segments() {
+        let vaddr = segment.vaddr;
+        let mut remaining = segment.filesz as usize;
+        let mut file_offset = segment.offset as usize;
+        let mut at = vaddr;
+        while remaining > 0 {
+            let page = at & !(PAGE_SIZE - 1);
+            let offset = (at - page) as usize;
+            let take = remaining.min(PAGE_SIZE as usize - offset);
+            let phys = match pages[..page_count].iter().find(|(vpn, _)| *vpn == page) {
+                Some((_, phys)) => *phys,
+                None => crate::fail("user page missing"),
+            };
+            // SAFETY: the parser validated the file range; the destination
+            // is the zeroed frame mapped above.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    bytes.as_ptr().add(file_offset),
+                    (phys + offset as u64) as *mut u8,
+                    take,
+                );
+            }
+            file_offset += take;
+            remaining -= take;
+            at += take as u64;
+        }
+    }
+    entry
 }
 
 /// Exposes the syscall stub address for IDT installation.

@@ -11,7 +11,8 @@
 use core::arch::asm;
 
 pub use zc_abi::{
-    SYS_CAP_DELEGATE, SYS_MAP_FRAME, SYS_RECV, SYS_SEND, SYS_TASK_EXIT, SYS_YIELD, SyscallError,
+    SYS_CAP_DELEGATE, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_RECV, SYS_SEND, SYS_TASK_EXIT, SYS_YIELD,
+    SyscallError,
 };
 
 /// Issues a syscall with no arguments.
@@ -46,6 +47,23 @@ pub fn syscall1(number: u64, arg0: u64) -> u64 {
     result
 }
 
+/// Issues a syscall with two arguments in `rdi` and `rsi`.
+#[inline(always)]
+pub fn syscall2(number: u64, arg0: u64, arg1: u64) -> u64 {
+    let result: u64;
+    // SAFETY: as in `syscall0`; `rsi` carries the second argument.
+    unsafe {
+        asm!(
+            "int $0x80",
+            inlateout("rax") number => result,
+            in("rdi") arg0,
+            in("rsi") arg1,
+            options(nostack, preserves_flags),
+        );
+    }
+    result
+}
+
 /// Sends one word on the task's endpoint, blocking when full.
 #[inline(always)]
 pub fn send(word: u64) -> u64 {
@@ -56,6 +74,15 @@ pub fn send(word: u64) -> u64 {
 #[inline(always)]
 pub fn recv() -> u64 {
     syscall0(SYS_RECV)
+}
+
+/// Writes a log line to the kernel log.
+///
+/// The kernel validates the buffer before printing; over-long messages are
+/// the caller's problem to split.
+#[inline(always)]
+pub fn log(message: &str) -> u64 {
+    syscall2(SYS_LOG_WRITE, message.as_ptr() as u64, message.len() as u64)
 }
 
 /// Terminates the calling task; never returns.

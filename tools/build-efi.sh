@@ -58,7 +58,9 @@ mkdir -p build
 rm -f "$image"
 
 # Userspace tasks are freestanding ELFs packed into the initramfs.
-cargo build --manifest-path user/zc-tasks/Cargo.toml \
+cargo build --manifest-path user/zc-producer/Cargo.toml \
+    --target "$none_target" --target-dir target --release
+cargo build --manifest-path user/zc-consumer/Cargo.toml \
     --target "$none_target" --target-dir target --release
 ./tools/mkinitramfs.sh \
     "target/$none_target/release/producer:producer.elf" \

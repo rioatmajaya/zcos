@@ -1,6 +1,6 @@
 [package]
-name = "zc-tasks"
-description = "Bring-up userspace tasks for ZC OS"
+name = "zc-consumer"
+description = "Consumer task for ZC OS"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,12 +9,8 @@ publish = false
 build = "build.rs"
 
 [[bin]]
-name = "producer"
-path = "src/bin/producer.rs"
-
-[[bin]]
 name = "consumer"
-path = "src/bin/consumer.rs"
+path = "src/main.rs"
 
 [dependencies]
 zc-user = { path = "../zc-user" }
@@ -22,7 +18,7 @@ zc-user = { path = "../zc-user" }
 [lints]
 workspace = true
 
-# Built standalone outside the host workspace (its freestanding binaries
+# Built standalone outside the host workspace (its freestanding binary
 # would otherwise fail `cargo test`); the `*.workspace = true` references
 # resolve to the concrete values below.
 [workspace.package]

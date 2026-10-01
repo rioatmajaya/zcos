@@ -10,7 +10,7 @@
 
 use core::arch::asm;
 
-use zc_user::{recv, task_exit};
+use zc_user::{log, recv, task_exit};
 
 /// How many words to verify before exiting.
 const COUNT: u64 = 2000;
@@ -18,6 +18,7 @@ const COUNT: u64 = 2000;
 /// Task entry point; the kernel provides a fresh user stack.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
+    log("consumer running\n");
     let mut expect = 0u64;
     while expect < COUNT {
         let word = recv();
@@ -29,5 +30,6 @@ pub unsafe extern "C" fn _start() -> ! {
         }
         expect += 1;
     }
+    log("consumer received 2000\n");
     task_exit()
 }

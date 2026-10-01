@@ -13,7 +13,8 @@ members = [
 # The userspace tasks are freestanding for the same reason.
 exclude = [
     "kernel/zc-kernel-image",
-    "user/zc-tasks",
+    "user/zc-consumer",
+    "user/zc-producer",
     "user/zc-user",
 ]
 

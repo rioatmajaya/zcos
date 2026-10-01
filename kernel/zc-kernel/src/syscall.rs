@@ -7,7 +7,8 @@
 //! which numbers exist.
 
 use zc_abi::{
-    SYS_CAP_DELEGATE, SYS_MAP_FRAME, SYS_RECV, SYS_SEND, SYS_TASK_EXIT, SYS_YIELD, SyscallError,
+    SYS_CAP_DELEGATE, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_RECV, SYS_SEND, SYS_TASK_EXIT, SYS_YIELD,
+    SyscallError,
 };
 
 /// The kernel operation a syscall number requests.
@@ -28,6 +29,8 @@ pub enum Action {
     MapFrame,
     /// Terminate the calling task; never returns.
     TaskExit,
+    /// Write a log string to the kernel log.
+    LogWrite,
 }
 
 /// Maps a raw syscall number to its [`Action`].
@@ -42,6 +45,7 @@ pub const fn dispatch(number: u64) -> Result<Action, SyscallError> {
         SYS_CAP_DELEGATE => Ok(Action::CapDelegate),
         SYS_MAP_FRAME => Ok(Action::MapFrame),
         SYS_TASK_EXIT => Ok(Action::TaskExit),
+        SYS_LOG_WRITE => Ok(Action::LogWrite),
         _ => Err(SyscallError::InvalidNumber),
     }
 }
@@ -58,12 +62,13 @@ mod tests {
         assert_eq!(dispatch(SYS_CAP_DELEGATE), Ok(Action::CapDelegate));
         assert_eq!(dispatch(SYS_MAP_FRAME), Ok(Action::MapFrame));
         assert_eq!(dispatch(SYS_TASK_EXIT), Ok(Action::TaskExit));
+        assert_eq!(dispatch(SYS_LOG_WRITE), Ok(Action::LogWrite));
     }
 
     #[test]
     fn unknown_numbers_are_rejected() {
         assert_eq!(
-            dispatch(6),
+            dispatch(7),
             Err(SyscallError::InvalidNumber)
         );
         assert_eq!(

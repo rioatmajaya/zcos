@@ -16,6 +16,8 @@ pub const SYS_CAP_DELEGATE: u64 = 3;
 pub const SYS_MAP_FRAME: u64 = 4;
 /// Terminates the calling task; never returns.
 pub const SYS_TASK_EXIT: u64 = 5;
+/// Writes a UTF-8 log string to the kernel log: args are pointer and length.
+pub const SYS_LOG_WRITE: u64 = 6;
 
 /// Error codes returned by failed syscalls.
 ///
@@ -77,6 +79,7 @@ mod tests {
         assert_eq!(SYS_CAP_DELEGATE, 3);
         assert_eq!(SYS_MAP_FRAME, 4);
         assert_eq!(SYS_TASK_EXIT, 5);
+        assert_eq!(SYS_LOG_WRITE, 6);
     }
 
     #[test]

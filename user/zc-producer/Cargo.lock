@@ -7,7 +7,7 @@ name = "zc-abi"
 version = "0.1.0"
 
 [[package]]
-name = "zc-tasks"
+name = "zc-producer"
 version = "0.1.0"
 dependencies = [
  "zc-user",

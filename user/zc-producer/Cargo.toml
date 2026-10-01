@@ -1,0 +1,32 @@
+[package]
+name = "zc-producer"
+description = "Producer task for ZC OS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "producer"
+path = "src/main.rs"
+
+[dependencies]
+zc-user = { path = "../zc-user" }
+
+[lints]
+workspace = true
+
+# Built standalone outside the host workspace (its freestanding binary
+# would otherwise fail `cargo test`); the `*.workspace = true` references
+# resolve to the concrete values below.
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/zc-os/zcos"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"

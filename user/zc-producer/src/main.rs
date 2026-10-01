@@ -8,7 +8,7 @@
 #![no_main]
 #![allow(unsafe_code)]
 
-use zc_user::{send, task_exit};
+use zc_user::{log, send, task_exit};
 
 /// How many words to send before exiting.
 const COUNT: u64 = 2000;
@@ -16,10 +16,12 @@ const COUNT: u64 = 2000;
 /// Task entry point; the kernel provides a fresh user stack.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
+    log("producer running\n");
     let mut next = 0u64;
     while next < COUNT {
         send(next);
         next += 1;
     }
+    log("producer sent 2000\n");
     task_exit()
 }
