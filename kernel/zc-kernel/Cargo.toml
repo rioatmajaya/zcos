@@ -1,0 +1,13 @@
+[package]
+name = "zc-kernel"
+description = "ZC OS microkernel mechanisms"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+zc-abi = { path = "../../libs/zc-abi" }
+
+[lints]
+workspace = true

@@ -1,0 +1,8 @@
+/target/
+/build/
+*.img
+*.iso
+*.qcow2
+*.log
+.idea/
+.vscode/
