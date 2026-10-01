@@ -16,12 +16,23 @@ require_command() {
 require_command cargo
 require_command rustup
 require_command qemu-system-x86_64
+require_command objdump
+require_command mkfs.vfat
+require_command mcopy
+require_command mmd
 
 if command -v rustup >/dev/null 2>&1; then
     if rustup component list --toolchain 1.95.0 --installed | grep -qx 'rust-src'; then
         printf 'found: rust-src component\n'
     else
         printf 'missing: rust-src component (install with: rustup component add rust-src)\n' >&2
+        missing=1
+    fi
+
+    if rustup target list --installed | grep -qx 'x86_64-unknown-uefi'; then
+        printf 'found: x86_64-unknown-uefi target\n'
+    else
+        printf 'missing: x86_64-unknown-uefi target (install with: rustup target add x86_64-unknown-uefi)\n' >&2
         missing=1
     fi
 fi

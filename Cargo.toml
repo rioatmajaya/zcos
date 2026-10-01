@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "boot/uefi-loader",
+    "kernel/zc-kernel",
     "libs/zc-abi",
 ]
 

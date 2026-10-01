@@ -1,0 +1,7 @@
+# Flags for the UEFI loader target.
+#
+# - panic=abort: the target has no unwinder.
+# - no-redzone: firmware may take interrupts using the loader's stack.
+# - debuginfo=2: crash addresses stay resolvable; it does not change codegen.
+[target.x86_64-unknown-uefi]
+rustflags = ["-C", "panic=abort", "-C", "no-redzone=y", "-C", "debuginfo=2"]

@@ -21,14 +21,22 @@ device manager instead of bringing down the kernel.
 
 The loader passes a `zc_abi::BootInfo` pointer in the first platform calling
 convention argument when it enters the kernel. The ABI is C-compatible
-(`#[repr(C)]`), contains physical addresses, and has an explicit protocol
-version. The kernel must reject an unsupported version before consuming other
-fields.
+(`#[repr(C)]`), contains physical addresses, and starts with a sentinel
+followed by an explicit protocol version. The kernel must reject a wrong
+sentinel or an unsupported version before consuming other fields.
+
+The memory map crosses the boundary in a loader-owned form: the loader maps
+each firmware memory type to `zc_abi::MemoryKind` before `ExitBootServices`, so
+the kernel never depends on UEFI type definitions. The same structure carries
+the GOP framebuffer description and the physical address of the ACPI RSDP.
 
 The UEFI entry point is implemented with the `efiapi` calling convention and
-uses the Simple Text Output Protocol only for early diagnostics. It must retain
-boot-services ownership until it has loaded the kernel and captured the final
-memory map; only then may it call `ExitBootServices`.
+uses the Simple Text Output Protocol and a COM1 serial port for early
+diagnostics. It must retain boot-services ownership until it has loaded the
+kernel and captured the final memory map; only then may it call
+`ExitBootServices`. No boot service may be called between the final
+`GetMemoryMap` and `ExitBootServices`, because any such call invalidates the
+map key.
 
 ## IPC and authority
 

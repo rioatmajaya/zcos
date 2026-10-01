@@ -9,5 +9,10 @@ repository.workspace = true
 [dependencies]
 zc-abi = { path = "../../libs/zc-abi" }
 
+[features]
+# Terminate QEMU through isa-debug-exit so an automated boot test ends with a
+# status code. Never enable this for a real firmware build.
+qemu-exit = []
+
 [lints]
 workspace = true

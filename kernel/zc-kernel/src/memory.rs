@@ -1,12 +1,9 @@
 //! Physical-frame allocation from loader supplied memory regions.
 
-use zc_abi::MemoryRegion;
+use zc_abi::{MemoryKind, MemoryRegion};
 
 /// x86_64 base page size.
 pub const PAGE_SIZE: u64 = 4096;
-
-/// UEFI's numeric type for conventional, allocator-owned RAM.
-pub const EFI_CONVENTIONAL_MEMORY: u32 = 7;
 
 /// A page-aligned physical address returned by [`FrameAllocator`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -20,7 +17,7 @@ impl PhysFrame {
     }
 }
 
-/// A monotonic allocator over conventional UEFI memory regions.
+/// A monotonic allocator over loader-classified usable memory regions.
 ///
 /// The allocator is intentionally simple for early boot: frames are never
 /// returned and it uses no dynamic allocation. The virtual-memory subsystem
@@ -32,7 +29,7 @@ pub struct FrameAllocator<'a> {
 }
 
 impl<'a> FrameAllocator<'a> {
-    /// Creates an allocator that ignores all non-conventional memory regions.
+    /// Creates an allocator that ignores every non-usable memory region.
     #[must_use]
     pub const fn new(regions: &'a [MemoryRegion]) -> Self {
         Self {
@@ -47,7 +44,7 @@ impl<'a> FrameAllocator<'a> {
     pub fn allocate(&mut self) -> Option<PhysFrame> {
         while self.region_index < self.regions.len() {
             let region = self.regions[self.region_index];
-            if region.kind != EFI_CONVENTIONAL_MEMORY {
+            if region.kind != MemoryKind::Usable {
                 self.advance_region();
                 continue;
             }
@@ -96,9 +93,9 @@ fn align_up(value: u64, alignment: u64) -> Option<u64> {
 mod tests {
     use super::*;
 
-    const RESERVED: u32 = 0;
+    const RESERVED: MemoryKind = MemoryKind::Reserved;
 
-    fn region(start: u64, len: u64, kind: u32) -> MemoryRegion {
+    fn region(start: u64, len: u64, kind: MemoryKind) -> MemoryRegion {
         MemoryRegion {
             start,
             len,
@@ -111,7 +108,7 @@ mod tests {
     fn skips_reserved_memory_and_aligns_frames() {
         let regions = [
             region(0, PAGE_SIZE, RESERVED),
-            region(0x1003, PAGE_SIZE * 3, EFI_CONVENTIONAL_MEMORY),
+            region(0x1003, PAGE_SIZE * 3, MemoryKind::Usable),
         ];
         let mut allocator = FrameAllocator::new(&regions);
 
@@ -123,8 +120,8 @@ mod tests {
     #[test]
     fn advances_to_later_usable_region() {
         let regions = [
-            region(0x1000, PAGE_SIZE, EFI_CONVENTIONAL_MEMORY),
-            region(0x9000, PAGE_SIZE, EFI_CONVENTIONAL_MEMORY),
+            region(0x1000, PAGE_SIZE, MemoryKind::Usable),
+            region(0x9000, PAGE_SIZE, MemoryKind::Usable),
         ];
         let mut allocator = FrameAllocator::new(&regions);
 
@@ -141,7 +138,7 @@ mod tests {
 
     #[test]
     fn rejects_overflowing_region() {
-        let regions = [region(u64::MAX - 1, PAGE_SIZE, EFI_CONVENTIONAL_MEMORY)];
+        let regions = [region(u64::MAX - 1, PAGE_SIZE, MemoryKind::Usable)];
         let mut allocator = FrameAllocator::new(&regions);
 
         assert_eq!(allocator.allocate(), None);
@@ -150,8 +147,8 @@ mod tests {
     #[test]
     fn skips_an_overflowing_region_and_uses_a_later_one() {
         let regions = [
-            region(u64::MAX - 1, PAGE_SIZE, EFI_CONVENTIONAL_MEMORY),
-            region(0x4000, PAGE_SIZE, EFI_CONVENTIONAL_MEMORY),
+            region(u64::MAX - 1, PAGE_SIZE, MemoryKind::Usable),
+            region(0x4000, PAGE_SIZE, MemoryKind::Usable),
         ];
         let mut allocator = FrameAllocator::new(&regions);
 

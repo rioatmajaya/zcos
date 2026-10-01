@@ -1,10 +1,15 @@
 //! Validation of the loader-to-kernel hand-off contract.
 
-use zc_abi::{BOOT_PROTOCOL_VERSION, BootInfo};
+use zc_abi::{BOOT_INFO_MAGIC, BOOT_PROTOCOL_VERSION, BootInfo};
 
 /// Why the kernel rejected boot metadata supplied by the loader.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BootError {
+    /// The structure did not start with the expected sentinel.
+    BadMagic {
+        /// Sentinel supplied by the loader.
+        found: u64,
+    },
     /// The loader and kernel do not implement the same protocol revision.
     UnsupportedProtocol {
         /// Protocol revision supplied by the loader.
@@ -22,6 +27,9 @@ pub enum BootError {
 /// initialized, the architecture layer owns checking that physical ranges are
 /// mapped and non-overlapping.
 pub fn validate(info: &BootInfo) -> Result<(), BootError> {
+    if info.magic != BOOT_INFO_MAGIC {
+        return Err(BootError::BadMagic { found: info.magic });
+    }
     if info.protocol_version != BOOT_PROTOCOL_VERSION {
         return Err(BootError::UnsupportedProtocol {
             found: info.protocol_version,
@@ -39,29 +47,34 @@ pub fn validate(info: &BootInfo) -> Result<(), BootError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zc_abi::{FramebufferInfo, PixelFormat};
+    use zc_abi::FramebufferInfo;
 
     fn info() -> BootInfo {
         BootInfo {
+            magic: BOOT_INFO_MAGIC,
             protocol_version: BOOT_PROTOCOL_VERSION,
             flags: 0,
             memory_map: 0x1000,
             memory_map_len: 1,
             initramfs_start: 0,
             initramfs_len: 0,
-            framebuffer: FramebufferInfo {
-                address: 0,
-                width: 0,
-                height: 0,
-                stride: 0,
-                pixel_format: PixelFormat::Unavailable,
-            },
+            rsdp: 0,
+            framebuffer: FramebufferInfo::UNAVAILABLE,
         }
     }
 
     #[test]
     fn accepts_well_formed_boot_info() {
         assert_eq!(validate(&info()), Ok(()));
+    }
+
+    #[test]
+    fn rejects_bad_magic_before_other_fields() {
+        let mut boot_info = info();
+        boot_info.magic = 0;
+        boot_info.protocol_version += 1;
+
+        assert_eq!(validate(&boot_info), Err(BootError::BadMagic { found: 0 }));
     }
 
     #[test]

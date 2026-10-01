@@ -9,11 +9,13 @@
 
 ## Milestone 1 — UEFI to kernel
 
-- UEFI application loader. The initial EFI entry point emits a firmware-console
-  diagnostic and establishes the loader's explicit UEFI ABI boundary.
-- ELF64 kernel loading, UEFI memory map capture, framebuffer discovery, and
-  initramfs loading.
-- Serial diagnostics and a repeatable QEMU boot test.
+- UEFI application loader. The EFI entry point establishes the loader's
+  explicit UEFI ABI boundary, disables the firmware watchdog, discovers the GOP
+  framebuffer, captures the memory map, and locates the ACPI RSDP.
+- Serial diagnostics and a repeatable QEMU boot test (`tools/run-qemu.sh
+  --test`), wired into CI.
+- `ExitBootServices`, ELF64 kernel loading, and the hand-off to `kernel_main`.
+  initramfs loading follows.
 
 ## Milestone 2 — kernel mechanisms
 
