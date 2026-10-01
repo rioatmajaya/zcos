@@ -18,6 +18,12 @@ pub const SYS_MAP_FRAME: u64 = 4;
 pub const SYS_TASK_EXIT: u64 = 5;
 /// Writes a UTF-8 log string to the kernel log: args are pointer and length.
 pub const SYS_LOG_WRITE: u64 = 6;
+/// Opens a filesystem path: args are pointer and length, returns a
+/// descriptor or `u64::MAX` on failure.
+pub const SYS_OPEN: u64 = 7;
+/// Reads from a descriptor into a buffer: args are descriptor, pointer, and
+/// length; returns bytes read or `u64::MAX` on failure.
+pub const SYS_READ: u64 = 8;
 
 /// Error codes returned by failed syscalls.
 ///
@@ -80,6 +86,8 @@ mod tests {
         assert_eq!(SYS_MAP_FRAME, 4);
         assert_eq!(SYS_TASK_EXIT, 5);
         assert_eq!(SYS_LOG_WRITE, 6);
+        assert_eq!(SYS_OPEN, 7);
+        assert_eq!(SYS_READ, 8);
     }
 
     #[test]

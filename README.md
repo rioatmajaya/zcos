@@ -13,21 +13,27 @@ and GDT, and jumps to the bare-metal kernel. The kernel validates the
 map, and ACPI RSDP over the serial port, and halts. The full path runs
 headless and is verified by the CI boot test.
 
-The kernel crate provides the first mechanisms — boot-contract validation, a
-physical frame allocator with recycling, virtual-memory helpers, a
-round-robin scheduler, bounded IPC endpoints, and generation-safe
-capability tables — and is covered by host unit tests. The loader's UEFI
-bindings and ELF parser have host unit tests as well. The bootable kernel
-image validates through `zc-kernel`, installs its own GDT/TSS and a 256-gate
-IDT, proves the APIC timer path by counting 16 ticks, runs a first
-userspace task in ring 3 (50M iterations preempted by 100+ ticks, exited
-via `int 0x80`), ACPI topology (`acpi: rsdp v2, …`), a calibrated APIC bus,
-an initramfs walked and listed (`initramfs: … files, …`), two preemptively
-scheduled ring-3 tasks loaded as Rust ELFs from the initramfs
-(`user: producer entry …, consumer entry …`, `user: exited, tasks done … switches`), and a
-mechanisms self-test on live loader data (`gdt:` / `traps:` /
-`syscall gate probe:` / `timer:` / `user:` / `mechanisms self-test ok` in
-the serial log).
+Milestone 2 is complete except SMP: the loader also delivers an initramfs
+archive, and the kernel brings up its own GDT/TSS, a 256-gate IDT on IST
+stacks, a calibrated APIC timer (~1 GHz bus, 1 ms ticks), ACPI topology
+discovery, and a first ring-3 task. SMP bring-up code (INIT-SIPI-SIPI,
+sub-megabyte trampoline, per-AP stacks) exists but stays dormant: this
+environment's OVMF triple-faults during `ExitBootServices` with two CPUs,
+before any kernel code runs (see `docs/roadmap.md`).
+
+Milestone 3 is underway: two Rust userspace tasks (`user/zc-producer`,
+`user/zc-consumer`) load as ET_EXEC binaries from the initramfs, run
+preemptively under the APIC timer (~1000 context switches per boot), and
+communicate over syscalls — blocking IPC messages, logging, and file
+reads (`task 0: manifest ok`, `task 1: hello verified`,
+`task 0: producer sent 2000`, `task 1: consumer received 2000`).
+
+The kernel crate provides the mechanisms — boot-contract validation, a
+physical frame allocator with recycling, virtual-memory helpers, task and
+scheduler tables, bounded IPC endpoints, a read-only initramfs filesystem,
+ACPI/MADT parsing, and generation-safe capability tables — and is covered
+by host unit tests, as are the shared `zc-abi`/`zc-elf` crates and the
+loader's UEFI bindings.
 
 ## Development
 
@@ -35,7 +41,7 @@ the serial log).
 cargo test --workspace
 ./tools/verify-host.sh
 
-./tools/build-efi.sh          # produce build/zcos.img (loader + kernel)
+./tools/build-efi.sh          # produce build/zcos.img (loader + kernel + user tasks + initramfs)
 ./tools/run-qemu.sh           # boot it under QEMU + OVMF
 ./tools/run-qemu.sh --test    # headless boot test for CI
 ```

@@ -10,6 +10,7 @@ use core::arch::{asm, naked_asm};
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 
 use zc_abi::BootInfo;
+use zc_kernel::fs::{FdTable, Fs};
 use zc_kernel::gdt::{USER_CS, USER_RFLAGS, USER_SS};
 use zc_kernel::ipc::Endpoint;
 use zc_kernel::memory::{FrameAllocator, PAGE_SIZE};
@@ -72,11 +73,17 @@ const FLAG_USER: u64 = 1 << 2;
 /// Round-robin table for the bring-up tasks.
 static mut TASKS: TaskTable<4> = TaskTable::new();
 
+/// Mounted initramfs filesystem, shared read-only by all tasks.
+static mut FS: Option<Fs<'static>> = None;
+
+/// Per-task descriptor tables, indexed by task index.
+static mut FDS: [FdTable<'static>; 4] = [FdTable::new(); 4];
+
 /// Physical address of the user page table, for buffer validation.
 static mut USER_PT: u64 = 0;
 
-/// Longest single log write accepted from userspace.
-const MAX_LOG_LEN: u64 = 512;
+/// Longest single userspace buffer accepted per syscall.
+const MAX_USER_IO_LEN: u64 = 512;
 
 /// Kernel stack pointer restored when leaving userspace for good.
 #[unsafe(no_mangle)]
@@ -242,6 +249,63 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             }
             regs.set_result(regs.rsi);
             0
+        }
+        Ok(Action::Open) => {
+            let me = tasks.current();
+            let path = match validate_user_slice(regs.rdi, regs.rsi) {
+                Some(path) => path,
+                None => {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+            };
+            // SAFETY: mounted once during setup before any task runs.
+            let fs = unsafe { &*core::ptr::addr_of!(FS) };
+            let Some(fs) = fs else {
+                crate::fail("fs not mounted")
+            };
+            let data = match fs.open(path) {
+                Ok(data) => data,
+                Err(_) => {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+            };
+            // SAFETY: task indexes stay below the table length.
+            let table = unsafe { &mut (*core::ptr::addr_of_mut!(FDS))[me] };
+            match table.open(data) {
+                Ok(fd) => {
+                    regs.set_result(u64::from(fd));
+                    0
+                }
+                Err(_) => {
+                    regs.set_result(u64::MAX);
+                    0
+                }
+            }
+        }
+        Ok(Action::Read) => {
+            let me = tasks.current();
+            let fd = regs.rdi as u32;
+            let out = match validate_user_slice_mut(regs.rsi, regs.rdx) {
+                Some(out) => out,
+                None => {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+            };
+            // SAFETY: as in `Open`.
+            let table = unsafe { &mut (*core::ptr::addr_of_mut!(FDS))[me] };
+            match table.read(fd, out) {
+                Ok(count) => {
+                    regs.set_result(count as u64);
+                    0
+                }
+                Err(_) => {
+                    regs.set_result(u64::MAX);
+                    0
+                }
+            }
         }
         Ok(_) => {
             regs.set_result(u64::MAX);
@@ -464,6 +528,23 @@ pub fn enter(
     let entry_a = map_elf(PRODUCER_NAME, producer, alloc, pt_phys);
     let entry_b = map_elf(CONSUMER_NAME, consumer, alloc, pt_phys);
 
+    // Mount the initramfs for file syscalls before any task can open.
+    // SAFETY: the loader wrote the archive into the identity map; the
+    // pages outlive the boot.
+    unsafe {
+        let info = &*boot_info;
+        if info.initramfs_len != 0 && info.initramfs_start != 0 {
+            let bytes: &'static [u8] = core::slice::from_raw_parts(
+                info.initramfs_start as *const u8,
+                info.initramfs_len as usize,
+            );
+            match zc_kernel::fs::Fs::mount(bytes) {
+                Ok(fs) => core::ptr::addr_of_mut!(FS).write(Some(fs)),
+                Err(_) => crate::fail("initramfs corrupt"),
+            }
+        }
+    }
+
     // One stack page per task, above the image window.
     let (Some(stack_a), Some(stack_b)) = (alloc.allocate(), alloc.allocate()) else {
         crate::fail("user setup found no stack frames");
@@ -596,7 +677,26 @@ const fn page_index(virt: u64) -> usize {
 /// read across arbitrary memory. Returns `None` for empty, over-long,
 /// overflowing, out-of-window, or unmapped ranges.
 fn validate_user_slice(ptr: u64, len: u64) -> Option<&'static [u8]> {
-    if len == 0 || len > MAX_LOG_LEN {
+    check_user_range(ptr, len)?;
+    // SAFETY: checked present above; the range stays mapped for the rest of
+    // the boot.
+    Some(unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) })
+}
+
+/// Views a userspace byte range mutably after validating it.
+///
+/// Same checks as [`validate_user_slice`]; the caller must not retain the
+/// slice past the syscall.
+fn validate_user_slice_mut(ptr: u64, len: u64) -> Option<&'static mut [u8]> {
+    check_user_range(ptr, len)?;
+    // SAFETY: as above; every present user page is writable in this setup,
+    // and the kernel writes the buffer before returning.
+    Some(unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len as usize) })
+}
+
+/// Runs the checks shared by both validators.
+fn check_user_range(ptr: u64, len: u64) -> Option<()> {
+    if len == 0 || len > MAX_USER_IO_LEN {
         return None;
     }
     let end = ptr.checked_add(len)?;
@@ -622,8 +722,7 @@ fn validate_user_slice(ptr: u64, len: u64) -> Option<&'static [u8]> {
         }
         page += PAGE_SIZE;
     }
-    // SAFETY: every covered page is present with user permissions.
-    Some(unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) })
+    Some(())
 }
 
 /// Finds a file in the initramfs by name.

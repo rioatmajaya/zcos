@@ -14,6 +14,7 @@ pub mod addrspace;
 pub mod boot;
 pub mod capability;
 pub mod cpio;
+pub mod fs;
 pub mod gdt;
 pub mod ipc;
 pub mod memory;

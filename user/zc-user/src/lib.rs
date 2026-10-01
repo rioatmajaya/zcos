@@ -11,8 +11,8 @@
 use core::arch::asm;
 
 pub use zc_abi::{
-    SYS_CAP_DELEGATE, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_RECV, SYS_SEND, SYS_TASK_EXIT, SYS_YIELD,
-    SyscallError,
+    SYS_CAP_DELEGATE, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_OPEN, SYS_READ, SYS_RECV, SYS_SEND,
+    SYS_TASK_EXIT, SYS_YIELD, SyscallError,
 };
 
 /// Issues a syscall with no arguments.
@@ -64,6 +64,24 @@ pub fn syscall2(number: u64, arg0: u64, arg1: u64) -> u64 {
     result
 }
 
+/// Issues a syscall with three arguments in `rdi`, `rsi`, and `rdx`.
+#[inline(always)]
+pub fn syscall3(number: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
+    let result: u64;
+    // SAFETY: as in `syscall0`; `rdx` carries the third argument.
+    unsafe {
+        asm!(
+            "int $0x80",
+            inlateout("rax") number => result,
+            in("rdi") arg0,
+            in("rsi") arg1,
+            in("rdx") arg2,
+            options(nostack, preserves_flags),
+        );
+    }
+    result
+}
+
 /// Sends one word on the task's endpoint, blocking when full.
 #[inline(always)]
 pub fn send(word: u64) -> u64 {
@@ -83,6 +101,24 @@ pub fn recv() -> u64 {
 #[inline(always)]
 pub fn log(message: &str) -> u64 {
     syscall2(SYS_LOG_WRITE, message.as_ptr() as u64, message.len() as u64)
+}
+
+/// Opens a filesystem path, returning a descriptor or `u64::MAX`.
+#[inline(always)]
+pub fn open(path: &str) -> u64 {
+    syscall2(SYS_OPEN, path.as_ptr() as u64, path.len() as u64)
+}
+
+/// Reads up to `buffer.len()` bytes into `buffer`, returning the count or
+/// `u64::MAX` on failure.
+#[inline(always)]
+pub fn read(fd: u64, buffer: &mut [u8]) -> u64 {
+    syscall3(
+        SYS_READ,
+        fd,
+        buffer.as_mut_ptr() as u64,
+        buffer.len() as u64,
+    )
 }
 
 /// Terminates the calling task; never returns.

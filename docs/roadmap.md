@@ -78,8 +78,13 @@
   at distinct link bases, packed into the initramfs) replace it; the ELF
   parser moved to a shared `libs/zc-elf` crate; and the kernel maps each
   task image with user permissions, merging segments that share a page.
-  A task-side log syscall (`SYS_LOG_WRITE`, validated against the page
-  table) lets tasks print (`task 0: producer sent 2000`).
+- Landed as Milestone 3d: task logging. A log syscall (`SYS_LOG_WRITE`,
+  with user buffers validated against the page table) lets tasks print
+  (`task 0: producer sent 2000`).
+- Landed as Milestone 3e: file syscalls. `SYS_OPEN`/`SYS_READ` serve the
+  initramfs through a read-only filesystem (path validation, descriptor
+  tables with offsets, all host-tested); the bring-up tasks open and
+  verify their data files before the IPC exchange.
 
 ## Milestone 3 — desktop base
 

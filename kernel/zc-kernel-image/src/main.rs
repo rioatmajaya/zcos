@@ -12,8 +12,8 @@ use core::arch::asm;
 use core::fmt::Write;
 
 use zc_abi::{
-    BootInfo, MemoryRegion, Message, SYS_CAP_DELEGATE, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_RECV,
-    SYS_SEND, SYS_TASK_EXIT, SYS_YIELD,
+    BootInfo, MemoryRegion, Message, SYS_CAP_DELEGATE, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_OPEN,
+    SYS_READ, SYS_RECV, SYS_SEND, SYS_TASK_EXIT, SYS_YIELD,
 };
 use zc_kernel::{
     addrspace::AddressSpace,
@@ -218,6 +218,8 @@ fn exercise_mechanisms(alloc: &mut FrameAllocator<'_>, usable: u64) {
         (SYS_MAP_FRAME, Action::MapFrame),
         (SYS_TASK_EXIT, Action::TaskExit),
         (SYS_LOG_WRITE, Action::LogWrite),
+        (SYS_OPEN, Action::Open),
+        (SYS_READ, Action::Read),
     ];
     for (number, expected) in dispatched {
         match syscall::dispatch(number) {

@@ -52,6 +52,8 @@ jobs:
         grep -q "user: exited" build/boot.log
         grep -q "task 0: producer sent 2000" build/boot.log
         grep -q "task 1: consumer received 2000" build/boot.log
+        grep -q "task 1: hello verified" build/boot.log
+        grep -q "task 0: manifest ok" build/boot.log
         grep -q "switches" build/boot.log
         grep -q "acpi: rsdp v2" build/boot.log
         grep -q "initramfs: 4 files" build/boot.log
