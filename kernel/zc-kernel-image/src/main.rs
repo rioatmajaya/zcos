@@ -12,10 +12,28 @@ use core::arch::asm;
 use core::fmt::Write;
 
 use zc_abi::{
-    BOOT_INFO_MAGIC, BOOT_PROTOCOL_VERSION, BootInfo, MemoryKind, MemoryRegion,
+    BootInfo, MemoryRegion, Message, SYS_CAP_DELEGATE, SYS_MAP_FRAME, SYS_RECV, SYS_SEND,
+    SYS_TASK_EXIT, SYS_YIELD,
+};
+use zc_kernel::{
+    addrspace::AddressSpace,
+    boot,
+    capability::{Capability, CapabilityTable, Rights},
+    ipc::Endpoint,
+    memory::{FrameAllocator, usable_bytes},
+    sched::Scheduler,
+    syscall::{self, Action},
+    vm::{KERNEL_VIRT_BASE, PAGE_SIZE, PhysAddr, VirtAddr, validate_map_4k},
 };
 
+mod acpi;
+mod apic;
+mod gdt;
+mod hpet;
 mod serial;
+mod idt;
+mod smp;
+mod user;
 
 /// Kernel entry point.
 ///
@@ -44,11 +62,14 @@ fn kernel_main(boot_info: *const BootInfo) -> ! {
     // identity map still covers its physical address.
     let info = unsafe { &*boot_info };
 
-    if info.magic != BOOT_INFO_MAGIC {
-        fail("boot info magic mismatch");
-    }
-    if info.protocol_version != BOOT_PROTOCOL_VERSION {
-        fail("unsupported boot protocol version");
+    match boot::validate(info) {
+        Ok(()) => {}
+        Err(boot::BootError::BadMagic { .. }) => fail("boot info magic mismatch"),
+        Err(boot::BootError::UnsupportedProtocol { .. }) => {
+            fail("unsupported boot protocol version")
+        }
+        Err(boot::BootError::MissingMemoryMap) => fail("empty memory map"),
+        Err(boot::BootError::MissingInitramfs) => fail("bad initramfs address"),
     }
     serial::write_str("boot protocol v2 ok\n");
 
@@ -74,16 +95,13 @@ fn kernel_main(boot_info: *const BootInfo) -> ! {
         core::slice::from_raw_parts(info.memory_map as *const MemoryRegion, info.memory_map_len as usize)
     };
 
-    let mut usable = 0u64;
+    let usable = usable_bytes(regions);
     let mut counts = [0u64; 15];
     for region in regions {
         if region.kind as u32 > 14 {
             continue;
         }
         counts[region.kind as usize] += 1;
-        if matches!(region.kind, MemoryKind::Usable) {
-            usable = usable.saturating_add(region.len);
-        }
     }
 
     let _ = serial::print(format_args!(
@@ -93,6 +111,23 @@ fn kernel_main(boot_info: *const BootInfo) -> ! {
     ));
     report_kinds(&counts);
 
+    // One allocator feeds every later stage so no frame is handed out twice:
+    // the self-test recycles, SMP keeps its frames, and the user task keeps
+    // its pages.
+    let mut alloc = FrameAllocator::new(regions);
+    exercise_mechanisms(&mut alloc, usable);
+    exercise_traps_and_timer();
+    acpi::describe(info.rsdp);
+    report_initramfs(info);
+    smp::bring_up(&mut alloc);
+    user::enter(&mut alloc, boot_info);
+}
+
+/// Prints the firmware handoff tail and idles forever.
+///
+/// The user task reaches this through [`user::user_finished`] after exiting
+/// ring 3; it never runs before privilege separation is complete.
+pub(crate) fn boot_tail(info: &BootInfo) -> ! {
     if info.rsdp != 0 {
         let _ = serial::print(format_args!("ACPI RSDP at {:#x}\n", info.rsdp));
     } else {
@@ -101,6 +136,206 @@ fn kernel_main(boot_info: *const BootInfo) -> ! {
 
     serial::write_str("kernel reached idle state\n");
     qemu_exit(0x10);
+}
+
+/// Exercises the Milestone 2 kernel mechanisms on live loader data.
+///
+/// The frame allocator runs over the real memory map; the capability table,
+/// scheduler, IPC endpoint, and VM validator run bounded self-tests. Any
+/// failure stops the boot with the failure exit code so CI catches a
+/// regression in a mechanism, not just in the loader hand-off.
+fn exercise_mechanisms(alloc: &mut FrameAllocator<'_>, usable: u64) {
+    let Some(first) = alloc.allocate() else {
+        fail("allocator self-test found no usable frame");
+    };
+    let address = first.start_address();
+    if !alloc.free(first) {
+        fail("allocator self-test could not recycle a frame");
+    }
+    match alloc.allocate() {
+        Some(frame) if frame.start_address() == address => {}
+        _ => fail("allocator self-test did not reuse a freed frame"),
+    }
+    let _ = serial::print(format_args!(
+        "allocator: frame {:#x} recycled, {} MiB usable\n",
+        address,
+        usable / (1024 * 1024),
+    ));
+
+    let mut table = CapabilityTable::<8>::new();
+    let rights = Rights::READ.union(Rights::WRITE).union(Rights::GRANT);
+    let handle = match table.insert(Capability::new(1, rights)) {
+        Ok(handle) => handle,
+        Err(_) => fail("capability self-test could not insert"),
+    };
+    let mut target = CapabilityTable::<8>::new();
+    if table.delegate(handle, &mut target, Rights::READ).is_err() {
+        fail("capability self-test could not delegate");
+    }
+
+    let mut scheduler = Scheduler::<4>::new();
+    let Ok(first_id) = scheduler.spawn() else {
+        fail("scheduler self-test could not spawn");
+    };
+    let Ok(second_id) = scheduler.spawn() else {
+        fail("scheduler self-test could not spawn");
+    };
+    if scheduler.tick() != Some(first_id) || scheduler.tick() != Some(second_id) {
+        fail("scheduler self-test broke round-robin order");
+    }
+
+    let mut endpoint = Endpoint::<4>::new();
+    let message = match Message::from_words(&[0xCAFE, 0xF00D]) {
+        Some(message) => message,
+        None => fail("ipc self-test could not build a message"),
+    };
+    if endpoint.send(message).is_err() {
+        fail("ipc self-test could not send");
+    }
+    match endpoint.recv() {
+        Ok(echo) if echo == message => {}
+        _ => fail("ipc self-test did not echo the message"),
+    }
+
+    if VirtAddr::new(KERNEL_VIRT_BASE).pml4_index() != 511 {
+        fail("vm self-test found a wrong kernel mapping");
+    }
+    if validate_map_4k(
+        VirtAddr::new(0x1000),
+        PhysAddr::new(0x2000),
+        PAGE_SIZE,
+    )
+    .is_err()
+    {
+        fail("vm self-test rejected a valid mapping");
+    }
+
+    let dispatched = [
+        (SYS_YIELD, Action::Yield),
+        (SYS_SEND, Action::Send),
+        (SYS_RECV, Action::Receive),
+        (SYS_CAP_DELEGATE, Action::CapDelegate),
+        (SYS_MAP_FRAME, Action::MapFrame),
+        (SYS_TASK_EXIT, Action::TaskExit),
+    ];
+    for (number, expected) in dispatched {
+        match syscall::dispatch(number) {
+            Ok(action) if action == expected => {}
+            _ => fail("syscall self-test misdispatched a number"),
+        }
+    }
+    if syscall::dispatch(u64::MAX).is_ok() {
+        fail("syscall self-test accepted an unknown number");
+    }
+
+    let mut space = AddressSpace::<8>::new();
+    if space.map(0x200_000, PAGE_SIZE * 2).is_err() {
+        fail("addrspace self-test could not map");
+    }
+    if !space.contains(0x201_000) || space.map(0x201_000, PAGE_SIZE).is_ok() {
+        fail("addrspace self-test broke overlap rules");
+    }
+    if space.unmap(0x200_000).is_err() {
+        fail("addrspace self-test could not unmap");
+    }
+
+    serial::write_str("mechanisms self-test ok (alloc caps sched ipc vm syscall addrspace)\n");
+}
+
+/// Installs privilege separation and proves the APIC timer ticks.
+///
+/// The kernel GDT/TSS must come first so the IDT gates can reference IST1;
+/// the timer is left running so the user task demo observes preemption.
+fn exercise_traps_and_timer() {
+    gdt::install();
+    serial::write_str("gdt: installed (tss rsp0 ist1)\n");
+
+    idt::install();
+    let _ = serial::print(format_args!(
+        "traps: idt installed ({} vectors)\n",
+        idt::INSTALLED_VECTORS,
+    ));
+
+    // Synchronous probe of the IST1 syscall gate: an unknown number must
+    // round-trip through the stub on the interrupt stack and come back as
+    // InvalidNumber (code 1). This is also the permanent regression test
+    // for interrupt-stack switching.
+    let probe: u32;
+    // SAFETY: vector 0x80 is a DPL-3 gate present in the installed IDT; the
+    // stub saves all registers and resumes with `iretq`.
+    unsafe {
+        core::arch::asm!(
+            "int $0x80",
+            inlateout("eax") 0x51u32 => probe,
+            options(nostack, preserves_flags),
+        );
+    }
+    let _ = serial::print(format_args!("syscall gate probe: {}\n", probe));
+    if probe != 1 {
+        fail("syscall gate probe returned a wrong code");
+    }
+
+    apic::init();
+    apic::start_timer();
+    idt::enable();
+
+    let mut spins = 0u32;
+    while apic::ticks() < apic::TARGET_TICKS {
+        core::hint::spin_loop();
+        spins += 1;
+        if spins == 100_000_000 {
+            idt::disable();
+            fail("timer did not tick");
+        }
+    }
+
+    let _ = serial::print(format_args!("timer: {} ticks\n", apic::ticks()));
+
+    let Some(bus_hz) = apic::calibrate() else {
+        fail("timer calibration failed");
+    };
+    if !(1_000_000..=20_000_000_000).contains(&bus_hz) {
+        fail("timer calibration out of range");
+    }
+    if apic::start_periodic_1ms(bus_hz).is_none() {
+        fail("timer 1ms setup failed");
+    }
+    let _ = serial::print(format_args!("timer: calibrated bus {} Hz\n", bus_hz));
+}
+
+/// Reports the initramfs archive the loader handed over.
+///
+/// Lists up to four entry names so the log proves the archive parsed; any
+/// corruption stops the boot because later stages must trust it.
+fn report_initramfs(info: &BootInfo) {
+    if info.initramfs_len == 0 {
+        serial::write_str("initramfs absent\n");
+        return;
+    }
+    // SAFETY: `boot::validate` required a non-zero start for a non-empty
+    // archive, and the loader identity map covers its pages.
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            info.initramfs_start as *const u8,
+            info.initramfs_len as usize,
+        )
+    };
+    let mut shown = 0u32;
+    let count = match zc_kernel::cpio::walk(bytes, |entry| {
+        if shown < 4 {
+            let _ = serial::print(format_args!("initramfs: {}\n", entry.name()));
+            shown += 1;
+        }
+        true
+    }) {
+        Ok(count) => count,
+        Err(_) => fail("initramfs corrupt"),
+    };
+    let _ = serial::print(format_args!(
+        "initramfs: {} files, {} bytes\n",
+        count,
+        info.initramfs_len,
+    ));
 }
 
 /// Prints a compact summary of which memory kinds the loader reported.
@@ -135,7 +370,7 @@ fn report_kinds(counts: &[u64; 15]) {
 }
 
 /// Reports a fatal boot-contract violation and stops the machine.
-fn fail(message: &str) -> ! {
+pub(crate) fn fail(message: &str) -> ! {
     serial::write_str("error: ");
     serial::write_str(message);
     serial::write_str("\n");

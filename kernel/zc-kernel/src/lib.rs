@@ -6,6 +6,21 @@
 
 #![no_std]
 
+#[cfg(test)]
+extern crate std;
+
+pub mod acpi;
+pub mod addrspace;
 pub mod boot;
 pub mod capability;
+pub mod cpio;
+pub mod gdt;
+pub mod ipc;
 pub mod memory;
+pub mod sched;
+pub mod syscall;
+pub mod task;
+pub mod timer;
+pub mod tramp;
+pub mod trap;
+pub mod vm;

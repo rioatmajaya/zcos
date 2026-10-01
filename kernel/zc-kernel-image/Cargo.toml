@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 zc-abi = { path = "../../libs/zc-abi" }
+zc-kernel = { path = "../zc-kernel" }
 
 [features]
 # Terminate QEMU through isa-debug-exit so an automated boot test ends with a

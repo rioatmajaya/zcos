@@ -11,6 +11,14 @@
 
 #![no_std]
 
+pub mod ipc;
+pub mod syscall;
+
+pub use ipc::{MESSAGE_WORDS, Message};
+pub use syscall::{
+    SYS_CAP_DELEGATE, SYS_MAP_FRAME, SYS_RECV, SYS_SEND, SYS_TASK_EXIT, SYS_YIELD, SyscallError,
+};
+
 /// Current version of the loader-to-kernel boot protocol.
 pub const BOOT_PROTOCOL_VERSION: u32 = 2;
 

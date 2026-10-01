@@ -1,0 +1,3 @@
+name=ZC OS
+version=0.1.0
+init=/sbin/initd

@@ -38,6 +38,9 @@ const IDENTITY_LIMIT: u64 = 0x1_0000_0000;
 /// Pages reserved for reading the kernel ELF (1 MiB).
 const KERNEL_BUFFER_PAGES: usize = 256;
 
+/// Pages reserved for the initramfs (1 MiB cap).
+const INITRAMFS_BUFFER_PAGES: usize = 256;
+
 /// Pages reserved for the kernel stack (64 KiB).
 const STACK_PAGES: usize = 16;
 
@@ -57,6 +60,9 @@ const CONSOLE_BUFFER: usize = 256;
 
 /// Path of the kernel image on the boot volume.
 const KERNEL_PATH: [u16; 21] = utf16z("\\EFI\\BOOT\\KERNEL.ELF");
+
+/// Path of the initramfs archive on the boot volume.
+const INITRAMFS_PATH: [u16; 25] = utf16z("\\EFI\\BOOT\\INITRAMFS.CPIO");
 
 /// UEFI entry point used by firmware to start the ZC OS loader.
 ///
@@ -119,7 +125,7 @@ pub unsafe extern "efiapi" fn efi_main(
         fatal("cannot allocate memory-map buffers");
     };
 
-    let Some(kernel_bytes) = read_kernel_image(image_handle, boot_services) else {
+    let Some(kernel_bytes) = read_file(image_handle, boot_services, &KERNEL_PATH, KERNEL_BUFFER_PAGES) else {
         fatal("cannot read \\EFI\\BOOT\\KERNEL.ELF");
     };
     let image = match elf::parse(kernel_bytes) {
@@ -154,6 +160,23 @@ pub unsafe extern "efiapi" fn efi_main(
     };
     let stack_top = stack_base + (STACK_PAGES as u64) * PAGE_SIZE;
 
+    // The initramfs is optional: an image without one still boots, and the
+    // kernel reports its absence. A present archive rides in loader-owned
+    // pages that survive ExitBootServices.
+    let initramfs = read_file(
+        image_handle,
+        boot_services,
+        &INITRAMFS_PATH,
+        INITRAMFS_BUFFER_PAGES,
+    );
+    match initramfs {
+        Some(bytes) => report(
+            &mut console,
+            format_args!("initramfs: {} bytes\n", bytes.len()),
+        ),
+        None => report(&mut console, format_args!("initramfs absent\n")),
+    }
+
     let Some(page_tables) = PageTables::build(boot_services, kernel_physical, &image) else {
         fatal("cannot build page tables");
     };
@@ -178,8 +201,8 @@ pub unsafe extern "efiapi" fn efi_main(
             flags: 0,
             memory_map: map_buffers.internal_address(),
             memory_map_len: region_count as u64,
-            initramfs_start: 0,
-            initramfs_len: 0,
+            initramfs_start: initramfs.map_or(0, |bytes| bytes.as_ptr() as u64),
+            initramfs_len: initramfs.map_or(0, |bytes| bytes.len() as u64),
             rsdp: find_rsdp(system_table),
             framebuffer,
         });
@@ -282,13 +305,16 @@ fn paint_framebuffer(framebuffer: FramebufferInfo) {
     }
 }
 
-/// Reads the kernel ELF from the volume the loader was booted from.
+/// Reads a file from the volume the loader was booted from.
 ///
-/// Returns a slice over a loader-owned 1 MiB buffer. The buffer is never
-/// freed, so the slice stays valid for the rest of the boot.
-fn read_kernel_image(
+/// Returns a slice over a loader-owned buffer of `pages` 4 KiB pages. The
+/// buffer is never freed, so the slice stays valid for the rest of the boot.
+/// A missing file is `None`; callers decide whether that is fatal.
+fn read_file(
     image_handle: EfiHandle,
     boot_services: &BootServices,
+    path: &[u16],
+    pages: usize,
 ) -> Option<&'static [u8]> {
     // SAFETY: `image_handle` is the handle firmware passed to `efi_main`.
     let loaded = unsafe { open_protocol::<LoadedImageProtocol>(
@@ -324,7 +350,7 @@ fn read_kernel_image(
         ((*root).open)(
             root,
             &mut file,
-            KERNEL_PATH.as_ptr(),
+            path.as_ptr(),
             EFI_FILE_MODE_READ,
             0,
         )
@@ -335,8 +361,8 @@ fn read_kernel_image(
         return None;
     }
 
-    let buffer = allocate_pages(boot_services, KERNEL_BUFFER_PAGES);
-    let total = buffer.and_then(|base| read_all(file, base));
+    let buffer = allocate_pages(boot_services, pages);
+    let total = buffer.and_then(|base| read_all(file, base, pages));
 
     // SAFETY: both handles were opened above and are no longer needed.
     unsafe {
@@ -351,8 +377,11 @@ fn read_kernel_image(
 }
 
 /// Reads `file` until end of file into `base`, returning the byte count.
-fn read_all(file: *mut FileProtocol, base: u64) -> Option<usize> {
-    let capacity = KERNEL_BUFFER_PAGES * PAGE_SIZE as usize;
+///
+/// The buffer holds `pages` 4 KiB pages; longer files are truncated to the
+/// buffer so a corrupt filesystem cannot overrun the loader.
+fn read_all(file: *mut FileProtocol, base: u64, pages: usize) -> Option<usize> {
+    let capacity = pages * PAGE_SIZE as usize;
     let mut total = 0usize;
     loop {
         let mut chunk = capacity.checked_sub(total)?;
@@ -906,6 +935,17 @@ mod tests {
             .map(|unit| *unit as u8)
             .collect::<std::vec::Vec<_>>();
         assert_eq!(decoded, b"\\EFI\\BOOT\\KERNEL.ELF");
+    }
+
+    #[test]
+    fn initramfs_path_encodes_ascii_utf16() {
+        assert_eq!(INITRAMFS_PATH.last(), Some(&0));
+        let decoded = INITRAMFS_PATH
+            .iter()
+            .take_while(|unit| **unit != 0)
+            .map(|unit| *unit as u8)
+            .collect::<std::vec::Vec<_>>();
+        assert_eq!(decoded, b"\\EFI\\BOOT\\INITRAMFS.CPIO");
     }
 
     #[test]

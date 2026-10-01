@@ -44,4 +44,13 @@ jobs:
         grep -q "entering kernel" build/boot.log
         grep -q "ZC OS kernel" build/boot.log
         grep -q "boot protocol v2 ok" build/boot.log
+        grep -q "mechanisms self-test ok" build/boot.log
+        grep -q "traps: idt installed" build/boot.log
+        grep -q "syscall gate probe: 1" build/boot.log
+        grep -q "timer: 16 ticks" build/boot.log
+        grep -q "timer: calibrated bus" build/boot.log
+        grep -q "user: exited" build/boot.log
+        grep -q "switches" build/boot.log
+        grep -q "acpi: rsdp v2" build/boot.log
+        grep -q "initramfs: 2 files" build/boot.log
         grep -q "kernel reached idle state" build/boot.log

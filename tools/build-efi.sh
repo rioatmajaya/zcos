@@ -56,10 +56,12 @@ fi
 
 mkdir -p build
 rm -f "$image"
+./tools/mkinitramfs.sh
 dd if=/dev/zero of="$image" bs=1M count="$esp_size_mib" status=none
 mkfs.vfat "$image" >/dev/null
 mmd -i "$image" ::EFI ::EFI/BOOT
 mcopy -i "$image" "$efi" ::EFI/BOOT/BOOTX64.EFI
 mcopy -i "$image" "$kernel" ::EFI/BOOT/KERNEL.ELF
+mcopy -i "$image" build/initramfs.cpio ::EFI/BOOT/INITRAMFS.CPIO
 
 echo "built $image (loader + kernel)"

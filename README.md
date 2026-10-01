@@ -14,9 +14,19 @@ map, and ACPI RSDP over the serial port, and halts. The full path runs
 headless and is verified by the CI boot test.
 
 The kernel crate provides the first mechanisms — boot-contract validation, a
-physical frame allocator, and generation-safe capability tables — and is
-covered by host unit tests. The loader's UEFI bindings and ELF parser have host
-unit tests as well.
+physical frame allocator with recycling, virtual-memory helpers, a
+round-robin scheduler, bounded IPC endpoints, and generation-safe
+capability tables — and is covered by host unit tests. The loader's UEFI
+bindings and ELF parser have host unit tests as well. The bootable kernel
+image validates through `zc-kernel`, installs its own GDT/TSS and a 256-gate
+IDT, proves the APIC timer path by counting 16 ticks, runs a first
+userspace task in ring 3 (50M iterations preempted by 100+ ticks, exited
+via `int 0x80`), ACPI topology (`acpi: rsdp v2, …`), a calibrated APIC bus,
+an initramfs walked and listed (`initramfs: 2 files, …`), two preemptively
+scheduled ring-3 tasks (`user: exited, counters … … switches`), and a
+mechanisms self-test on live loader data (`gdt:` / `traps:` /
+`syscall gate probe:` / `timer:` / `user:` / `mechanisms self-test ok` in
+the serial log).
 
 ## Development
 

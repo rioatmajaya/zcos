@@ -17,15 +17,25 @@ impl PhysFrame {
     }
 }
 
+/// Maximum frames the allocator can recycle without dynamic allocation.
+///
+/// Early boot only needs a small reserve: recycled frames cover the page-table
+/// and IPC setup path before the ownership-aware allocator takes over.
+pub const RECYCLED_FRAMES: usize = 64;
+
 /// A monotonic allocator over loader-classified usable memory regions.
 ///
-/// The allocator is intentionally simple for early boot: frames are never
-/// returned and it uses no dynamic allocation. The virtual-memory subsystem
-/// replaces it with an ownership-aware allocator once kernel metadata exists.
+/// The allocator is intentionally simple for early boot: it hands out frames
+/// in address order and recycles up to [`RECYCLED_FRAMES`] freed frames
+/// through a bounded stack. It uses no dynamic allocation. The
+/// virtual-memory subsystem replaces it with an ownership-aware allocator
+/// once kernel metadata exists.
 pub struct FrameAllocator<'a> {
     regions: &'a [MemoryRegion],
     region_index: usize,
     next_address: u64,
+    recycled: [u64; RECYCLED_FRAMES],
+    recycled_count: usize,
 }
 
 impl<'a> FrameAllocator<'a> {
@@ -36,12 +46,21 @@ impl<'a> FrameAllocator<'a> {
             regions,
             region_index: 0,
             next_address: 0,
+            recycled: [0; RECYCLED_FRAMES],
+            recycled_count: 0,
         }
     }
 
     /// Allocates one zero-uninitialized physical page, or returns `None` when
     /// all usable loader memory has been exhausted.
+    ///
+    /// Recycled frames are handed out first so short-lived boot allocations
+    /// do not permanently consume fresh memory.
     pub fn allocate(&mut self) -> Option<PhysFrame> {
+        if self.recycled_count > 0 {
+            self.recycled_count -= 1;
+            return Some(PhysFrame(self.recycled[self.recycled_count]));
+        }
         while self.region_index < self.regions.len() {
             let region = self.regions[self.region_index];
             if region.kind != MemoryKind::Usable {
@@ -59,6 +78,11 @@ impl<'a> FrameAllocator<'a> {
             };
             if self.next_address < start {
                 self.next_address = start;
+            }
+            // Never hand out the null frame: address zero doubles as the
+            // "absent" sentinel in BootInfo and in capability handles.
+            if self.next_address == 0 {
+                self.next_address = PAGE_SIZE;
             }
 
             let Some(frame_end) = self.next_address.checked_add(PAGE_SIZE) else {
@@ -79,6 +103,45 @@ impl<'a> FrameAllocator<'a> {
         self.region_index += 1;
         self.next_address = 0;
     }
+
+    /// Returns a frame to the allocator for reuse.
+    ///
+    /// Returns `false` when the frame is not page-aligned, is the null frame,
+    /// or the recycle stack is full; the caller retains ownership in that case.
+    pub fn free(&mut self, frame: PhysFrame) -> bool {
+        if frame.0 == 0 || frame.0 % PAGE_SIZE != 0 {
+            return false;
+        }
+        if self.recycled_count >= RECYCLED_FRAMES {
+            return false;
+        }
+        self.recycled[self.recycled_count] = frame.0;
+        self.recycled_count += 1;
+        true
+    }
+
+    /// Returns how many recycled frames are currently held.
+    #[must_use]
+    pub const fn recycled_count(&self) -> usize {
+        self.recycled_count
+    }
+}
+
+/// Returns the total usable bytes across all regions.
+///
+/// Lengths saturate rather than overflow so a corrupt loader map cannot wrap
+/// the total back to zero.
+#[must_use]
+pub const fn usable_bytes(regions: &[MemoryRegion]) -> u64 {
+    let mut total = 0u64;
+    let mut index = 0;
+    while index < regions.len() {
+        if regions[index].kind.is_usable() {
+            total = total.saturating_add(regions[index].len);
+        }
+        index += 1;
+    }
+    total
 }
 
 /// Rounds `value` up to a non-zero power-of-two alignment without overflow.
@@ -153,5 +216,52 @@ mod tests {
         let mut allocator = FrameAllocator::new(&regions);
 
         assert_eq!(allocator.allocate(), Some(PhysFrame(0x4000)));
+    }
+
+    #[test]
+    fn freed_frames_are_reused_first() {
+        let regions = [region(0x1000, PAGE_SIZE * 2, MemoryKind::Usable)];
+        let mut allocator = FrameAllocator::new(&regions);
+
+        let first = allocator.allocate().expect("frame");
+        let _second = allocator.allocate().expect("frame");
+        assert_eq!(allocator.allocate(), None);
+        assert!(allocator.free(first));
+        assert_eq!(allocator.recycled_count(), 1);
+        assert_eq!(allocator.allocate(), Some(first));
+        assert_eq!(allocator.allocate(), None);
+    }
+
+    #[test]
+    fn free_rejects_misaligned_frames() {
+        let regions = [region(0x1000, PAGE_SIZE, MemoryKind::Usable)];
+        let mut allocator = FrameAllocator::new(&regions);
+
+        assert!(!allocator.free(PhysFrame(0x1001)));
+        assert!(!allocator.free(PhysFrame(0)));
+        assert_eq!(allocator.recycled_count(), 0);
+    }
+
+    #[test]
+    fn null_frame_is_never_handed_out() {
+        let regions = [region(0, PAGE_SIZE * 2, MemoryKind::Usable)];
+        let mut allocator = FrameAllocator::new(&regions);
+
+        assert_eq!(
+            allocator.allocate().map(PhysFrame::start_address),
+            Some(PAGE_SIZE)
+        );
+    }
+
+    #[test]
+    fn usable_bytes_sums_only_usable_kinds() {
+        let regions = [
+            region(0x1000, PAGE_SIZE, MemoryKind::Usable),
+            region(0x2000, PAGE_SIZE * 3, MemoryKind::Reserved),
+            region(0x5000, PAGE_SIZE * 2, MemoryKind::Usable),
+        ];
+
+        assert_eq!(usable_bytes(&regions), PAGE_SIZE * 3);
+        assert_eq!(usable_bytes(&[]), 0);
     }
 }
