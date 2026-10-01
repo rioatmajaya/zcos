@@ -17,11 +17,8 @@
 
 ## Milestone 2 — kernel mechanisms
 
-- Boot-protocol validation and a page-aligned conventional-memory frame
-  allocator are complete.
-- A fixed-capacity capability table provides generation-safe handle revocation
-  and non-amplifying authority delegation. Next: virtual memory, exception
-  handling, APIC timer, IPC endpoints, and preemptive scheduling.
+- Page-frame allocator, virtual memory, exception handling, APIC timer, and
+  preemptive scheduling.
 - Syscalls, userspace address spaces, IPC endpoints, and capabilities.
 
 ## Milestone 3 — desktop base

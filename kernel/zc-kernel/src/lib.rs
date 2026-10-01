@@ -7,5 +7,4 @@
 #![no_std]
 
 pub mod boot;
-pub mod capability;
 pub mod memory;
