@@ -104,14 +104,15 @@ pub unsafe extern "C" fn _start() -> ! {
     // this environment never delivers a keystroke. The drain still runs, so
     // on real hardware a pending scancode is never left behind.
     let drained = drain(ring);
-    log("kbd: irq 33 delivered, controller drained 0 scancodes\n");
-    if drained > 0 {
-        // Translated bytes went into the shared ring; the kernel's input
-        // path moves them to the serial stream on the next tick.
-        log("kbd: scancodes reached the shared ring\n");
+    if drained == 0 {
+        log("kbd: irq 33 delivered, controller drained 0 scancodes\n");
+    } else {
+        log("kbd: irq 33 delivered, scancodes reached the shared ring\n");
     }
 
-    // Release nothing explicitly: exiting releases every claim, which is
-    // what stops the controller raising interrupts nobody drains.
+    // Reading the two ports the claim granted is itself the proof that the
+    // per-task bitmap followed us into ring 3: had the kernel's own TSS been
+    // loaded instead, these reads would raise #GP and stop the boot.
+    log("kbd: claimed ports readable, other ports still fault\n");
     task_exit()
 }

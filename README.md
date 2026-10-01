@@ -32,7 +32,10 @@ Milestone 4 driver-domain work has started: the virtio-blk driver runs as
 its own ring-3 domain (`user/zc-blk`) with PCI discovery of its own, an
 8 KiB deny-by-default TSS I/O bitmap instead of blanket IOPL, and per-task
 address spaces (six private page-table roots, loaded on every context
-switch, with a boot self-check proving no task maps another's pages).
+switch, with a boot self-check proving no task maps another's pages). Port
+rights are per task too: a policy table records which ranges each domain
+owns and the TSS bitmap is rebuilt from the running task's entry on every
+switch, so a domain's authority cannot outlive it.
 Interrupts reach a domain as a message too: the keyboard handler only counts
 and EOIs, and `user/zc-kbd` claims the source, blocks until the interrupt
 arrives, then drains the 8042 itself and publishes ASCII through a shared

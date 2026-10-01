@@ -40,8 +40,9 @@ pub const TSS_SELECTOR: u16 = 0x28;
 pub const USER_RFLAGS: u64 = 0x202;
 
 /// RFLAGS for driver domains: as above plus I/O privilege level 3, so the
-/// task may use port I/O directly. Coarse by design: per-port permission
-/// bitmaps arrive with the capability model.
+/// task may use port I/O directly. Kept only as documentation of why
+/// domains no longer need it: the per-port bitmaps supersede blanket IOPL,
+/// and no task runs with these flags.
 pub const USER_RFLAGS_IOPL: u64 = 0x3202;
 
 /// Number of `u64` slots in the kernel GDT: five segments plus two for TSS.
@@ -96,6 +97,15 @@ mod tests {
         assert_eq!(USER_CS, 0x1B);
         assert_eq!(USER_SS, 0x23);
         assert_eq!(TSS_SELECTOR, 0x28);
+        assert_eq!(GDT_SLOTS, 7);
+    }
+
+    #[test]
+    fn the_kernel_keeps_a_single_tss() {
+        // The CPU marks a TSS descriptor busy once loaded and `LTR` refuses
+        // a busy one, so per-task port rights cannot come from per-task TSS
+        // descriptors. `TaskPorts` rebuilds the one bitmap per switch instead,
+        // which is why the table needs no second TSS slot.
         assert_eq!(GDT_SLOTS, 7);
     }
 

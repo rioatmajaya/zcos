@@ -60,11 +60,19 @@ context switch can never leave the previous task's TLB live. Syscall buffer
 validation walks the *running* task's page tables rather than a single global
 one, which is what makes the check meaningful once the tables differ.
 
-Port I/O authority follows the same split: the TSS carries an 8 KiB
-deny-by-default I/O bitmap, so a driver domain holds exactly the PCI
-configuration ports and its own BAR window and faults on anything else,
-instead of running with blanket `IOPL`. Driver DMA areas are allocated by the
-kernel and published to one domain as a descriptor page of physical addresses.
+Port I/O authority follows the same split. A driver domain holds exactly the
+PCI configuration ports and its own BAR window, or the two 8042 ports, and
+faults on anything else instead of running with blanket `IOPL`.
+
+The bitmap lives in the TSS, and the hardware allows only one: `LTR` marks a
+TSS descriptor busy and refuses to load a busy one, so one TSS per task is not
+expressible. Per-task rights therefore live in a policy table — which ranges
+each task owns — and the TSS bitmap is *projected* from the running task's
+entry on every context switch. Rebuilding costs an 8 KiB fill per switch and,
+more importantly, cannot forget a revoke: a domain that exits loses its ports
+with it, and the next task to reuse the slot starts from nothing. Driver DMA
+areas are allocated by the kernel and published to one domain as a descriptor
+page of physical addresses.
 
 Interrupts are messages, not kernel-side device work. A handler records a
 coalesced count per source and EOIs; the domain that claimed that source

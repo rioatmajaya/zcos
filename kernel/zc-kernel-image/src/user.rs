@@ -85,6 +85,13 @@ const BLK_NAME: &str = "blk.elf";
 /// Keyboard driver domain binary name.
 const KBD_NAME: &str = "kbd.elf";
 
+/// Task index of the block driver domain, whose I/O ports are granted
+/// during PCI setup before the tasks themselves are spawned.
+///
+/// Fixed by construction: it is the fifth entry of the bring-up task list,
+/// and the setup spawns them in that same order.
+pub const BLK_TASK: usize = 4;
+
 /// User virtual address the display framebuffer is mapped at.
 const FB_VIRT: u64 = 0x10_00000;
 
@@ -136,11 +143,35 @@ const TABLE_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 #[unsafe(no_mangle)]
 static mut NEXT_CR3: u64 = 0;
 
-/// Publishes the running task's root for the next stub return.
+/// Publishes the running task's root and port authority for the next stub
+/// return.
+///
+/// The root goes to the stubs through [`NEXT_CR3`]. Port rights cannot: the
+/// CPU reads the bitmap inside the loaded TSS, and there is only one TSS to
+/// load, so the bitmap is rebuilt here instead. Rebuilding on the switch —
+/// rather than trusting a stale bitmap — is what makes a revoke immediate.
 fn publish_next_cr3(tasks: &TaskTable<8>) {
     let cr3 = tasks.current_cr3();
     // SAFETY: owned here; traps cannot nest while a handler runs.
     unsafe { addr_of_mut!(NEXT_CR3).write(cr3) };
+    crate::gdt::switch_task_ports(tasks.current());
+}
+
+/// Loads the published page-table root before the stubs resume a task.
+///
+/// Port authority was already applied by [`publish_next_cr3`], which runs
+/// inside the handler while the previous task's registers are still saved;
+/// this only has to make the TLB match.
+#[unsafe(no_mangle)]
+pub extern "C" fn apply_next_context() {
+    // SAFETY: read-only; the word is written only with interrupts disabled,
+    // and no handler can run while this one does.
+    let cr3 = unsafe { addr_of!(NEXT_CR3).read() };
+    // SAFETY: ring 0 with interrupts masked; `cr3` is a page-aligned root
+    // whose kernel half every task shares.
+    unsafe {
+        asm!("mov cr3, {0}", in(reg) cr3, options(nomem, nostack, preserves_flags));
+    }
 }
 
 /// Seeds [`NEXT_CR3`] with the kernel's own root before any gate runs.
@@ -232,8 +263,15 @@ unsafe extern "C" fn syscall_stub() {
         "mov rdx, [rip + EXIT_MAGIC]",
         "cmp rax, rdx",
         "je to_kernel",
-        "mov rax, [rip + NEXT_CR3]",
-        "mov cr3, rax",
+        // CR3 and the TSS both follow the task, so port rights and mappings
+        // switch together. Called rather than inlined because `ltr` needs a
+        // 16-bit operand, and every register this clobbers was already
+        // saved on the stack above rbx.
+        // CR3 and the task's port authority both follow the task, and both are
+        // applied by `user_syscall`/`sched_tick` before this runs; only the
+        // TLB load is left. Called rather than inlined because it runs after
+        // every register was saved on the stack above rbx.
+        "call apply_next_context",
         "mov rsp, rbx",
         "pop r15",
         "pop r14",
@@ -1110,7 +1148,7 @@ pub fn enter(
     {
         let mut i = 0;
         while i < pts.len() {
-            let owns_blk = i == 4;
+            let owns_blk = i == BLK_TASK;
             if !page_present(pts[i], entries[i]) || !page_present(pts[i], stack_pages[i]) {
                 crate::fail("user address space misses its own pages");
             }
@@ -1501,18 +1539,36 @@ fn grant_keyboard(task: u32) -> bool {
             phys | USER_PAGE_FLAGS,
         );
     }
-    // 8042 data (0x60) and status (0x64) ports through the TSS bitmap.
-    crate::gdt::allow_io_range(0x60, 2);
-    crate::gdt::allow_io_range(0x64, 1);
+    // 8042 data (0x60) and status (0x64) ports. These are recorded against
+    // the claiming task, so no other task gains the controller.
+    crate::gdt::allow_io_range(task as usize, 0x60, 2);
+    crate::gdt::allow_io_range(task as usize, 0x64, 1);
+    // Project them onto the live bitmap now rather than at the next switch:
+    // the claim is granted from a syscall, and the domain's very next
+    // instruction after returning is a port read. Waiting for a switch would
+    // fault that read even though the claim succeeded.
+    crate::gdt::switch_task_ports(task as usize);
+    let granted = crate::gdt::allowed_ports(task as usize);
+    let _ = crate::serial::print(format_args!(
+        "iomap: keyboard domain holds {granted} ports\n",
+    ));
     true
 }
 
 /// Takes the keyboard grant away from a domain that exits.
 ///
-/// Unmaps the shared ring page in that task's tables. The TSS bitmap has no
-/// per-task view, so the ports stay allowed until every domain has released
-/// them; the self-test asserts nothing depends on them after the exit.
+/// Unmaps the shared ring page in that task's tables and revokes every port
+/// the task held. Both are needed: the page holds bytes the kernel would
+/// otherwise read on the next tick, and the ports would outlive the device
+/// authority that granted them, so a later task reusing the slot must start
+/// from nothing.
 fn revoke_keyboard(task: u32) {
+    let revoked = crate::gdt::revoke_task_ports(task as usize);
+    if revoked != 0 {
+        let _ = crate::serial::print(format_args!(
+            "kbd: task {task} released {revoked} ports\n",
+        ));
+    }
     let Some(cr3) = task_cr3(task) else {
         return;
     };

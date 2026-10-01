@@ -130,10 +130,18 @@ fn kernel_main(boot_info: *const BootInfo) -> ! {
         ));
         // PCI type-1 config ports plus the device's own BAR window: the
         // only ports the block driver may touch. Everything else still
-        // faults, replacing blanket IOPL for this domain.
-        gdt::allow_io_range(0xCF8, 8);
+        // faults, replacing blanket IOPL for this domain. The grant goes
+        // into the driver task's own bitmap, so no other ring-3 task can
+        // reach the device even while the driver runs.
+        let driver = user::BLK_TASK;
+        gdt::allow_io_range(driver, 0xCF8, 8);
         if zc_kernel::pci::bar_is_io(blk.bar0) {
-            gdt::allow_io_range((zc_kernel::pci::bar_base(blk.bar0) & 0xFFFF) as u16, 0x100);
+            let base = (zc_kernel::pci::bar_base(blk.bar0) & 0xFFFF) as u16;
+            gdt::allow_io_range(driver, base, 0x100);
+            let _ = serial::print(format_args!(
+                "iomap: block domain holds {} ports\n",
+                gdt::allowed_ports(driver),
+            ));
         }
     }
     smp::bring_up(&mut alloc);

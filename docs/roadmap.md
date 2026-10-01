@@ -136,8 +136,19 @@
   rather than queueing is deliberate: coalescing cannot overflow, and a
   driver drains every pending byte anyway. Delivery is proven by the domain
   raising its own vector, so the real self-IPI, gate, handler, and EOI path
-  runs even where no keystroke can be typed. Remaining toward real driver
-  domains: a userspace device manager and per-task port bitmaps.
+  runs even where no keystroke can be typed.
+- Landed as Milestone 4e: per-task port authority. Port rights are now policy
+  per task (`TaskPorts` in `zc-kernel/iomap`, host-tested) projected onto the
+  single TSS bitmap on every switch, and a domain's ports are revoked the
+  moment it exits. One TSS is all the hardware allows: the CPU marks a TSS
+  descriptor busy once `LTR` loads it and refuses a busy one, so per-task
+  TSS descriptors are impossible — rebuilding the bitmap is what replaces
+  them. Getting there exposed two real defects: the bitmap must be rebuilt
+  on the claim path too (a domain's next instruction is a port read, not a
+  context switch), and a reload needs the `0x66` operand-size prefix that only
+  a *named* 16-bit register in the assembly template produces.
+  Remaining toward real driver domains: a userspace device manager and a
+  formal capability model for ports and IRQs.
 
 ## Milestone 3 — desktop base
 

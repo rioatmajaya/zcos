@@ -21,7 +21,8 @@ use core::arch::{asm, naked_asm};
 use core::ptr::{addr_of, addr_of_mut};
 
 use zc_kernel::trap::{
-    GateType, IdtEntry, KBD_VECTOR, SPURIOUS_VECTOR, SYSCALL_VECTOR, TIMER_VECTOR, name,
+    GateType, IdtEntry, KBD_VECTOR, SPURIOUS_VECTOR, SYSCALL_VECTOR, TIMER_VECTOR, has_error_code,
+    name,
 };
 
 /// Kernel code-segment selector installed by the loader's GDT.
@@ -99,17 +100,28 @@ exception!(trap31, 31);
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 unsafe extern "C" fn trap_common() -> ! {
-    naked_asm!("and rsp, -16", "call trap_dispatch", "ud2");
+    // `rsp` still points at the CPU-pushed frame (RIP, CS, RFLAGS, ...), so
+    // pass it along: the faulting RIP is what makes a #GP diagnosable.
+    naked_asm!("mov rsi, rsp", "and rsp, -16", "call trap_dispatch", "ud2");
 }
 
 /// Reports a CPU exception and stops the machine with the failure code.
 ///
-/// Called from [`trap_common`] with the vector number in `rdi`.
+/// Called from [`trap_common`] with the vector number in `rdi` and a pointer
+/// to the CPU-pushed frame in `rsi`. The frame's layout depends on the
+/// vector (some push an error code), so the faulting `rip` is read through
+/// [`has_error_code`] rather than assumed.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn trap_dispatch(vector: u64) -> ! {
+pub unsafe extern "C" fn trap_dispatch(vector: u64, frame: *const u64) -> ! {
     let number = u8::try_from(vector & 0xFF).unwrap_or(0xFF);
+    // Frame order, lowest address first: [error code], rip, cs, rflags,
+    // [rsp], [ss]. Vectors that push an error code shift everything up one.
+    let rip_at = if has_error_code(number) { 1 } else { 0 };
+    // SAFETY: the stub passes the pointer to the frame the CPU pushed on the
+    // interrupt stack, which is live for the whole handler.
+    let rip = unsafe { *frame.add(rip_at) };
     let _ = crate::serial::print(format_args!(
-        "trap: vector {} ({})\n",
+        "trap: vector {} ({}) at rip {rip:#x}\n",
         number,
         name(number)
     ));
@@ -153,8 +165,11 @@ unsafe extern "C" fn timer_tick() {
         "lea rsi, [rbx + 248]",
         "and rsp, -16",
         "call sched_tick",
-        "mov rax, [rip + NEXT_CR3]",
-        "mov cr3, rax",
+        // CR3 and the task's port authority both follow the task, and both
+        // are applied by `sched_tick` before this runs; only the TLB load is
+        // left. Called rather than inlined because it runs after every
+        // register was saved on the stack above rbx.
+        "call apply_next_context",
         "mov rsp, rbx",
         "pop r15",
         "pop r14",
