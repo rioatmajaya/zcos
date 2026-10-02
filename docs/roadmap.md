@@ -1,197 +1,414 @@
 # ZC OS roadmap
 
-## Milestone 0 — foundation
+> **Single source of truth** for phases, tasks, and pass criteria. If another
+> document disagrees with this one about what is done or what comes next, this
+> file wins.
 
-- Cargo workspace and dual licensing.
-- Versioned loader-to-kernel ABI crate.
-- Host-tool validation for Rust, QEMU, and OVMF.
-- Architecture and security-boundary documentation.
+The phases follow the `modern-os-development` skill
+(`references/05-roadmap-dan-milestone.md`): **F0–F9**, each with a goal, a task
+list, and pass criteria a machine can run. Rules:
 
-## Milestone 1 — UEFI to kernel
+- **P1** every phase has machine-runnable pass criteria — "it works" is not a
+  criterion;
+- **P2** one phase, one branch, one criterion; the next phase does not open
+  until the current one passes;
+- **P3** `main` always builds and boots in QEMU;
+- **P4** emulator first, hardware later;
+- **P5** when a phase slips, cut scope, not the deadline;
+- **P6** architecture decisions are written down in
+  [`docs/adr/`](adr/README.md) before the code.
 
-- UEFI application loader. The EFI entry point establishes the loader's
-  explicit UEFI ABI boundary, disables the firmware watchdog, discovers the GOP
-  framebuffer, captures the memory map, and locates the ACPI RSDP.
-- Serial diagnostics and a repeatable QEMU boot test (`tools/run-qemu.sh
-  --test`), wired into CI.
-- `ExitBootServices`, ELF64 kernel loading from the loader's FAT volume, and the
-  hand-off to the bare-metal kernel: the loader builds identity and higher-half
-  page tables, installs a 64-bit GDT, and jumps to the kernel entry with a
-  `BootInfo` pointer in `rdi`. The kernel validates the boot contract and
-  reports the framebuffer, memory map, and ACPI RSDP over serial.
-- initramfs loading landed in Milestone 2f (was deferred from here).
+A component that does not finish in **two working weeks** is parked per the
+blocker rule; see [`docs/blocked/`](blocked/TEMPLATE.md).
 
-## Milestone 2 — kernel mechanisms
+## Phase map
 
-- Page-frame allocator (with frame recycling), virtual-memory helpers,
-  exception-handling foundations, APIC timer, and preemptive scheduling.
-- Syscalls, userspace address spaces, IPC endpoints, and capabilities.
-- Landed as Milestone 2a: syscall numbers and fixed-size IPC messages in
-  `zc-abi`; frame recycling plus `usable_bytes` in the frame allocator; new
-  `vm` (address/index/entry helpers), `sched` (round-robin), and `ipc`
-  (bounded endpoint) modules in `zc-kernel`, all host-tested; the bootable
-  kernel image now validates via `zc-kernel` and runs a mechanisms
-  self-test on live loader data before idling.
-- Landed as Milestone 2b: trap-vector/error-code tables and IDT gate
-  construction plus APIC-timer arithmetic, syscall dispatch, and a bounded
-  userspace address-space tracker in `zc-kernel`, all host-tested; the
-  bootable image installs a 256-gate IDT with naked-assembly stubs
-  (`extern "x86-interrupt"` is still experimental on stable Rust), enables
-  the local APIC, and proves the interrupt path by counting 16 timer ticks
-  before idling.
-- Landed as Milestone 2c: GDT descriptors, user-task register blocks, and a
-  sixth syscall (`SYS_TASK_EXIT`) with dispatch, all host-tested; the
-  bootable image installs its own GDT/TSS (ring-3 segments, RSP0), maps a
-  two-page user address space with the user flag at every paging level,
-  enters ring 3 with `iretq`, survives 100+ preempting timer ticks, and
-  returns through an `int 0x80` syscall gate with a result in `rax`.
-- Landed as Milestone 2d: every IDT gate runs on IST1 (fixing a triple
-  fault caused by programming IST1 at the reserved TSS offset 28 instead
-  of 36), proven each boot by a synchronous `int $0x80` gate probe.
-- Landed as Milestone 2e: ACPI discovery (RSDP/XSDT/MADT parsing with
-  checksums, all host-tested) reporting CPUs and the I/O APIC, plus HPET
-  calibration of the APIC bus (~1 GHz in QEMU) with 1 ms periodic ticks
-  for the rest of boot.
-- Landed as Milestone 2f: initramfs delivery. The loader reads
-  `INITRAMFS.CPIO` from its FAT volume into loader-owned pages and fills
-  the `BootInfo` fields (closing the Milestone 1 gap); the kernel walks
-  the newc archive with an allocation-free parser and lists its files.
-  SMP bring-up code (INIT-SIPI-SIPI, sub-megabyte trampoline with
-  host-verified bytes, per-AP stacks) is implemented but dormant: this
-  environment's OVMF deterministically triple-faults in real mode
-  (`8700:0035`) during `ExitBootServices` with two CPUs, before any
-  kernel code runs, while OVMF alone boots fine. Re-enable `-smp 2` in
-  `tools/run-qemu.sh` once firmware survives the handoff.
-- Landed as Milestone 3a: preemptive multitasking. Two ring-3 tasks share
-  the APIC timer; every tick round-robins full register state
-  (`SyscallRegs` plus the CPU interrupt frame) through a bounded task
-  table, and task exit hands the survivor to the stub until the last task
-  resumes the kernel (~340 switches per boot in QEMU).
-- Landed as Milestone 3b: blocking IPC between live tasks. A producer
-  sends 2000 ordered messages through a depth-4 endpoint while a consumer
-  verifies them; full/empty operations transparently block (rewinding
-  past `int 0x80` for retry) and wake peers, with a deadlock fail-stop
-  and a timeout watchdog as backstops (~1000 switches per boot).
-- Landed as Milestone 3c: userspace ELF loading. Hand-assembled bytecode
-  is gone: `user/zc-user` (syscall wrappers, panic handler) plus
-  `user/zc-producer` and `user/zc-consumer` (freestanding ET_EXEC binaries
-  at distinct link bases, packed into the initramfs) replace it; the ELF
-  parser moved to a shared `libs/zc-elf` crate; and the kernel maps each
-  task image with user permissions, merging segments that share a page.
-- Landed as Milestone 3d: task logging. A log syscall (`SYS_LOG_WRITE`,
-  with user buffers validated against the page table) lets tasks print
-  (`task 0: producer sent 2000`).
-- Landed as Milestone 3e: file syscalls. `SYS_OPEN`/`SYS_READ` serve the
-  initramfs through a read-only filesystem (path validation, descriptor
-  tables with offsets, all host-tested); the bring-up tasks open and
-  verify their data files before the IPC exchange.
-- Landed as Milestone 3f: interactive shell. A third task reads the
-  serial port through a blocking byte syscall (timer-polled ring, Mesa
-  wakeups, idle-halt for the lone waiter) and runs `help`, `echo`, `cat`,
-  and `exit` with line editing; CI scripts a full transcript through a
-  drip-fed FIFO because firmware eats early stdin.
-- Landed as Milestone 3g: userspace framebuffer. The display is mapped
-  non-executable into user space, described through a new syscall that
-  hands tasks the mapped (never physical) address; a fourth task paints
-  eight color bars shared with the kernel through `zc-abi` helpers, and
-  the kernel recomputes all 1024000 pixels for a matching checksum.
-- Landed as Milestone 3h: keyboard input. The PS/2 controller is routed
-  through the I/O APIC to its own IST vector, scancodes translate through
-  a host-tested state machine into the shared input ring (with a timer
-  poll as backup), and delivery is proven by a self-IPI plus a translator
-  loopback on hardware. QEMU monitor injection does not deliver in this
-  environment (accepted but lost before the controller), so scripted
-  typing stays a follow-up; interactive keyboards share the proven path.
-- Landed as Milestone 3i: PCI enumeration plus virtio-blk storage. Bus
-  zero is walked through type-1 configuration space, a 1 MiB test disk
-  is attached, and the driver negotiates the transitional PIO transport,
-  builds a descriptor chain in contiguous frames, and reads sector zero
-  with matching magic and capacity (2048 sectors).
-- Landed as Milestone 4a: first driver in userspace. The kernel-side
-  virtio-blk driver is deleted; a `user/zc-blk` domain drives the same
-  device from ring 3 with I/O privilege, DMA frames plus their physical
-  addresses published through a provisional ABI, and PCI discovery of its
-  own. Remaining toward real driver domains: IRQ-to-IPC delivery (4c), I/O
-  port bitmaps instead of blanket IOPL (4b), and per-task address spaces
-  (4d).
-- Landed as Milestone 4b: I/O permission bitmap. The TSS grows an 8 KiB
-  deny-by-default bitmap (pure builder logic host-tested in
-  `zc-kernel/iomap`); the block domain keeps exactly its PCI config
-  ports plus its BAR window and drops blanket IOPL, so any stray port
-  access faults — which promptly caught a leftover debug read of port 0
-  in the driver.
-- Landed as Milestone 4d: per-task address spaces. Every task gets a
-  private PML4/PDPT/PD cloned from the loader tables plus its own user
-  page table, while the framebuffer tables stay shared; `CR3` is loaded
-  on every task switch (timer and syscall stubs reload the published root
-  before `iretq`, and syscall-buffer validation walks the *running*
-  task's tables). The boot self-check proves no task maps another task's
-  image, stack, or the driver's DMA window.
-- Landed as Milestone 4c: IRQ-to-IPC delivery. The kernel handler for the
-  keyboard vector now does no device work: it records one interrupt and
-  EOIs. A new `user/zc-kbd` domain claims the source — which is what grants
-  it the 8042 ports through the bitmap plus one shared ring page — blocks in
-  `irq_wait`, and only then drains the controller, translates scancodes, and
-  appends ASCII to the ring the kernel drains into the input stream. Counting
-  rather than queueing is deliberate: coalescing cannot overflow, and a
-  driver drains every pending byte anyway. Delivery is proven by the domain
-  raising its own vector, so the real self-IPI, gate, handler, and EOI path
-  runs even where no keystroke can be typed.
-- Landed as Milestone 4e: per-task port authority. Port rights are now policy
-  per task (`TaskPorts` in `zc-kernel/iomap`, host-tested) projected onto the
-  single TSS bitmap on every switch, and a domain's ports are revoked the
-  moment it exits. One TSS is all the hardware allows: the CPU marks a TSS
-  descriptor busy once `LTR` loads it and refuses a busy one, so per-task
-  TSS descriptors are impossible — rebuilding the bitmap is what replaces
-  them. Getting there exposed two real defects: the bitmap must be rebuilt
-  on the claim path too (a domain's next instruction is a port read, not a
-  context switch), and a reload needs the `0x66` operand-size prefix that only
-  a *named* 16-bit register in the assembly template produces.
-  Remaining toward real driver domains: a userspace device manager and a
-  formal capability model for ports and IRQs, which 4f makes possible: a
-  faulting domain is killed locally, the kernel and the other domains
-  continue, and the dead domain's authority is fully revoked. Capability
-  bits now gate every IRQ claim (4g). Port grants and revocations live in a
-  per-task policy table projected onto the single TSS bitmap on every
-  switch, so neither authority outlives its domain.
-- Landed as Milestone 4f: fault isolation. Every CPU exception vector in
-  ring 3 is now a recoverable event: the handler records which task faulted,
-  revokes its IRQ claims and ports and unmaps its ring page, marks the task
-  dead, and iretq switches into the next runnable task with its own CR3 and
-  port bitmap. A fault from ring 0 still stops the machine, because that is
-  a kernel bug, not a domain's. The keyboard domain spends a deliberately
-  wrong port read on this path, so the boot log proves a domain can die
-  loudly (`fault vector 13`) without taking the kernel down; its final
-  `forbidden port read succeeded` line never appears, by construction.
-  This is the property that makes driver restart possible: killing a domain
-  is currently final, but the state it held is released, so a supervisor can
-  later revive the same role on a clean slate.
-- Landed as Milestone 4g: capability-gated claims. A per-task capability
-  table ([`CapabilityTable`](../kernel/zc-kernel/src/capability.rs),
-  host-tested) is provisioned at spawn, and `SYS_IRQ_CLAIM` consults the
-  caller's rights on the source's object before touching the IRQ table. A
-  claim from a task that was not provisioned fails before any state changes,
-  so device ownership follows an explicit grant instead of first-come
-  arrival. The keyboard domain's boot log proves the gate: its own claim
-  succeeds, a claim of a source it was never given is refused.
-- Landed as Milestone 4h: automatic driver restart. A faulted slot with
-  restart budget is respawned in place instead of killed: the same address
-  space and image frames are reused, only register state resets to the saved
-  spawn values, open files are dropped, and IRQ claims plus port grants are
-  revoked before the re-run re-claims them. The budget (one for the keyboard
-  domain, zero elsewhere) stops an unconditionally faulting domain from
-  respawning forever: the first `#GP` restarts, the second kills. The boot
-  log shows the same domain starting twice with `restarting (budget 0 left)`
-  between the two faults, and every other domain plus the kernel continuing.
+```
+F0 Fondasi ──► F1 Bootloader sendiri ──► F2 Kernel entry + Memori ──► F3 Interrupt + Timer + SMP
+                                                                            │
+                                                                            ▼
+F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspace ◄── F5 Userspace ◄── F4 Thread + IPC
+```
 
-## Milestone 3 — desktop base
+## Status
 
-- `initd`, logging, device management, VFS, virtio storage/network, and shell.
-- Native framebuffer compositor, input service, graphical terminal, and Rust UI
-  client library.
+| Phase | Name | Status | Evidence |
+|---|---|---|---|
+| **F0** | Fondasi | ✅ done | `cargo test --workspace`, `tools/verify-host.sh`, CI host job |
+| **F1** | Bootloader sendiri | ✅ done | CI boot job: `entering kernel`, `boot protocol v2 ok` |
+| **F2** | Kernel entry + Memori | ✅ done | `mechanisms self-test ok`, allocator recycling |
+| **F3** | Interrupt + Timer + SMP | ⚠️ partial | `traps: idt installed`, `timer: calibrated bus`; SMP parked |
+| **F4** | Thread + IPC | ✅ done | `task 0: producer sent 2000`, capability gates |
+| **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
+| **F6** | Driver userspace | ✅ done | `device: 3 roles, 5 grants`, `task 6: devmgr: blk published` |
+| **F7** | VFS & penyimpanan | ⏳ next | read-only initramfs only |
+| **F8** | Desktop | ⬜ planned | — |
+| **F9** | Distribusi & daily driver | ⬜ planned | — |
 
-## Milestone 4 — resilience and compatibility
+`✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
+part of the phase is parked as a blocker with a written entry.
 
-- Restartable userspace driver domains.
-- Linux DDE adapter for selected virtual-device drivers.
-- Package signing, secure-boot prototype, CI boot tests, and developer preview.
+## Mapping from earlier labels
+
+The repository history and some code comments use the old `Milestone N` labels.
+They map to phases as follows; use phase names from now on.
+
+| Old label | Phase |
+|---|---|
+| Milestone 0 | F0 |
+| Milestone 1 | F1 |
+| Milestone 2a–2e | F2 (memory, VM, scheduler, IPC foundations) |
+| Milestone 2b, 2d, 2e | F3 (IDT/IST, APIC timer, ACPI/HPET) |
+| Milestone 2c, 3a, 3b | F4 (ring-3 entry, preemption, blocking IPC) |
+| Milestone 2f (SMP part) | F3 (parked) |
+| Milestone 2f (initramfs part) | F5 / F7 (read-only filesystem) |
+| Milestone 3c–3f | F5 (ELF loading, logging, files, shell) |
+| Milestone 3g–3h, 3i | F6 (framebuffer, keyboard, PCI/virtio-blk) |
+| Milestone 4a–4m | F6 (driver domains and runtime authority) |
+
+---
+
+## F0 — Fondasi
+
+**Goal.** The project builds and runs from a clean checkout, with a green path
+and instruments.
+
+**Tasks.**
+
+- [x] Cargo workspace, dual MIT / Apache-2.0 licensing.
+- [x] Versioned loader-to-kernel ABI crate (`libs/zc-abi`).
+- [x] Host-tool validation (`tools/verify-host.sh`) for Rust, QEMU, OVMF.
+- [x] CI: host build + tests, and a headless boot smoke test.
+- [x] Architecture and security-boundary documentation.
+- [x] Architecture Decision Records under [`docs/adr/`](adr/README.md).
+
+**Pass criteria.**
+
+```sh
+cargo test --workspace
+./tools/verify-host.sh
+./tools/build-efi.sh --test && ./tools/run-qemu.sh --test   # exits 0
+```
+
+**References.** `13-testing-dan-debugging.md`, `16-build-dan-toolchain.md`,
+`20-arsitektur-abstraksi.md`, `28-fuzzing-dan-sanitizer.md`,
+`29-debugging-perangkat-keras.md`.
+
+---
+
+## F1 — Bootloader sendiri
+
+**Goal.** Full control of the machine, from firmware to kernel.
+
+**Tasks.**
+
+- [x] UEFI application entry point with an explicit UEFI ABI boundary.
+- [x] Watchdog disabled; GOP framebuffer, memory map, and ACPI RSDP captured.
+- [x] COM1 serial diagnostics.
+- [x] `ExitBootServices` with the final map key; ELF64 kernel loaded from the
+      loader's FAT volume.
+- [x] Identity + higher-half page tables, 64-bit GDT, jump to the kernel entry
+      with `BootInfo` in `rdi`.
+- [x] Kernel rejects a wrong sentinel or unsupported protocol version.
+
+**Pass criteria.** The CI boot job greps the serial log for `ZC OS UEFI
+loader`, `framebuffer`, `memory map:`, `entering kernel`, and `boot protocol
+v2 ok`.
+
+**References.** `01-firmware-uefi.md`, `02-bootloader-from-scratch.md`.
+
+---
+
+## F2 — Kernel entry + Memori
+
+**Goal.** The kernel has usable memory and reacts to faults instead of
+corrupting state.
+
+**Tasks.**
+
+- [x] Boot-contract validation and typed memory-map kinds.
+- [x] Physical frame allocator with frame recycling and `usable_bytes`.
+- [x] Virtual-memory helpers (address/index/entry).
+- [x] Exception-handling foundations (trap vectors, error codes).
+- [x] Bounded round-robin scheduler and bounded IPC endpoint modules.
+- [x] Userspace address-space tracker.
+- [x] Generation-safe capability tables.
+
+**Pass criteria.** `mechanisms self-test ok` on live loader data, plus host
+unit tests for every pure module.
+
+**References.** `08-memory-optimization.md`, `10-amd-cpu.md`, `15-keamanan.md`.
+
+---
+
+## F3 — Interrupt + Timer + SMP
+
+**Goal.** More than one stream of execution, on more than one core.
+
+**Tasks.**
+
+- [x] 256-gate IDT with naked-assembly stubs on IST1.
+- [x] Local APIC enabled; HPET calibration of the APIC bus (~1 GHz), 1 ms
+      periodic ticks.
+- [x] ACPI RSDP/XSDT/MADT parsing (checksummed) reporting CPUs and I/O APIC.
+- [x] PS/2 keyboard routed through the I/O APIC to its own IST vector.
+- [ ] SMP bring-up on the test target: INIT-SIPI-SIPI, trampoline, per-AP
+      stacks, per-AP idle loops.
+- [ ] SMP-aware scheduler (work stealing or per-CPU run queues).
+
+**Parked.** SMP bring-up code exists but is dormant: this environment's OVMF
+triple-faults during `ExitBootServices` with two CPUs before any kernel code
+runs. See [`blocked/smp-ovmf.md`](blocked/smp-ovmf.md). Re-enable `-smp 2` in
+`tools/run-qemu.sh` once firmware survives the hand-off.
+
+**Pass criteria.** `traps: idt installed`, `syscall gate probe: 1`, `timer:
+calibrated bus`; SMP passes when the boot job runs with `-smp 2` and logs one
+scheduler heartbeat per AP.
+
+**References.** `22-konkurensi-dan-sinkronisasi.md`,
+`23-timekeeping-dan-timer.md`, `07-cpu-optimization.md`, `18-power-management.md`.
+
+---
+
+## F4 — Thread + IPC
+
+**Goal.** Two processes can talk, and authority can be bounded.
+
+**Tasks.**
+
+- [x] GDT/TSS with ring-3 segments and `RSP0`; `iretq` into ring 3.
+- [x] Preemptive round-robin across a bounded task table with full register
+      state.
+- [x] Blocking IPC with transparent full/empty blocking, deadlock fail-stop,
+      and timeout watchdog.
+- [x] Capability tables provisioned at spawn; IRQ and port claims gated by
+      rights.
+- [x] Runtime capability delegation (`SYS_CAP_DELEGATE`) with a
+      non-amplifying subset check.
+- [ ] *(follow-up, not required for F4 to pass)* POSIX-style process model
+      (fork/exec/wait) or a documented ZC-native equivalent.
+- [ ] *(follow-up)* Signals or an event-notification mechanism.
+
+**Pass criteria.** `task 0: producer sent 2000` and `task 1: consumer
+received 2000` with zero loss; delegation boot lines
+`cap: task 6 delegated 0xe0800100 to task 4`.
+
+**References.** `03-mikrokernel.md`, `04-userspace.md`,
+`22-konkurensi-dan-sinkronisasi.md`, `24-proses-dan-sinyal.md`.
+
+---
+
+## F5 — Userspace
+
+**Goal.** The first non-kernel code runs with limited rights.
+
+**Tasks.**
+
+- [x] Freestanding ET_EXEC userspace binaries at distinct link bases, loaded by
+      the kernel with user permissions.
+- [x] `zc-user` syscall wrappers and panic handler.
+- [x] `SYS_LOG_WRITE` task logging.
+- [x] `SYS_OPEN`/`SYS_READ`/`SYS_CLOSE` over a read-only initramfs filesystem.
+- [x] Interactive serial shell (`help`, `echo`, `cat`, `exit`) with line
+      editing.
+- [ ] *(follow-up, not required for F5 to pass)* A stable userspace C ABI or a
+      documented Rust-first policy for external apps.
+
+**Pass criteria.** CI scripts a shell transcript and greps `task 2: Commands:
+help echo cat exit`, `task 2: hello os`, `task 2: shell exiting`.
+
+**References.** `04-userspace.md`, `24-proses-dan-sinyal.md`,
+`15-keamanan.md`.
+
+---
+
+## F6 — Driver userspace
+
+**Goal.** Prove the userspace-driver model works on our own system: a driver
+runs in ring 3, holds only the authority it was granted, and can die and
+restart without taking the kernel down.
+
+**Tasks.**
+
+- [x] F6a: first driver in userspace — `user/zc-blk` drives virtio-blk from
+      ring 3.
+- [x] F6b: PCI enumeration through type-1 configuration space.
+- [x] F6c: DMA frames plus physical addresses published through the ABI.
+- [x] F6d: 8 KiB deny-by-default TSS I/O bitmap instead of blanket `IOPL`.
+- [x] F6e: per-task address spaces with `CR3` reload on every switch.
+- [x] F6f: IRQ-to-IPC delivery — the handler counts and EOIs, the domain
+      drains the device.
+- [x] F6g: per-task port authority projected onto the single TSS bitmap.
+- [x] F6h: fault isolation — a ring-3 fault kills only its domain.
+- [x] F6i: capability-gated port claims (`SYS_PORT_CLAIM`).
+- [x] F6j: host-tested device grant table (`zc-kernel::device`).
+- [x] F6k: userspace device manager (`user/zc-devmgr`) owning PCI config.
+- [x] F6l: discovery over explicit IPC channels (`IPC_DISCOVERY`).
+- [x] F6m: runtime capability delegation (`SYS_CAP_DELEGATE`).
+- [x] Framebuffer domain (`user/zc-fb`) and keyboard domain (`user/zc-kbd`).
+- [x] Automatic driver restart with a bounded budget.
+
+**Pass criteria.** CI greps `device: 3 roles, 5 grants`, `task 6: devmgr: blk
+published`, `task 4: blk: disk magic ok`, `fault vector 13 (general
+protection)`, `kernel survived`, and asserts `forbidden port read succeeded`
+is **absent**.
+
+**References.** `25-virtio.md`, `09-usb-drivers.md`, `12-driver-lainnya.md`,
+`28-fuzzing-dan-sanitizer.md`, `29-debugging-perangkat-keras.md`.
+
+---
+
+## F7 — VFS & penyimpanan
+
+**Goal.** The system can store and read back data across a reboot.
+
+Order is fixed: **block write path → block cache → read-only filesystem →
+VFS → write path → journaling → `fsck`**.
+
+**Tasks.**
+
+- [ ] F7a: virtio-blk **write** path (write sector, flush, sync) from the
+      userspace block domain, with the DMA descriptor chain reused.
+- [ ] F7b: block cache with writeback and explicit flush ordering.
+- [ ] F7c: read-only mount of a real filesystem (FAT32 first, then ext2) on a
+      data partition, distinct from the ESP.
+- [ ] F7d: VFS core — mount table, node/inode abstraction, path resolution,
+      descriptor tables, `open`/`read`/`write`/`close`/`stat`.
+- [ ] F7e: writable rootfs on a ZC data partition (ext2 or a documented
+      ZC-native log-structured filesystem).
+- [ ] F7f: `initd` — the manifest's `init=/sbin/initd` becomes real: a
+      supervisor that starts, restarts, and stops service domains.
+- [ ] F7g: journaling / crash-consistency (ordered writes at minimum).
+- [ ] F7h: `fsck` / recovery tooling and a documented on-disk format.
+- [ ] F7i: `devfs` and `tmpfs` mounts; device nodes for the block domain.
+- [ ] F7j: file permissions and ownership in the VFS (feeds F9 security).
+
+**Pass criteria (machine).**
+
+- Boot log contains `vfs: mounted` with the filesystem name and mount point.
+- A CI boot writes a known pattern to `/data/probe`, unmounts, remounts, and
+  reads it back with a matching checksum: `vfs: persistence ok`.
+- A power-loss simulation (kill QEMU mid-write, reboot) reaches `fsck: clean`.
+- `initd` restarts a service domain after a deliberate fault:
+  `initd: restarted blk`.
+
+**References.** `14-filesystem.md`, `25-virtio.md`, `30-partisi-dan-installer.md`,
+`15-keamanan.md`.
+
+---
+
+## F8 — Desktop
+
+**Goal.** A human can use the system: a graphical desktop with input, windows,
+text, and sound.
+
+**Explicitly out of scope for F8** (prevents the phase from never closing):
+3D acceleration, X11/Wayland compatibility, multi-monitor, multi-user, and a
+full browser. Note them as follow-ups, do not build them here.
+
+**Tasks.**
+
+- [ ] F8a: `zcompositor` — userspace compositor and window manager, with a
+      shared-buffer protocol for clients and damage tracking.
+- [ ] F8b: input service — keyboard (already proven) plus PS/2 mouse, then
+      USB HID and I2C-HID touchpad; one event stream to all clients.
+- [ ] F8c: 2D renderer with alpha compositing and TrueType `glyf` text.
+- [ ] F8d: graphical terminal emulator speaking the existing shell protocol.
+- [ ] F8e: native Rust UI client library (widgets, event loop, no X11/Win32).
+- [ ] F8f: window decorations, focus, and an app launcher / taskbar.
+- [ ] F8g: fonts and assets loaded from the F7 VFS, not baked into binaries.
+- [ ] F8h: minimum daily apps — file manager, settings, clock/calendar.
+- [ ] F8i: audio stack (virtio-snd first, then HD Audio) after the desktop is
+      stable.
+- [ ] F8j: USB stack (xHCI) for keyboard, mouse, and mass storage.
+- [ ] F8k: power management — idle, clean shutdown, suspend/resume, thermal
+      and battery reporting.
+- [ ] F8l: AMD iGPU driver for hardware acceleration (last, optional for 1.0).
+
+**Pass criteria (machine).**
+
+- QEMU boots to a graphical desktop: `compositor: ready`.
+- CI injects input, opens a terminal, runs a command, and captures the frame:
+  `wm: window mapped`, `term: command ok`, `fb: desktop checksum ok`.
+- A window moves and resizes without corruption: `wm: move ok`.
+- Clean shutdown: `power: halt clean`.
+- Audio plays a known tone and the driver reports no XRUN under a stress
+  buffer: `snd: playback ok`.
+
+**References.** `19-compositor-dan-input.md`, `26-rendering-2d-dan-teks.md`,
+`27-audio-stack.md`, `11-amd-igpu.md`, `06-i2c-hid-touchpad.md`,
+`18-power-management.md`, `09-usb-drivers.md`.
+
+---
+
+## F9 — Distribusi & daily driver
+
+**Goal.** An image anyone can flash, with short instructions, that installs,
+boots, updates, and recovers on real hardware.
+
+**Tasks.**
+
+- [ ] F9a: GPT partition layout and an installer (`30`).
+- [ ] F9b: reproducible image build (ISO/USB) from CI.
+- [ ] F9c: package format, package manager, and signed packages.
+- [ ] F9d: secure-boot prototype (loader and kernel signatures verified).
+- [ ] F9e: recovery / rescue mode that boots when the rootfs is broken.
+- [ ] F9f: performance regression harness with recorded baselines
+      (`docs/perf/`).
+- [ ] F9g: fuzzing and sanitizers on all parsers (boot, ABI, filesystem,
+      network) in CI.
+- [ ] F9h: developer preview release, install guide, and release notes.
+
+**Pass criteria (machine).**
+
+- The built image installs to a blank disk in QEMU and reboots into the
+  installed system: `installer: done`, `initd: up`.
+- A package installs, its signature verifies, and a tampered package is
+  rejected: `pkg: signature ok`, `pkg: tampered rejected`.
+- Recovery mode boots with a deliberately corrupted rootfs: `recovery: ready`.
+- The same image boots on at least one physical x86_64 machine with serial
+  output captured.
+
+**References.** `30-partisi-dan-installer.md`, `02-bootloader-from-scratch.md`,
+`14-filesystem.md`, `15-keamanan.md`, `28-fuzzing-dan-sanitizer.md`,
+`13-testing-dan-debugging.md`.
+
+---
+
+## Cross-phase tracks
+
+These run alongside the phases, not instead of them.
+
+### Track N — Jaringan (needed by F9)
+
+Network support starts after F7 and is a prerequisite for F9 package
+downloads. Order: virtio-net driver domain → ARP/IP/UDP → TCP → DNS →
+sockets API → TLS. Pass criteria: `net: dhcp lease`, `net: tcp echo ok`.
+Reference: `17-network-stack.md`.
+
+### Track C — Kompatibilitas Linux (after F9)
+
+A DDE-style userspace adapter presenting a small Linux-kernel API shim to an
+individual driver, mapping resource access to ZC OS IPC/capabilities. Linux
+code must never run in kernel privilege. First targets are virtio devices.
+Reference: `12-driver-lainnya.md`, `25-virtio.md`.
+
+### Track H — Hardware enablement (feeds F8/F9)
+
+Emulator first, then one physical machine. Serial/early console before any
+hardware driver. Order: serial console → storage controller → USB → input →
+GPU. Reference: `29-debugging-perangkat-keras.md`.
+
+---
+
+## Definition of done
+
+Universal, per the skill: code on `main` + pass criteria proven + evidence
+recorded in [`CHANGELOG.md`](../CHANGELOG.md) + no dangling TODO on that path.
+
+## See also
+
+- [`CHANGELOG.md`](../CHANGELOG.md) — what changed, per release.
+- [`docs/adr/`](adr/README.md) — why the architecture is what it is.
+- [`docs/blocked/`](blocked/TEMPLATE.md) — parked components.
+- [`CONTRIBUTING.md`](../CONTRIBUTING.md) — how to build, test, and commit.

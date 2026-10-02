@@ -68,9 +68,12 @@ The bitmap lives in the TSS, and the hardware allows only one: `LTR` marks a
 TSS descriptor busy and refuses to load a busy one, so one TSS per task is not
 expressible. Per-task rights therefore live in a policy table — which ranges
 each task owns — and the TSS bitmap is *projected* from the running task's
-entry on every context switch. Rebuilding costs an 8 KiB fill per switch and,
-more importantly, cannot forget a revoke: a domain that exits loses its ports
-with it, and the next task to reuse the slot starts from nothing. Driver DMA
+entry on every context switch. Ranges enter the table only through
+`SYS_PORT_CLAIM`, which checks the caller's capability table for the exact
+packed range first: without the grant, the bitmap never changes. Rebuilding
+costs an 8 KiB fill per switch and, more importantly, cannot forget a revoke:
+a domain that exits loses its ports with it, and the next task to reuse the
+slot starts from nothing. Driver DMA
 areas are allocated by the kernel and published to one domain as a descriptor
 page of physical addresses.
 
@@ -83,6 +86,15 @@ and a burst can never overflow the table. Claiming a source is what grants
 the device's authority — the keyboard domain gets the 8042 ports plus one
 shared ring page, and nothing else — which keeps "who may touch this device"
 and "who is told when it fires" the same decision.
+
+Discovery is a message, not a scan. The device manager owns PCI config
+exclusively, enumerates bus zero, and sends the winning BAR base to the block
+driver over the IPC discovery channel; the driver blocks for exactly that
+word, then claims only its window. A separate data channel carries the
+produser stream, and the queues never mix — the 2000-word sequence proves it
+on every boot. The manager exits after sending, so at steady state no task
+holds config access at all — the bus cannot be reprogrammed from ring 3
+after boot.
 
 Ring-3 faults are kills, not machine stops. A CPU exception in user mode ends
 that domain: its IRQ claims, port grants, and shared ring page are revoked,
@@ -97,10 +109,14 @@ stays dead.
 
 ## IPC and authority
 
-ZC OS uses synchronous message passing initially. Kernel objects are referenced
+ZC OS uses synchronous message passing initially, over independent channels
+with explicit send/receive syscalls per channel. Kernel objects are referenced
 through unforgeable capabilities. A capability conveys one explicit right and
-can only be transferred over IPC. This allows a service to receive only the
-resources it needs, such as an IRQ, an MMIO range, or a child process handle.
+can only be transferred over IPC — since 4m the kernel also enforces that at
+runtime: a domain holding a grant can delegate a non-amplifying subset into
+another task's table, and the block driver's port window arrives exactly that
+way. This allows a service to receive only the resources it needs, such as an
+IRQ, an MMIO range, or a child process handle.
 
 ## Native desktop stack
 

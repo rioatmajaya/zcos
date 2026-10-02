@@ -11,6 +11,12 @@ pub const SYS_SEND: u64 = 1;
 /// Receives a message from an IPC endpoint: args are endpoint handle and buffer pointer.
 pub const SYS_RECV: u64 = 2;
 /// Delegates a capability to another task.
+///
+/// Args are source object id, target task index, and requested rights bits
+/// (1 read, 2 write, 4 grant); returns 0 or `u64::MAX`. The kernel finds the
+/// caller's live slot holding the object with grant rights and inserts a
+/// non-amplifying subset into the target's table. Naming by object keeps
+/// handles table-internal: a caller can only hand over what it holds.
 pub const SYS_CAP_DELEGATE: u64 = 3;
 /// Allocates one physical frame and maps it into the caller.
 pub const SYS_MAP_FRAME: u64 = 4;
@@ -40,6 +46,15 @@ pub const SYS_IRQ_WAIT: u64 = 13;
 /// Raises the calling task's own claimed source on this CPU, used to prove
 /// the delivery path without hardware: returns 0 or `u64::MAX`.
 pub const SYS_IRQ_TEST: u64 = 14;
+/// Claims an I/O port range for the calling task: args are start and length;
+/// returns 0, or `u64::MAX` when the task holds no capability for it.
+pub const SYS_PORT_CLAIM: u64 = 15;
+/// Sends a word on an explicit channel: args are channel and word; blocks
+/// when that channel's queue is full.
+pub const SYS_SEND_TO: u64 = 16;
+/// Receives a word from an explicit channel: arg is the channel; blocks
+/// while that channel's queue is empty.
+pub const SYS_RECV_FROM: u64 = 17;
 
 /// Error codes returned by failed syscalls.
 ///
@@ -110,6 +125,9 @@ mod tests {
         assert_eq!(SYS_IRQ_CLAIM, 12);
         assert_eq!(SYS_IRQ_WAIT, 13);
         assert_eq!(SYS_IRQ_TEST, 14);
+        assert_eq!(SYS_PORT_CLAIM, 15);
+        assert_eq!(SYS_SEND_TO, 16);
+        assert_eq!(SYS_RECV_FROM, 17);
     }
 
     #[test]

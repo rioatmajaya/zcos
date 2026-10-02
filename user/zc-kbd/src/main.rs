@@ -24,7 +24,7 @@
 use zc_abi::{INPUT_RING_VIRT, IRQ_KEYBOARD};
 use zc_kernel::irq::SharedInputRing;
 use zc_kernel::kbd::Modifiers;
-use zc_user::{abort, irq_claim, irq_test, irq_wait, log, port_inb, task_exit};
+use zc_user::{abort, irq_claim, irq_test, irq_wait, log, port_claim, port_inb, task_exit};
 
 /// 8042 status port.
 const STATUS: u16 = 0x64;
@@ -91,6 +91,20 @@ pub unsafe extern "C" fn _start() -> ! {
     } else {
         // What kbd was granted by setup cannot cover an unrelated source.
         abort();
+    }
+
+    // Controller ports arrive only through the same gate: the IRQ claim
+    // above published the ring page, but touching the 8042 needs its own
+    // grants. Claiming an unprovided range must fail without changing the
+    // bitmap.
+    if port_claim(0, 1) == u64::MAX {
+        log("kbd: unprovided ports correctly refused\n");
+    } else {
+        abort();
+    }
+    if port_claim(DATA, 2) == u64::MAX || port_claim(STATUS, 1) == u64::MAX {
+        log("kbd: controller ports not granted\n");
+        task_exit()
     }
 
     let ring = shared_ring();

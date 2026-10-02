@@ -121,4 +121,33 @@ mod tests {
         assert_eq!(endpoint.send(Message::EMPTY), Err(IpcError::Full));
         assert_eq!(endpoint.recv(), Err(IpcError::Empty));
     }
+
+    #[test]
+    fn two_channels_never_share_traffic() {
+        // The boot fabric is an array of these: discovery on one channel
+        // must not disturb the data stream on the other, in either
+        // direction and at full depth.
+        let mut channels = [Endpoint::<4>::new(), Endpoint::<4>::new()];
+        for word in 0..4u64 {
+            channels[zc_abi::IPC_DATA].send(message(word)).unwrap();
+        }
+        assert!(channels[zc_abi::IPC_DATA].is_full());
+        assert!(channels[zc_abi::IPC_DISCOVERY].is_empty());
+
+        channels[zc_abi::IPC_DISCOVERY]
+            .send(message(0x6080))
+            .unwrap();
+        assert_eq!(channels[zc_abi::IPC_DATA].len(), 4);
+        assert_eq!(channels[zc_abi::IPC_DISCOVERY].len(), 1);
+
+        // Draining discovery leaves every data word in order.
+        assert_eq!(
+            channels[zc_abi::IPC_DISCOVERY].recv().unwrap(),
+            message(0x6080)
+        );
+        for word in 0..4u64 {
+            assert_eq!(channels[zc_abi::IPC_DATA].recv().unwrap(), message(word));
+        }
+        assert!(channels[zc_abi::IPC_DISCOVERY].is_empty());
+    }
 }

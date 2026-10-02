@@ -6,55 +6,53 @@ The system uses a native graphical stack and a capability-based microkernel.
 
 ## Project status
 
-Milestone 1 is complete: the UEFI loader boots in QEMU/OVMF, reads a kernel
-ELF from its own FAT volume, exits boot services, installs its own page tables
-and GDT, and jumps to the bare-metal kernel. The kernel validates the
-`zc_abi::BootInfo` handed over by the loader, reports the framebuffer, memory
-map, and ACPI RSDP over the serial port, and halts. The full path runs
-headless and is verified by the CI boot test.
+ZC OS is in roadmap phase **F6 — driver userspace**: phases F0–F6 are done, so
+the full path from firmware to restartable userspace drivers works end to end.
+See [the roadmap](docs/roadmap.md) for the phase map and pass criteria, and
+[CHANGELOG.md](CHANGELOG.md) for what changed.
 
-Milestone 2 is complete except SMP: the loader also delivers an initramfs
-archive, and the kernel brings up its own GDT/TSS, a 256-gate IDT on IST
-stacks, a calibrated APIC timer (~1 GHz bus, 1 ms ticks), ACPI topology
-discovery, and a first ring-3 task. SMP bring-up code (INIT-SIPI-SIPI,
-sub-megabyte trampoline, per-AP stacks) exists but stays dormant: this
-environment's OVMF triple-faults during `ExitBootServices` with two CPUs,
-before any kernel code runs (see `docs/roadmap.md`).
+**F1 — bootloader.** The UEFI loader boots in QEMU/OVMF, reads a kernel ELF
+from its own FAT volume, exits boot services, installs its own page tables and
+GDT, and jumps to the bare-metal kernel. The kernel validates the
+`zc_abi::BootInfo` handed over by the loader and reports the framebuffer,
+memory map, and ACPI RSDP over serial. The full path runs headless and is
+verified by the CI boot test.
 
-Milestone 3 is underway: two Rust userspace tasks (`user/zc-producer`,
-`user/zc-consumer`) load as ET_EXEC binaries from the initramfs, run
-preemptively under the APIC timer (~1000 context switches per boot), and
-communicate over syscalls — blocking IPC messages, logging, and file
-reads (`task 0: manifest ok`, `task 1: hello verified`,
-`task 0: producer sent 2000`, `task 1: consumer received 2000`).
+**F2–F3 — kernel mechanisms.** The kernel brings up its own GDT/TSS, a
+256-gate IDT on IST stacks, a calibrated APIC timer (~1 GHz bus, 1 ms ticks),
+and ACPI topology discovery. The physical frame allocator recycles frames;
+virtual memory, scheduling, and bounded IPC are host-tested. SMP bring-up code
+(INIT-SIPI-SIPI, sub-megabyte trampoline, per-AP stacks) exists but stays
+dormant: this environment's OVMF triple-faults during `ExitBootServices` with
+two CPUs, before any kernel code runs (see
+[`docs/blocked/smp-ovmf.md`](docs/blocked/smp-ovmf.md)).
 
-Milestone 4 driver-domain work has started: the virtio-blk driver runs as
-its own ring-3 domain (`user/zc-blk`) with PCI discovery of its own, an
-8 KiB deny-by-default TSS I/O bitmap instead of blanket IOPL, and per-task
-address spaces (six private page-table roots, loaded on every context
-switch, with a boot self-check proving no task maps another's pages). Port
-rights are per task too: a policy table records which ranges each domain
-owns and the TSS bitmap is rebuilt from the running task's entry on every
-switch, so a domain's authority cannot outlive it. IRQ ownership likewise
-goes through per-task capability tables, not first-come arrival. A fault in
-ring 3 kills only its domain; the kernel and the other domains continue.
-Interrupts reach a domain as a message too: the keyboard handler only counts
-and EOIs, and `user/zc-kbd` claims the source, blocks until the interrupt
-arrives, then drains the 8042 itself and publishes ASCII through a shared
-ring page.
-CPU faults in ring 3 are recoverable: the offending domain is killed, its
-ports and IRQ claims and ring page are revoked, and the kernel keeps
-scheduling the rest — a deliberately bad read in `user/zc-kbd` proves that
-path in the boot log. A budgeted domain is restarted in place instead: same
-address space, fresh registers, re-claimed device, with the budget stopping
-an infinite fault loop. A ring-0 fault is still fatal, on purpose.
+**F4–F5 — threads and userspace.** Ring-3 tasks run preemptively under the
+APIC timer and communicate over blocking IPC. Freestanding ET_EXEC binaries
+(`user/zc-producer`, `user/zc-consumer`, `user/zc-shell`) load from the
+initramfs with user permissions, log through a syscall, read files from a
+read-only filesystem, and run an interactive serial shell.
+
+**F6 — driver userspace.** Drivers run as their own ring-3 domains:
+`user/zc-blk` (virtio-blk), `user/zc-kbd` (PS/2 keyboard), `user/zc-fb`
+(framebuffer), and `user/zc-devmgr` (PCI config). Authority is explicit and
+runtime-granted: an 8 KiB deny-by-default TSS I/O bitmap instead of blanket
+`IOPL`, per-task address spaces with `CR3` reloaded on every switch,
+capability-gated IRQ and port claims, a host-tested device grant table
+(`zc-kernel::device`), discovery over dedicated IPC channels, and runtime
+capability delegation for the block driver's BAR window. A ring-3 fault kills
+only its domain — revoking its ports, IRQ claims, and shared ring page — and a
+budgeted domain restarts in place. A ring-0 fault is fatal, on purpose.
 
 The kernel crate provides the mechanisms — boot-contract validation, a
 physical frame allocator with recycling, virtual-memory helpers, task and
 scheduler tables, bounded IPC endpoints, a read-only initramfs filesystem,
-ACPI/MADT parsing, and generation-safe capability tables — and is covered
-by host unit tests, as are the shared `zc-abi`/`zc-elf` crates and the
-loader's UEFI bindings.
+ACPI/MADT parsing, and generation-safe capability tables — and is covered by
+host unit tests, as are the shared `zc-abi`/`zc-elf` crates and the loader's
+UEFI bindings.
+
+Next up is **F7 — VFS & storage**: a writable block path, a block cache, a real
+filesystem behind a VFS, and `initd` service supervision.
 
 ## Development
 
@@ -72,8 +70,17 @@ cargo test --workspace
 `tools/run-qemu.sh` needs `qemu-system-x86_64` and an OVMF firmware package.
 The host verification script checks all of them.
 
-See [the architecture document](docs/architecture.md) and
-[the roadmap](docs/roadmap.md) for design and delivery details.
+## Documentation
+
+- [Architecture](docs/architecture.md) — trust boundaries, boot protocol, and
+  the address-space / authority model.
+- [Roadmap](docs/roadmap.md) — phases F0–F9, tasks, and machine-runnable pass
+  criteria.
+- [Changelog](CHANGELOG.md) — what changed, per release.
+- [Contributing](CONTRIBUTING.md) — build, test, commit, and changelog rules.
+- [Architecture Decision Records](docs/adr/README.md) — why the architecture is
+  what it is.
+- [Blocked components](docs/blocked/) — parked work and what unblocks it.
 
 ## License
 

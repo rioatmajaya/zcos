@@ -1,69 +1,46 @@
 //! Block driver domain: virtio-blk from ring 3.
 //!
 //! The kernel publishes three contiguous DMA frames plus their physical
-//! addresses and grants this task I/O privilege; everything else — PCI
-//! discovery, feature negotiation, queue setup, submission, completion —
-//! happens here in userspace. A failed device aborts loudly instead of
-//! taking the kernel down with it.
+//! addresses, and the device manager sends the winning BAR base over the IPC
+//! discovery channel; everything else — feature negotiation, queue setup,
+//! submission, completion — happens here in userspace. This domain never
+//! touches PCI config: it cannot scan the bus, only use the window it was
+//! given. A failed device aborts loudly instead of taking the kernel down
+//! with it.
 
 #![no_std]
 #![no_main]
 #![allow(unsafe_code)]
 
-use zc_abi::{INFO_LEN, INFO_QUEUE0, INFO_VIRT, QUEUE_VIRT};
-use zc_kernel::pci;
+use zc_abi::{INFO_LEN, INFO_QUEUE0, INFO_VIRT, IPC_DISCOVERY, QUEUE_VIRT};
 use zc_kernel::virtio;
-use zc_user::{abort, log, port_inl, port_inw, port_outb, port_outl, port_outw, task_exit};
+use zc_user::{
+    abort, log, port_claim, port_inl, port_inw, port_outb, port_outl, port_outw, recv_from,
+    task_exit,
+};
 
 /// Upper bound on completion-poll spins before giving up.
 const COMPLETION_SPINS: u32 = 10_000_000;
 
-/// PCI command bits for I/O space plus bus mastering.
-const CMD_IO_MASTER: u16 = 0x5;
+/// Marker the manager sends when no block device answers.
+const ABSENT: u64 = u64::MAX;
 
 /// Forms a device register port from a BAR base plus an offset.
 const fn reg(port: u16, offset: u16) -> u16 {
     port + offset
 }
 
-/// Reads one PCI configuration DWORD through type-1 access.
-fn cfg(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
-    port_outl(pci::CONFIG_ADDRESS, pci::config_address(bus, device, function, offset));
-    port_inl(pci::CONFIG_DATA)
-}
-
-/// Writes one PCI configuration DWORD.
-fn cfg_write(bus: u8, device: u8, function: u8, offset: u8, value: u32) {
-    port_outl(pci::CONFIG_ADDRESS, pci::config_address(bus, device, function, offset));
-    port_outl(pci::CONFIG_DATA, value);
-}
-
-/// Scans bus zero for a transitional virtio-blk BAR0 port base.
-fn find_port() -> Option<(u8, u8, u16)> {
-    let mut device = 0;
-    while device < 32 {
-        for function in [0u8, 1, 2, 3, 4, 5, 6, 7] {
-            if function > 0 {
-                let header = (cfg(0, device, 0, 0x0C) >> 16) as u8;
-                if !pci::is_multifunction(header) {
-                    break;
-                }
-            }
-            let (vendor, device_id) = pci::split_id(cfg(0, device, function, 0));
-            if vendor == pci::NO_DEVICE {
-                continue;
-            }
-            if pci::is_blk_transitional(vendor, device_id) {
-                let bar = cfg(0, device, function, 0x10);
-                if pci::bar_is_io(bar) {
-                    return Some((device, function, pci::bar_base(bar) as u16));
-                }
-                return None;
-            }
-        }
-        device += 1;
+/// Receives the BAR base the manager published, blocking until it arrives.
+///
+/// The rendezvous needs no timeout: the manager always sends exactly one
+/// word (a base or the absent marker) and only then exits, so a block here
+/// always resolves. Spurious wakeups from data-channel traffic simply retry.
+fn read_discovery() -> Option<u16> {
+    let word = recv_from(IPC_DISCOVERY as u64);
+    if word == ABSENT {
+        return None;
     }
-    None
+    Some(word as u16)
 }
 
 /// Volatile byte store into the queue area.
@@ -136,13 +113,21 @@ pub unsafe extern "C" fn _start() -> ! {
         abort();
     }
 
-    let Some((device, function, port)) = find_port() else {
+    // The manager owns PCI config now: this domain learns its window from
+    // the discovery channel instead of scanning the bus. No config grant is
+    // provisioned for this task, so a scan would fault — by design. The
+    // receive blocks until the manager's single send wakes it.
+    let Some(port) = read_discovery() else {
         log("blk: absent\n");
         task_exit()
     };
-    // Enable I/O decoding plus bus mastering on the winning function.
-    let command = cfg(0, device, function, 0x04) as u16;
-    cfg_write(0, device, function, 0x04, u32::from(command | CMD_IO_MASTER));
+    log("blk: discovery received\n");
+    // Claiming the window is still a separate, gated step: learning the base
+    // does not by itself authorise touching it.
+    if port_claim(port, 0x100) == u64::MAX {
+        log("blk: bar window not granted\n");
+        task_exit()
+    }
 
     port_outb(port + virtio::REG_STATUS, 0);
     port_outb(port + virtio::REG_STATUS, virtio::STATUS_ACK | virtio::STATUS_DRIVER);

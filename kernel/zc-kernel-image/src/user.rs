@@ -10,7 +10,7 @@ use core::arch::{asm, naked_asm};
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 
 use zc_abi::BootInfo;
-use zc_kernel::capability::{Capability, CapabilityTable, Rights};
+use zc_kernel::capability::{CapabilityTable, Rights};
 use zc_kernel::fs::{FdTable, Fs};
 use zc_kernel::gdt::{USER_CS, USER_RFLAGS, USER_SS};
 use zc_kernel::ipc::Endpoint;
@@ -21,7 +21,7 @@ use zc_kernel::trap::has_error_code;
 use zc_kernel::vm::VirtAddr;
 
 /// Tasks the setup brings up, in task-index order.
-const TASK_COUNT: usize = 6;
+const TASK_COUNT: usize = 7;
 
 /// Base virtual address user task images are linked at.
 const USER_CODE_VIRT: u64 = 0x40_0000;
@@ -33,7 +33,7 @@ const USER_WINDOW_END: u64 = 0x60_0000;
 const STACK_ZONE_START: u64 = 0x40_4000;
 
 /// End of the reserved user-stack zone.
-const STACK_ZONE_END: u64 = 0x40_B000;
+const STACK_ZONE_END: u64 = 0x40_C000;
 
 /// Each task links at its own base (producer at [`USER_CODE_VIRT`], the
 /// consumer 64 KiB higher), so images never share pages and absolute
@@ -74,6 +74,12 @@ const STACK_F_TOP: u64 = 0x40_A000;
 /// Keyboard driver stack page backing that top.
 const STACK_F_PAGE: u64 = STACK_F_TOP - PAGE_SIZE;
 
+/// Top of the device manager's user stack.
+const STACK_G_TOP: u64 = 0x40_B000;
+
+/// Device-manager stack page backing that top.
+const STACK_G_PAGE: u64 = STACK_G_TOP - PAGE_SIZE;
+
 /// File names of the bring-up tasks inside the initramfs.
 const PRODUCER_NAME: &str = "producer.elf";
 /// Consumer binary name.
@@ -97,14 +103,44 @@ pub const BLK_TASK: usize = 4;
 /// Task index of the keyboard driver domain.
 const KBD_INDEX: usize = 5;
 
+/// Task index of the device manager, which owns PCI config and publishes
+/// discovery for the block driver.
+const DEVMGR_INDEX: usize = 6;
+
+/// File name of the device manager inside the initramfs.
+const DEVMGR_NAME: &str = "devmgr.elf";
+
 /// User virtual address the display framebuffer is mapped at.
 const FB_VIRT: u64 = 0x10_00000;
 
 /// Firmware framebuffer description shared with userspace.
 static mut FB_INFO: zc_abi::FramebufferInfo = zc_abi::FramebufferInfo::UNAVAILABLE;
 
-/// Shared endpoint the bring-up tasks pass messages through.
-static mut ENDPOINT: Endpoint<4> = Endpoint::new();
+/// IPC queues, one per channel.
+///
+/// Channel 0 is the legacy data stream; channel 1 is device discovery. The
+/// queues are fully separate, so a manager publishing a BAR base can never
+/// disturb the producer/consumer word sequence no matter the interleaving.
+static mut ENDPOINTS: [Endpoint<4>; zc_abi::IPC_CHANNELS] =
+    [Endpoint::new(), Endpoint::new()];
+
+/// Borrows one IPC channel by raw syscall argument.
+///
+/// Returns `None` for an out-of-range index, so a wild channel becomes a
+/// failed syscall instead of an out-of-bounds access.
+///
+/// # Safety
+///
+/// The caller must guarantee traps cannot nest while the borrow lives, which
+/// every syscall arm provides (interrupts stay masked through dispatch).
+unsafe fn endpoint_for(channel: u64) -> Option<&'static mut Endpoint<4>> {
+    let index = usize::try_from(channel).ok()?;
+    if index >= zc_abi::IPC_CHANNELS {
+        return None;
+    }
+    // SAFETY: as documented; the index was range-checked above.
+    unsafe { Some(&mut (*addr_of_mut!(ENDPOINTS))[index]) }
+}
 
 /// Minimum timer ticks observed during the tasks to accept the demo.
 const MIN_USER_TICKS: u64 = 2;
@@ -463,10 +499,9 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
     // SAFETY: the stub passes pointers to the areas it pushed.
     let regs = unsafe { &mut *regs };
     let frame = unsafe { &mut *frame };
-    // SAFETY: the task table and endpoint are owned here; traps cannot
+    // SAFETY: the task table and endpoints are owned here; traps cannot
     // nest because every gate runs with interrupts masked.
     let tasks = unsafe { &mut *addr_of_mut!(TASKS) };
-    let endpoint = unsafe { &mut *addr_of_mut!(ENDPOINT) };
     match dispatch(regs.number()) {
         Ok(Action::TaskExit) => {
             // Leaving the domain must give up its interrupt sources and its
@@ -476,19 +511,23 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             if unsafe { (&mut *addr_of_mut!(IRQS)).release_task(me) > 0 } {
                 revoke_keyboard(me);
             }
+            // SAFETY: as above; the data-channel depth is diagnostic only.
+            let depth = unsafe { endpoint_for(zc_abi::IPC_DATA as u64).map_or(0, |e| e.len()) };
             match tasks.exit_current(regs, frame) {
                 Some(next) => {
-                    trace(5, tasks.current(), endpoint.len(), next as u64);
+                    trace(5, tasks.current(), depth, next as u64);
                     publish_next_cr3(tasks);
                     0
                 }
                 None => {
-                    trace(6, tasks.current(), endpoint.len(), 0);
+                    trace(6, tasks.current(), depth, 0);
                     EXIT_TO_KERNEL
                 }
             }
         }
         Ok(Action::Send) => {
+            // SAFETY: channel 0 is always in range; see `endpoint_for`.
+            let endpoint = unsafe { endpoint_for(zc_abi::IPC_DATA as u64).unwrap() };
             let message = match zc_abi::Message::from_words(&[regs.rdi]) {
                 Some(message) => message,
                 None => {
@@ -505,22 +544,71 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 }
                 Err(_) => {
                     trace(2, tasks.current(), endpoint.len(), regs.rdi);
-                    block_with_retry(tasks, regs, frame)
+                    block_with_retry(tasks, regs, frame, endpoint.len())
                 }
             }
         }
-        Ok(Action::Receive) => match endpoint.recv() {
-            Ok(message) => {
-                tasks.unblock_all();
-                regs.set_result(message.words[0]);
-                trace(3, tasks.current(), endpoint.len(), message.words[0]);
-                0
+        Ok(Action::SendTo) => {
+            // SAFETY: as in `Send`; an out-of-range channel fails closed.
+            let Some(endpoint) = (unsafe { endpoint_for(regs.rdi) }) else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            let message = match zc_abi::Message::from_words(&[regs.rsi]) {
+                Some(message) => message,
+                None => {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+            };
+            match endpoint.send(message) {
+                Ok(()) => {
+                    tasks.unblock_all();
+                    regs.set_result(0);
+                    trace(9, tasks.current(), endpoint.len(), regs.rsi);
+                    0
+                }
+                Err(_) => {
+                    trace(10, tasks.current(), endpoint.len(), regs.rsi);
+                    block_with_retry(tasks, regs, frame, endpoint.len())
+                }
             }
-            Err(_) => {
-                trace(4, tasks.current(), endpoint.len(), 0);
-                block_with_retry(tasks, regs, frame)
+        }
+        Ok(Action::Receive) => {
+            // SAFETY: as in `Send`.
+            let endpoint = unsafe { endpoint_for(zc_abi::IPC_DATA as u64).unwrap() };
+            match endpoint.recv() {
+                Ok(message) => {
+                    tasks.unblock_all();
+                    regs.set_result(message.words[0]);
+                    trace(3, tasks.current(), endpoint.len(), message.words[0]);
+                    0
+                }
+                Err(_) => {
+                    trace(4, tasks.current(), endpoint.len(), 0);
+                    block_with_retry(tasks, regs, frame, endpoint.len())
+                }
             }
-        },
+        }
+        Ok(Action::RecvFrom) => {
+            // SAFETY: as in `SendTo`.
+            let Some(endpoint) = (unsafe { endpoint_for(regs.rdi) }) else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            match endpoint.recv() {
+                Ok(message) => {
+                    tasks.unblock_all();
+                    regs.set_result(message.words[0]);
+                    trace(11, tasks.current(), endpoint.len(), message.words[0]);
+                    0
+                }
+                Err(_) => {
+                    trace(12, tasks.current(), endpoint.len(), 0);
+                    block_with_retry(tasks, regs, frame, endpoint.len())
+                }
+            }
+        }
         Ok(Action::LogWrite) => {
             let me = tasks.current();
             match validate_user_slice(tasks, regs.rdi, regs.rsi) {
@@ -642,7 +730,12 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                     None => crate::fail("serial byte vanished"),
                 }
             } else {
-                block_with_retry(tasks, regs, frame)
+                // Serial waits are not endpoint traffic; the depth shown is
+                // the data channel's, matching the pre-channel behavior.
+                // SAFETY: channel 0 is always in range.
+                let depth =
+                    unsafe { endpoint_for(zc_abi::IPC_DATA as u64).map_or(0, |e| e.len()) };
+                block_with_retry(tasks, regs, frame, depth)
             }
         }
         Ok(Action::IrqClaim) => {
@@ -664,8 +757,10 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             match irqs.claim(source, me) {
                 Ok(()) => {
                     // Claiming the keyboard source also publishes its shared
-                    // ring page and its two controller ports, so the domain
-                    // can drain the 8042 without any other authority.
+                    // ring page; the controller ports come separately through
+                    // SYS_PORT_CLAIM, so interrupt delivery and port authority
+                    // stay two explicit grants instead of one bundled side
+                    // effect.
                     if source == zc_abi::IRQ_KEYBOARD && grant_keyboard(me) {
                         regs.set_result(0);
                         0
@@ -695,7 +790,7 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                     regs.set_result(u64::from(count));
                     0
                 }
-                None => block_with_retry(tasks, regs, frame),
+                None => block_with_retry(tasks, regs, frame, 0),
             }
         }
         Ok(Action::IrqTest) => {
@@ -720,6 +815,100 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             // is woken by the real handler: that is the point of the call.
             regs.set_result(0);
             0
+        }
+        Ok(Action::PortClaim) => {
+            let me = tasks.current();
+            // Args arrive as u64; anything outside u16 range or an empty
+            // range is refused before the capability check, so a wild value
+            // can never become a bitmap edit.
+            let (Ok(start), Ok(len)) = (
+                u16::try_from(regs.rdi),
+                u16::try_from(regs.rsi),
+            ) else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            if len == 0 {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            // Capability gate: the caller must hold the exact packed range
+            // with WRITE. A task can neither widen a grant nor claim a range
+            // it was never given, and nothing changes on refusal.
+            // SAFETY: owned here; interrupts are masked through this arm.
+            let granted = unsafe {
+                (*addr_of!(CAPS))[me]
+                    .holds_object(zc_abi::port_cap(start, len), Rights::WRITE)
+            };
+            if !granted {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            crate::gdt::allow_io_range(me, start, len);
+            // Project immediately when the claimant is running: its next
+            // instruction after returning is usually a port access, and
+            // waiting for a switch would fault a claim that succeeded.
+            if me == tasks.current() {
+                crate::gdt::switch_task_ports(me);
+            }
+            let held = crate::gdt::allowed_ports(me);
+            let _ = crate::serial::print(format_args!(
+                "iomap: task {me} now holds {held} ports\n",
+            ));
+            regs.set_result(0);
+            0
+        }
+        Ok(Action::CapDelegate) => {
+            let me = tasks.current();
+            // Args name the source by object, not by handle: the scan runs
+            // on the caller's own table, so a caller can only hand over what
+            // it already holds and no handle distribution is needed for the
+            // bring-up manager to grant a driver its window.
+            let object = regs.rdi as u32;
+            let target = regs.rsi as usize;
+            let Some(requested) =
+                zc_kernel::capability::Rights::from_bits(regs.rdx as u8)
+            else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            if requested == zc_kernel::capability::Rights::NONE || target >= 8 {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            if target == me {
+                // Self-delegation would need one table borrowed twice;
+                // nothing in the bring-up needs it, so it fails closed.
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            // SAFETY: owned here; interrupts are masked through this arm, and
+            // the split borrows below never alias.
+            let tables = unsafe { &mut *addr_of_mut!(CAPS) };
+            let (source_table, dest_table) = if me < target {
+                let (left, right) = tables.split_at_mut(target);
+                (&left[me], &mut right[0])
+            } else {
+                let (left, right) = tables.split_at_mut(me);
+                (&right[0], &mut left[target])
+            };
+            let Some(handle) = source_table.find_object(object, Rights::GRANT) else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            match source_table.delegate(handle, dest_table, requested) {
+                Ok(_) => {
+                    let _ = crate::serial::print(format_args!(
+                        "cap: task {me} delegated {object:#x} to task {target}\n",
+                    ));
+                    regs.set_result(0);
+                    0
+                }
+                Err(_) => {
+                    regs.set_result(u64::MAX);
+                    0
+                }
+            }
         }
         Ok(Action::FbInfo) => {
             const INFO_LEN: u64 = core::mem::size_of::<zc_abi::FramebufferInfo>() as u64;
@@ -764,7 +953,8 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
 ///
 /// Each entry packs (kind, task, endpoint-len, value): kinds are 1 send-ok,
 /// 2 send-block, 3 recv-ok, 4 recv-block, 5 exit-next, 6 exit-last,
-/// 7 fault-kill, 8 fault-restart. Dumped only when blocking finds no
+/// 7 fault-kill, 8 fault-restart, 9 send-to-ok, 10 send-to-block,
+/// 11 recv-from-ok, 12 recv-from-block. Dumped only when blocking finds no
 /// runnable peer.
 const EVENTS_CAP: usize = 32;
 /// Next ring slot.
@@ -816,10 +1006,14 @@ fn dump_trace() {
 /// re-executes its send or receive instead of skipping it. The two-task
 /// protocol guarantees the retry succeeds: an unblock always follows a
 /// complementary operation that freed a slot or queued a message.
+/// `queue_len` is the blocking channel's depth, shown only in the deadlock
+/// dump; cross-channel wakeups are spurious but harmless, because the woken
+/// task retries an operation that still cannot complete and blocks again.
 fn block_with_retry(
     tasks: &mut TaskTable<8>,
     regs: &mut SyscallRegs,
     frame: &mut IrqFrame,
+    queue_len: usize,
 ) -> u64 {
     frame.rip = frame.rip.wrapping_sub(2);
     match tasks.block_current(regs, frame) {
@@ -832,7 +1026,7 @@ fn block_with_retry(
                 "deadlock: current {} alive {} endpoint len {}\n",
                 tasks.current(),
                 tasks.alive_count(),
-                unsafe { (*addr_of!(ENDPOINT)).len() },
+                queue_len,
             ));
             dump_trace();
             crate::fail("ipc deadlock")
@@ -1150,11 +1344,15 @@ fn new_address_space(
 
 /// Maps the user code and data frames, loads both tasks, and enters ring 3.
 ///
-/// Never returns: tasks exit through [`user_finished`] and timeouts through
+/// `blk_bar` is the virtio BAR base the PCI scan in [`crate::main`] found,
+/// if any: hardware discovery stays in one place, and this function only
+/// turns it into capability grants through [`zc_kernel::device`]. Never
+/// returns: tasks exit through [`user_finished`] and timeouts through
 /// [`user_timeout`].
 pub fn enter(
     alloc: &mut FrameAllocator<'_>,
     boot_info: *const BootInfo,
+    blk_bar: Option<u16>,
 ) -> ! {
     // Mask interrupts for the whole setup: a tick during half-built tables
     // would corrupt the first task's initial state. The `iretq` frame
@@ -1170,8 +1368,9 @@ pub fn enter(
     let fb = find_initramfs_file(boot_info, FB_NAME);
     let blk = find_initramfs_file(boot_info, BLK_NAME);
     let kbd = find_initramfs_file(boot_info, KBD_NAME);
-    let (Some(producer), Some(consumer), Some(shell), Some(fb), Some(blk), Some(kbd)) =
-        (producer, consumer, shell, fb, blk, kbd)
+    let devmgr = find_initramfs_file(boot_info, DEVMGR_NAME);
+    let (Some(producer), Some(consumer), Some(shell), Some(fb), Some(blk), Some(kbd), Some(devmgr)) =
+        (producer, consumer, shell, fb, blk, kbd, devmgr)
     else {
         crate::fail("user task ELF missing from initramfs");
     };
@@ -1234,8 +1433,9 @@ pub fn enter(
     // Build one private address space per task: image, stack, and (for the
     // block domain) DMA area. Framebuffer tables stay shared. The keyboard
     // domain's ring page is deliberately *not* mapped here: it appears only
-    // in the address space of whichever task claims the source.
-    let binaries = [producer, consumer, shell, fb, blk, kbd];
+    // in the address space of whichever task claims the source. The discovery
+    // page is mapped below, into exactly the manager and the block driver.
+    let binaries = [producer, consumer, shell, fb, blk, kbd, devmgr];
     let names = [
         PRODUCER_NAME,
         CONSUMER_NAME,
@@ -1243,6 +1443,7 @@ pub fn enter(
         FB_NAME,
         BLK_NAME,
         KBD_NAME,
+        DEVMGR_NAME,
     ];
     let stack_pages = [
         STACK_A_PAGE,
@@ -1251,6 +1452,7 @@ pub fn enter(
         STACK_D_PAGE,
         STACK_E_PAGE,
         STACK_F_PAGE,
+        STACK_G_PAGE,
     ];
     let stack_tops = [
         STACK_A_TOP,
@@ -1259,6 +1461,7 @@ pub fn enter(
         STACK_D_TOP,
         STACK_E_TOP,
         STACK_F_TOP,
+        STACK_G_TOP,
     ];
     let mut entries = [0u64; TASK_COUNT];
     let mut cr3s = [0u64; TASK_COUNT];
@@ -1305,7 +1508,8 @@ pub fn enter(
 
     // Each task must see only its own image, stack, and (for the block
     // domain) DMA window. The keyboard ring belongs to nobody yet: it is
-    // published by the claim, not by the setup.
+    // published by the claim, not by the setup. Discovery travels over the
+    // IPC discovery channel now, so no shared page needs auditing here.
     {
         let mut i = 0;
         while i < pts.len() {
@@ -1336,8 +1540,8 @@ pub fn enter(
     }
 
     let _ = crate::serial::print(format_args!(
-        "user: producer entry {:#x}, consumer entry {:#x}, shell entry {:#x}, fb entry {:#x}, blk entry {:#x}, kbd entry {:#x}\n",
-        entries[0], entries[1], entries[2], entries[3], entries[4], entries[5],
+        "user: producer entry {:#x}, consumer entry {:#x}, shell entry {:#x}, fb entry {:#x}, blk entry {:#x}, kbd entry {:#x}, devmgr entry {:#x}\n",
+        entries[0], entries[1], entries[2], entries[3], entries[4], entries[5], entries[6],
     ));
     let _ = crate::serial::print(format_args!(
         "user: {TASK_COUNT} address spaces, task0 cr3 {:#x}\n",
@@ -1345,14 +1549,41 @@ pub fn enter(
     ));
 
     // SAFETY: interrupts stay masked for the whole setup, so the cap table
-    // is complete before any task can execute a gated syscall.
+    // is complete before any task can execute a gated syscall. Every grant
+    // comes from the device table, so the provisioned set is exactly what
+    // the host tests pin — nothing is invented inline here.
     let caps = unsafe { &mut *addr_of_mut!(CAPS) };
-    // Keyboard object grants the kbd domain; the block domain gets none today
-    // (it polls and claims no source), so it correctly refuses any claim.
-    let _ = caps[KBD_INDEX].insert(Capability::new(
-        zc_abi::IRQ_KEYBOARD as u32,
-        Rights::READ,
-    ));
+    {
+        use zc_kernel::device;
+        let _ = caps[KBD_INDEX].insert(device::irq_grant(zc_abi::IRQ_KEYBOARD));
+        for (start, len) in device::kbd_port_ranges() {
+            let _ = caps[KBD_INDEX].insert(device::port_grant(start, len));
+        }
+        // The manager alone scans the bus; the driver holds nothing at spawn
+        // and earns its single window by delegation before its claim runs.
+        // Failing closed is the point: without the delegation the claim
+        // refuses and the driver exits instead of touching the bus.
+        let (cfg_start, cfg_len) = device::pci_config_range();
+        let _ = caps[DEVMGR_INDEX].insert(device::port_grant(cfg_start, cfg_len));
+        if let Some(base) = blk_bar {
+            let (bar_start, bar_len) = device::bar_range(base);
+            let _ = caps[DEVMGR_INDEX].insert(zc_kernel::capability::Capability::new(
+                zc_abi::port_cap(bar_start, bar_len),
+                Rights::WRITE.union(Rights::GRANT),
+            ));
+        }
+        // Counts follow what was actually inserted above, so the line stays
+        // honest on hardware without the device too.
+        let devmgr_grants = 1 + usize::from(blk_bar.is_some());
+        let total = zc_kernel::device::BLK_SETUP_GRANTS
+            + zc_kernel::device::KBD_GRANT_COUNT
+            + devmgr_grants;
+        let _ = crate::serial::print(format_args!(
+            "device: 3 roles, {total} grants (blk {}, kbd {}, devmgr {devmgr_grants})\n",
+            zc_kernel::device::BLK_SETUP_GRANTS,
+            zc_kernel::device::KBD_GRANT_COUNT,
+        ));
+    }
     let _ = caps;
 
     // SAFETY: the table is owned here; interrupts are masked for the whole
@@ -1694,12 +1925,12 @@ fn map_elf(
     entry
 }
 
-/// Publishes the keyboard domain's ring page and controller ports.
+/// Publishes the keyboard domain's ring page.
 ///
 /// The ring page is allocated once and mapped only into the claiming task's
-/// address space; the ports go through the TSS bitmap, which is
-/// deny-by-default, so the domain gains exactly the 8042 status and data
-/// ports and nothing else. Returns whether both steps succeeded.
+/// address space. Controller ports are deliberately *not* granted here: they
+/// come through `SYS_PORT_CLAIM`, so a domain holds exactly what its
+/// capability table allows and nothing arrives as a side effect.
 fn grant_keyboard(task: u32) -> bool {
     // SAFETY: written once with interrupts disabled before any task runs.
     let phys = unsafe { addr_of!(INPUT_RING_PHYS).read() };
@@ -1723,19 +1954,6 @@ fn grant_keyboard(task: u32) -> bool {
             phys | USER_PAGE_FLAGS,
         );
     }
-    // 8042 data (0x60) and status (0x64) ports. These are recorded against
-    // the claiming task, so no other task gains the controller.
-    crate::gdt::allow_io_range(task as usize, 0x60, 2);
-    crate::gdt::allow_io_range(task as usize, 0x64, 1);
-    // Project them onto the live bitmap now rather than at the next switch:
-    // the claim is granted from a syscall, and the domain's very next
-    // instruction after returning is a port read. Waiting for a switch would
-    // fault that read even though the claim succeeded.
-    crate::gdt::switch_task_ports(task as usize);
-    let granted = crate::gdt::allowed_ports(task as usize);
-    let _ = crate::serial::print(format_args!(
-        "iomap: keyboard domain holds {granted} ports\n",
-    ));
     true
 }
 

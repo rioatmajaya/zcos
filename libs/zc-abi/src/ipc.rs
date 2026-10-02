@@ -7,6 +7,20 @@
 /// Number of 64-bit words carried inline in a [`Message`].
 pub const MESSAGE_WORDS: usize = 4;
 
+/// Independent IPC channels in the bring-up fabric.
+///
+/// Channel 0 carries the original data stream (producer/consumer words).
+/// Channel 1 carries device discovery (manager to driver). Queues are fully
+/// separate, so discovery traffic can never corrupt the data sequence — the
+/// property a shared bus scan could never give.
+pub const IPC_CHANNELS: usize = 2;
+
+/// Data-stream channel: the legacy `SYS_SEND`/`SYS_RECV` path.
+pub const IPC_DATA: usize = 0;
+
+/// Device-discovery channel: manager publishes, driver consumes.
+pub const IPC_DISCOVERY: usize = 1;
+
 /// A copied IPC message.
 ///
 /// Only `words[..len]` is meaningful; the kernel must ignore the tail so a
@@ -80,5 +94,13 @@ mod tests {
     #[test]
     fn empty_message_carries_no_payload() {
         assert_eq!(Message::EMPTY.as_slice(), &[]);
+    }
+
+    #[test]
+    fn channels_are_distinct_and_bounded() {
+        assert_eq!(IPC_CHANNELS, 2);
+        assert_ne!(IPC_DATA, IPC_DISCOVERY);
+        assert!(IPC_DATA < IPC_CHANNELS);
+        assert!(IPC_DISCOVERY < IPC_CHANNELS);
     }
 }

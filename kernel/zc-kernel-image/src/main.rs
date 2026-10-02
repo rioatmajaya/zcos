@@ -13,8 +13,8 @@ use core::fmt::Write;
 
 use zc_abi::{
     BootInfo, MemoryRegion, Message, SYS_CAP_DELEGATE, SYS_CLOSE, SYS_FB_INFO, SYS_LOG_WRITE,
-    SYS_MAP_FRAME, SYS_OPEN, SYS_READ, SYS_RECV, SYS_SEND, SYS_SERIAL_READ, SYS_TASK_EXIT,
-    SYS_YIELD,
+    SYS_MAP_FRAME, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ, SYS_RECV, SYS_RECV_FROM, SYS_SEND,
+    SYS_SEND_TO, SYS_SERIAL_READ, SYS_TASK_EXIT, SYS_YIELD,
 };
 use zc_kernel::{
     addrspace::AddressSpace,
@@ -123,29 +123,21 @@ fn kernel_main(boot_info: *const BootInfo) -> ! {
     acpi::describe(info.rsdp);
     report_initramfs(info);
     let devices = pci::enumerate();
+    // Hardware discovery happens exactly once, here: the BAR base flows into
+    // `user::enter` as data, which turns it into capability grants through
+    // the device table. The kernel reports the hardware; it grants nothing.
+    let mut blk_bar = None;
     if let Some(blk) = pci::find_blk(&devices) {
         let _ = serial::print(format_args!(
             "pci: blk device {:02x}:{:02x}.{} claimed by driver task\n",
             blk.bus, blk.device, blk.function,
         ));
-        // PCI type-1 config ports plus the device's own BAR window: the
-        // only ports the block driver may touch. Everything else still
-        // faults, replacing blanket IOPL for this domain. The grant goes
-        // into the driver task's own bitmap, so no other ring-3 task can
-        // reach the device even while the driver runs.
-        let driver = user::BLK_TASK;
-        gdt::allow_io_range(driver, 0xCF8, 8);
         if zc_kernel::pci::bar_is_io(blk.bar0) {
-            let base = (zc_kernel::pci::bar_base(blk.bar0) & 0xFFFF) as u16;
-            gdt::allow_io_range(driver, base, 0x100);
-            let _ = serial::print(format_args!(
-                "iomap: block domain holds {} ports\n",
-                gdt::allowed_ports(driver),
-            ));
+            blk_bar = Some((zc_kernel::pci::bar_base(blk.bar0) & 0xFFFF) as u16);
         }
     }
     smp::bring_up(&mut alloc);
-    user::enter(&mut alloc, boot_info);
+    user::enter(&mut alloc, boot_info, blk_bar);
 }
 
 /// Prints the firmware handoff tail and idles forever.
@@ -248,6 +240,9 @@ fn exercise_mechanisms(alloc: &mut FrameAllocator<'_>, usable: u64) {
         (SYS_SERIAL_READ, Action::SerialRead),
         (SYS_FB_INFO, Action::FbInfo),
         (SYS_CLOSE, Action::Close),
+        (SYS_PORT_CLAIM, Action::PortClaim),
+        (SYS_SEND_TO, Action::SendTo),
+        (SYS_RECV_FROM, Action::RecvFrom),
     ];
     for (number, expected) in dispatched {
         match syscall::dispatch(number) {

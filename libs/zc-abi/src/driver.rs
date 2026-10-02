@@ -29,6 +29,18 @@ pub const IRQ_SOURCES: usize = 4;
 /// regardless of which device the keystroke arrived on.
 pub const INPUT_RING_VIRT: u64 = 0x47_0000;
 
+/// Packs an I/O port range into a capability object id.
+///
+/// The high bit tags the port namespace so a port grant can never collide
+/// with an IRQ source index (which is a small integer): `port_cap` values
+/// always have bit 31 set, IRQ sources never do. The kernel provisions one
+/// such object per granted range at spawn, and `SYS_PORT_CLAIM` checks the
+/// caller's table for the exact packed value before touching the bitmap.
+#[must_use]
+pub const fn port_cap(start: u16, len: u16) -> u32 {
+    0x8000_0000 | ((start as u32) << 16) | (len as u32)
+}
+
 /// Offset of the first queue-frame physical address in the descriptor.
 pub const INFO_QUEUE0: usize = 0;
 /// Offset of the second queue-frame physical address.
@@ -51,9 +63,10 @@ mod tests {
 
     #[test]
     fn input_ring_sits_past_every_task_image() {
-        // Task images are linked every 64 KiB from 0x400000, so the last one
-        // (the keyboard domain at 0x460000) ends at 0x470000. The ring must
-        // clear it so a large image cannot reach the shared page.
+        // Task images are linked every 64 KiB from 0x400000; the ring must
+        // clear the keyboard domain at 0x460000 so a large image cannot reach
+        // the shared page. (The device manager links higher at 0x480000 and
+        // grows upward, away from the ring, toward its own discovery page.)
         assert!(INPUT_RING_VIRT >= 0x47_0000);
         assert!(INPUT_RING_VIRT + 4096 <= 0x60_0000);
     }
@@ -61,5 +74,21 @@ mod tests {
     #[test]
     fn keyboard_source_is_inside_the_table() {
         assert!(IRQ_KEYBOARD < IRQ_SOURCES);
+    }
+
+    #[test]
+    fn port_caps_never_collide_with_irq_sources() {
+        // Every IRQ source index must stay outside the port namespace, even
+        // for the degenerate (0, 0) range.
+        for source in 0..IRQ_SOURCES as u32 {
+            assert_ne!(port_cap(0, 0), source);
+            assert_ne!(port_cap(0, 1), source);
+            assert_ne!(port_cap(0x60, 2), source);
+            assert_ne!(port_cap(0xCF8, 8), source);
+        }
+        // Packing is injective over the ranges the kernel actually grants.
+        assert_ne!(port_cap(0x60, 2), port_cap(0x64, 1));
+        assert_ne!(port_cap(0xCF8, 8), port_cap(0xC000, 0x100));
+        assert_eq!(port_cap(0x60, 2), 0x8060_0002);
     }
 }

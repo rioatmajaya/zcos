@@ -29,6 +29,29 @@ impl Rights {
     pub const fn contains(self, requested: Self) -> bool {
         (self.0 & requested.0) == requested.0
     }
+
+    /// Returns the raw bitmask, for crossing the syscall boundary.
+    ///
+    /// Userspace names requested rights by these bits; the kernel decodes
+    /// them back with [`from_bits`](Self::from_bits), refusing anything
+    /// outside the three defined rights.
+    #[must_use]
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    /// Decodes a raw bitmask, refusing undefined bits.
+    ///
+    /// Returns `None` when `bits` names anything outside READ/WRITE/GRANT,
+    /// so a wild syscall argument cannot mint authority the model never
+    /// defined.
+    #[must_use]
+    pub const fn from_bits(bits: u8) -> Option<Self> {
+        if bits & !0x7 != 0 {
+            return None;
+        }
+        Some(Self(bits))
+    }
 }
 
 /// An opaque reference to a kernel object and its authority.
@@ -164,6 +187,28 @@ impl<const N: usize> CapabilityTable<N> {
         })
     }
 
+    /// Finds a live slot holding `object` with at least `rights`.
+    ///
+    /// The syscall layer names delegation sources by object rather than by
+    /// handle: a caller can only name what it already holds (the scan runs
+    /// on its own table), so no handle distribution is needed for the
+    /// bring-up manager to hand a grant to a driver. First live match wins;
+    /// tables are tiny and grants are unique per role.
+    #[must_use]
+    pub fn find_object(&self, object: u32, rights: Rights) -> Option<Handle> {
+        self.slots
+            .iter()
+            .position(|slot| {
+                slot.capability.is_some_and(|cap| {
+                    cap.object() == object && cap.rights().contains(rights)
+                })
+            })
+            .map(|index| Handle {
+                slot: index as u16,
+                generation: self.slots[index].generation,
+            })
+    }
+
     /// Delegates a non-amplifying subset of `source` into `destination`.
     pub fn delegate<const M: usize>(
         &self,
@@ -293,5 +338,45 @@ mod tests {
         // protecting the slot index.
         table.remove(grant).unwrap();
         assert!(!table.holds_object(7, Rights::READ));
+    }
+
+    #[test]
+    fn rights_round_trip_through_bits() {
+        assert_eq!(Rights::READ.bits(), 1);
+        assert_eq!(Rights::WRITE.bits(), 2);
+        assert_eq!(Rights::GRANT.bits(), 4);
+        assert_eq!(RWG.bits(), 7);
+        assert_eq!(Rights::from_bits(3), Some(RW));
+        assert_eq!(Rights::from_bits(0), Some(Rights::NONE));
+        // Anything outside the three defined rights is refused, so a wild
+        // syscall argument cannot mint new authority.
+        assert_eq!(Rights::from_bits(8), None);
+        assert_eq!(Rights::from_bits(0xFF), None);
+    }
+
+    #[test]
+    fn find_object_names_a_grantable_source() {
+        let mut table = CapabilityTable::<2>::new();
+        assert_eq!(table.find_object(7, Rights::READ), None);
+        let handle = table.insert(Capability::new(7, RWG)).unwrap();
+        assert_eq!(table.find_object(7, Rights::READ), Some(handle));
+        assert_eq!(table.find_object(7, Rights::WRITE), Some(handle));
+        // Wrong object or a right the slot lacks names nothing.
+        assert_eq!(table.find_object(8, Rights::READ), None);
+        assert_eq!(table.find_object(7, Rights::NONE), Some(handle));
+    }
+
+    #[test]
+    fn delegation_by_found_handle_lands() {
+        let mut source = CapabilityTable::<2>::new();
+        let mut destination = CapabilityTable::<2>::new();
+        source.insert(Capability::new(7, RWG)).unwrap();
+        // The exact path the delegate syscall takes: find, then delegate.
+        let found = source.find_object(7, Rights::GRANT).unwrap();
+        let handle = source.delegate(found, &mut destination, Rights::READ).unwrap();
+        assert_eq!(
+            destination.get(handle),
+            Ok(Capability::new(7, Rights::READ))
+        );
     }
 }

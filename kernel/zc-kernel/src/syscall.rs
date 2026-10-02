@@ -8,8 +8,8 @@
 
 use zc_abi::{
     SYS_CAP_DELEGATE, SYS_CLOSE, SYS_FB_INFO, SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT,
-    SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_OPEN, SYS_READ, SYS_RECV, SYS_SEND, SYS_SERIAL_READ,
-    SYS_TASK_EXIT, SYS_YIELD, SyscallError,
+    SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ, SYS_RECV, SYS_RECV_FROM,
+    SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_TASK_EXIT, SYS_YIELD, SyscallError,
 };
 
 /// The kernel operation a syscall number requests.
@@ -48,6 +48,12 @@ pub enum Action {
     IrqWait,
     /// Raise the caller's own claimed source on this CPU.
     IrqTest,
+    /// Claim an I/O port range for the calling task.
+    PortClaim,
+    /// Send a word on an explicit channel.
+    SendTo,
+    /// Receive a word from an explicit channel.
+    RecvFrom,
 }
 
 /// Maps a raw syscall number to its [`Action`].
@@ -71,6 +77,9 @@ pub const fn dispatch(number: u64) -> Result<Action, SyscallError> {
         SYS_IRQ_CLAIM => Ok(Action::IrqClaim),
         SYS_IRQ_WAIT => Ok(Action::IrqWait),
         SYS_IRQ_TEST => Ok(Action::IrqTest),
+        SYS_PORT_CLAIM => Ok(Action::PortClaim),
+        SYS_SEND_TO => Ok(Action::SendTo),
+        SYS_RECV_FROM => Ok(Action::RecvFrom),
         _ => Err(SyscallError::InvalidNumber),
     }
 }
@@ -96,12 +105,15 @@ mod tests {
         assert_eq!(dispatch(SYS_IRQ_CLAIM), Ok(Action::IrqClaim));
         assert_eq!(dispatch(SYS_IRQ_WAIT), Ok(Action::IrqWait));
         assert_eq!(dispatch(SYS_IRQ_TEST), Ok(Action::IrqTest));
+        assert_eq!(dispatch(SYS_PORT_CLAIM), Ok(Action::PortClaim));
+        assert_eq!(dispatch(SYS_SEND_TO), Ok(Action::SendTo));
+        assert_eq!(dispatch(SYS_RECV_FROM), Ok(Action::RecvFrom));
     }
 
     #[test]
     fn unknown_numbers_are_rejected() {
         assert_eq!(
-            dispatch(15),
+            dispatch(18),
             Err(SyscallError::InvalidNumber)
         );
         assert_eq!(
