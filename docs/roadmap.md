@@ -41,7 +41,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F4** | Thread + IPC | ✅ done | `task 0: producer sent 2000`, capability gates |
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 5 grants`, `task 6: devmgr: blk published` |
-| **F7** | VFS & penyimpanan | ⏳ next | read-only initramfs only |
+| **F7** | VFS & penyimpanan | 🔨 F7a done | `blk: write ok`, `blk: flush ok`, `blk: readback ok` |
 | **F8** | Desktop | ⬜ planned | — |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
@@ -267,8 +267,12 @@ VFS → write path → journaling → `fsck`**.
 
 **Tasks.**
 
-- [ ] F7a: virtio-blk **write** path (write sector, flush, sync) from the
-      userspace block domain, with the DMA descriptor chain reused.
+- [x] F7a: virtio-blk **write** path. The block domain negotiates
+      `VIRTIO_BLK_F_FLUSH`, writes a known pattern to a data sector, flushes the
+      device cache, then reads the sector back and compares every byte — all
+      through one descriptor-chain helper. A host-side check confirms the bytes
+      reached `build/disk.img` after QEMU exits, so durability is proven, not
+      just the in-guest buffer.
 - [ ] F7b: block cache with writeback and explicit flush ordering.
 - [ ] F7c: read-only mount of a real filesystem (FAT32 first, then ext2) on a
       data partition, distinct from the ESP.
@@ -285,6 +289,8 @@ VFS → write path → journaling → `fsck`**.
 
 **Pass criteria (machine).**
 
+- F7a: `blk: write ok`, `blk: flush ok`, `blk: readback ok` in the boot log,
+  and `tools/check-disk-write.sh` finds the pattern on the host image.
 - Boot log contains `vfs: mounted` with the filesystem name and mount point.
 - A CI boot writes a known pattern to `/data/probe`, unmounts, remounts, and
   reads it back with a matching checksum: `vfs: persistence ok`.

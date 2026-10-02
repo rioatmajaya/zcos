@@ -7,10 +7,17 @@
 //! touches PCI config: it cannot scan the bus, only use the window it was
 //! given. A failed device aborts loudly instead of taking the kernel down
 //! with it.
+//!
+//! Bring-up proves both directions: it reads sector zero's magic, writes a
+//! known pattern to a data sector, flushes the device cache, then reads the
+//! sector back and compares every byte. A read, a write, and a flush all run
+//! through one descriptor-chain helper.
 
 #![no_std]
 #![no_main]
 #![allow(unsafe_code)]
+
+use core::sync::atomic::{Ordering, compiler_fence};
 
 use zc_abi::{INFO_LEN, INFO_QUEUE0, INFO_VIRT, IPC_DISCOVERY, QUEUE_VIRT};
 use zc_kernel::virtio;
@@ -87,6 +94,127 @@ fn load16(area: *const u8, offset: usize) -> u16 {
     unsafe { u16::from_le((area.add(offset) as *const u16).read_volatile()) }
 }
 
+/// Fills the data sector with the write-test pattern.
+fn fill_pattern(area: *mut u8) {
+    let mut index = 0;
+    while index < virtio::WRITE_MAGIC.len() {
+        store8(area, virtio::DATA_OFFSET + index, virtio::WRITE_MAGIC[index]);
+        index += 1;
+    }
+    while index < virtio::SECTOR {
+        store8(
+            area,
+            virtio::DATA_OFFSET + index,
+            virtio::pattern_byte(index),
+        );
+        index += 1;
+    }
+}
+
+/// Checks the data sector against the same pattern.
+fn verify_pattern(area: *const u8) -> bool {
+    let mut index = 0;
+    while index < virtio::WRITE_MAGIC.len() {
+        if load8(area, virtio::DATA_OFFSET + index) != virtio::WRITE_MAGIC[index] {
+            return false;
+        }
+        index += 1;
+    }
+    while index < virtio::SECTOR {
+        if load8(area, virtio::DATA_OFFSET + index) != virtio::pattern_byte(index) {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// Submits one block request and waits for its completion.
+///
+/// Rebuilds the descriptor chain each time — header, optional data sector,
+/// status byte — so a read, a write, and a flush share one path.
+/// `data_writable` picks the direction: the device writes the data buffer for
+/// a read and reads it for a write. A zero `data_len` (flush) drops the data
+/// descriptor entirely. Returns the device's status byte.
+///
+/// `seq` is the running submission counter: the available ring slot and the
+/// index the used ring must reach both derive from it, so requests can be
+/// issued back to back without resetting the queue.
+fn submit(
+    port: u16,
+    area: *mut u8,
+    base: u64,
+    max: u16,
+    seq: &mut u16,
+    kind: u32,
+    sector: u64,
+    data_len: u32,
+    data_writable: bool,
+) -> u8 {
+    // Physical address of an area offset: the frames are contiguous.
+    let at = |offset: usize| base + offset as u64;
+    // Descriptor 0: request header, device-readable, chained.
+    store64(area, 0, at(virtio::HEADER_OFFSET));
+    store32(area, 8, virtio::HEADER_LEN as u32);
+    store16(area, 12, virtio::DESC_NEXT);
+    store16(area, 14, 1);
+    if data_len > 0 {
+        // Descriptor 1: data sector, chained. The direction flag is the only
+        // difference between a read and a write.
+        store64(area, 16, at(virtio::DATA_OFFSET));
+        store32(area, 24, data_len);
+        let flags = virtio::DESC_NEXT
+            | if data_writable {
+                virtio::DESC_WRITE
+            } else {
+                0
+            };
+        store16(area, 28, flags);
+        store16(area, 30, 2);
+        // Descriptor 2: status byte, device-writable.
+        store64(area, 32, at(virtio::STATUS_OFFSET));
+        store32(area, 40, 1);
+        store16(area, 44, virtio::DESC_WRITE);
+        store16(area, 46, 0);
+    } else {
+        // Flush carries no data: header then status.
+        store64(area, 16, at(virtio::STATUS_OFFSET));
+        store32(area, 24, 1);
+        store16(area, 28, virtio::DESC_WRITE);
+        store16(area, 30, 0);
+    }
+    // Request header: type, reserved, sector.
+    store32(area, virtio::HEADER_OFFSET, kind);
+    store32(area, virtio::HEADER_OFFSET + 4, 0);
+    store64(area, virtio::HEADER_OFFSET + 8, sector);
+    // Status starts failed so success is observable.
+    store8(area, virtio::STATUS_OFFSET, 0xFF);
+
+    let avail = max as usize * virtio::DESC_SIZE;
+    let used = virtio::used_offset(max);
+    let slot = (*seq as usize) % max as usize;
+    store16(area, avail, 0);
+    store16(area, avail + 4 + slot * 2, 0);
+    // The device may read the ring the moment it sees the new index, so the
+    // buffer writes above must be visible first.
+    compiler_fence(Ordering::SeqCst);
+    let target = seq.wrapping_add(1);
+    store16(area, avail + 2, target);
+    compiler_fence(Ordering::SeqCst);
+    port_outw(port + virtio::REG_QUEUE_NOTIFY, 0);
+
+    let mut spins = 0;
+    while load16(area, used + 2) != target {
+        spins += 1;
+        if spins == COMPLETION_SPINS {
+            abort();
+        }
+        core::hint::spin_loop();
+    }
+    *seq = target;
+    load8(area, virtio::STATUS_OFFSET)
+}
+
 /// Task entry point; the kernel provides a fresh user stack.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
@@ -130,8 +258,19 @@ pub unsafe extern "C" fn _start() -> ! {
     }
 
     port_outb(port + virtio::REG_STATUS, 0);
-    port_outb(port + virtio::REG_STATUS, virtio::STATUS_ACK | virtio::STATUS_DRIVER);
-    port_outl(reg(port, virtio::REG_GUEST_FEATURES), 0);
+    port_outb(port + virtio::REG_STATUS, virtio::STATUS_ACK);
+    // Negotiate only the flush feature: without it a flush request is not
+    // ours to send, and every other feature stays off as before.
+    let offered = port_inl(reg(port, virtio::REG_DEVICE_FEATURES));
+    let flush_offered = offered & virtio::FEATURE_FLUSH != 0;
+    port_outl(
+        reg(port, virtio::REG_GUEST_FEATURES),
+        offered & virtio::FEATURE_FLUSH,
+    );
+    port_outb(
+        port + virtio::REG_STATUS,
+        virtio::STATUS_ACK | virtio::STATUS_DRIVER,
+    );
 
     port_outw(port + virtio::REG_QUEUE_SEL, 0);
     let max = port_inw(port + virtio::REG_QUEUE_NUM);
@@ -144,43 +283,22 @@ pub unsafe extern "C" fn _start() -> ! {
         virtio::STATUS_ACK | virtio::STATUS_DRIVER | virtio::STATUS_DRIVER_OK,
     );
 
-    let descriptors = max as usize * virtio::DESC_SIZE;
-    let avail = descriptors;
-    let used = virtio::used_offset(max);
-    // Physical address of an area offset: the frames are contiguous.
-    let at = |offset: usize| phys[0] + offset as u64;
-    // Descriptor 0: request header (all zeros: read sector zero), chained.
-    store64(area, 0, at(virtio::HEADER_OFFSET));
-    store32(area, 8, virtio::HEADER_LEN as u32);
-    store16(area, 12, virtio::DESC_NEXT);
-    store16(area, 14, 1);
-    // Descriptor 1: data sector, device-writable, chained.
-    store64(area, 16, at(virtio::DATA_OFFSET));
-    store32(area, 24, virtio::SECTOR as u32);
-    store16(area, 28, virtio::DESC_WRITE | virtio::DESC_NEXT);
-    store16(area, 30, 2);
-    // Descriptor 2: status byte, device-writable.
-    store64(area, 32, at(virtio::STATUS_OFFSET));
-    store32(area, 40, 1);
-    store16(area, 44, virtio::DESC_WRITE);
-    store16(area, 46, 0);
-    // Available ring: flags 0, one entry, head zero.
-    store16(area, avail, 0);
-    store16(area, avail + 2, 1);
-    store16(area, avail + 4, 0);
-    // Status starts failed so success is observable.
-    store8(area, virtio::STATUS_OFFSET, 0xFF);
-    port_outw(port + virtio::REG_QUEUE_NOTIFY, 0);
+    let base = phys[0];
+    let mut seq: u16 = 0;
 
-    let mut spins = 0;
-    while load16(area, used + 2) == 0 {
-        spins += 1;
-        if spins == COMPLETION_SPINS {
-            abort();
-        }
-        core::hint::spin_loop();
-    }
-    if load8(area, virtio::STATUS_OFFSET) != virtio::BLK_OK {
+    // Read sector zero: the original bring-up proof, unchanged.
+    if submit(
+        port,
+        area,
+        base,
+        max,
+        &mut seq,
+        virtio::BLK_READ,
+        0,
+        virtio::SECTOR as u32,
+        true,
+    ) != virtio::BLK_OK
+    {
         abort();
     }
     let mut index = 0;
@@ -192,9 +310,68 @@ pub unsafe extern "C" fn _start() -> ! {
     }
     let sectors = port_inl(reg(port, virtio::REG_CONFIG)) as u64
         | ((port_inl(reg(port, virtio::REG_CONFIG + 4)) as u64) << 32);
-    if sectors == 0 {
+    if sectors == 0 || virtio::TEST_SECTOR >= sectors {
         abort();
     }
     log("blk: disk magic ok\n");
+
+    // Write a known pattern to a data sector.
+    fill_pattern(area);
+    if submit(
+        port,
+        area,
+        base,
+        max,
+        &mut seq,
+        virtio::BLK_WRITE,
+        virtio::TEST_SECTOR,
+        virtio::SECTOR as u32,
+        false,
+    ) != virtio::BLK_OK
+    {
+        abort();
+    }
+    log("blk: write ok\n");
+
+    // Flush so the write is durable, not just in the device's cache.
+    if flush_offered {
+        if submit(
+            port,
+            area,
+            base,
+            max,
+            &mut seq,
+            virtio::BLK_FLUSH,
+            0,
+            0,
+            false,
+        ) != virtio::BLK_OK
+        {
+            abort();
+        }
+        log("blk: flush ok\n");
+    } else {
+        log("blk: flush unsupported\n");
+    }
+
+    // Read the sector back and verify every byte.
+    if submit(
+        port,
+        area,
+        base,
+        max,
+        &mut seq,
+        virtio::BLK_READ,
+        virtio::TEST_SECTOR,
+        virtio::SECTOR as u32,
+        true,
+    ) != virtio::BLK_OK
+    {
+        abort();
+    }
+    if !verify_pattern(area as *const u8) {
+        abort();
+    }
+    log("blk: readback ok\n");
     task_exit()
 }

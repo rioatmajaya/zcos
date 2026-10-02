@@ -13,12 +13,19 @@ maintained.
 
 ## [Unreleased]
 
-Roadmap phase **F6 — driver userspace**, closing the runtime-authority story:
+Roadmap phase **F6 — driver userspace** closed the runtime-authority story:
 what a domain may touch is now granted by data, delegated at runtime, and
-claimed explicitly.
+claimed explicitly. Phase **F7 — VFS & storage** has started with its write
+path.
 
 ### Added
 
+- virtio-blk **write path** (F7a): the block domain negotiates
+  `VIRTIO_BLK_F_FLUSH`, writes a known pattern to a data sector, flushes the
+  device cache, then reads the sector back and compares every byte. Reads,
+  writes, and flushes share one descriptor-chain helper.
+- `tools/check-disk-write.sh`: a host-side check that the written pattern
+  reached `build/disk.img`, proving durability and not just the DMA buffer.
 - `SYS_PORT_CLAIM` (F6i): a driver claims exactly the `(start, len)` port
   range its capability table holds. Ports are packed with a high bit so they
   never collide with IRQ indices, and the kernel records and projects the
@@ -60,6 +67,10 @@ claimed explicitly.
 - The keyboard domain's boot log now proves the gates: an unprovided IRQ
   source and an unprovided port range are both refused before any state
   changes.
+- The block driver now reads the device feature word and acknowledges only
+  `VIRTIO_BLK_F_FLUSH` instead of writing zero, so the flush request it sends
+  is one the device actually offered. Devices without the feature log
+  `blk: flush unsupported` and continue.
 
 ## [0.1.0] - 2026-10-01
 

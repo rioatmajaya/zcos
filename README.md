@@ -6,9 +6,10 @@ The system uses a native graphical stack and a capability-based microkernel.
 
 ## Project status
 
-ZC OS is in roadmap phase **F6 — driver userspace**: phases F0–F6 are done, so
-the full path from firmware to restartable userspace drivers works end to end.
-See [the roadmap](docs/roadmap.md) for the phase map and pass criteria, and
+ZC OS is in roadmap phase **F7 — VFS & storage**: phases F0–F6 are done, so
+the full path from firmware to restartable userspace drivers works end to end,
+and the block domain now writes, flushes, and reads a sector back (F7a). See
+[the roadmap](docs/roadmap.md) for the phase map and pass criteria, and
 [CHANGELOG.md](CHANGELOG.md) for what changed.
 
 **F1 — bootloader.** The UEFI loader boots in QEMU/OVMF, reads a kernel ELF
@@ -51,8 +52,9 @@ ACPI/MADT parsing, and generation-safe capability tables — and is covered by
 host unit tests, as are the shared `zc-abi`/`zc-elf` crates and the loader's
 UEFI bindings.
 
-Next up is **F7 — VFS & storage**: a writable block path, a block cache, a real
-filesystem behind a VFS, and `initd` service supervision.
+The block domain writes and flushes a data sector and reads it back, with a
+host-side check that the bytes reached `build/disk.img`. Next up is **F7b — a
+block cache**, then a real filesystem behind a VFS and `initd` supervision.
 
 ## Development
 

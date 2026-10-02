@@ -34,6 +34,15 @@ pub const STATUS_DRIVER_OK: u8 = 4;
 /// Block request type: read sectors.
 pub const BLK_READ: u32 = 0;
 
+/// Block request type: write sectors (the device reads the data buffer).
+pub const BLK_WRITE: u32 = 1;
+
+/// Block request type: flush the writeback cache (no data buffer).
+pub const BLK_FLUSH: u32 = 4;
+
+/// Device feature bit: the device offers a flush request.
+pub const FEATURE_FLUSH: u32 = 1 << 9;
+
 /// Successful completion status written by the device.
 pub const BLK_OK: u8 = 0;
 
@@ -64,6 +73,21 @@ pub const DATA_OFFSET: usize = 11_776;
 
 /// Magic the test disk carries in sector zero.
 pub const DISK_MAGIC: &[u8; 8] = b"ZCDISK01";
+
+/// Magic the write test puts at the start of its sector.
+pub const WRITE_MAGIC: &[u8; 8] = b"ZCWRITE1";
+
+/// Sector the write test uses, past sector zero's magic and capacity.
+pub const TEST_SECTOR: u64 = 8;
+
+/// Deterministic byte for the write-test pattern.
+///
+/// Both the write and the read-back verify call this, so a wrong byte at any
+/// index fails the comparison instead of being papered over.
+#[must_use]
+pub const fn pattern_byte(index: usize) -> u8 {
+    (index as u8).wrapping_mul(31).wrapping_add(7)
+}
 
 /// Descriptor as the device reads it.
 #[repr(C)]
@@ -130,7 +154,23 @@ mod tests {
         assert_eq!(REG_ISR, 0x13);
         assert_eq!(REG_CONFIG, 0x14);
         assert_eq!(BLK_READ, 0);
+        assert_eq!(BLK_WRITE, 1);
+        assert_eq!(BLK_FLUSH, 4);
+        assert_eq!(FEATURE_FLUSH, 0x200);
         assert_eq!(BLK_OK, 0);
+    }
+
+    #[test]
+    fn write_test_fits_the_data_area() {
+        // The write test must land inside the one data sector the three
+        // queue pages provide, past the header and status byte.
+        assert_eq!(WRITE_MAGIC, b"ZCWRITE1");
+        assert_eq!(TEST_SECTOR, 8);
+        assert!(DATA_OFFSET + SECTOR <= 3 * 4096);
+        assert_eq!(pattern_byte(0), 7);
+        assert_eq!(pattern_byte(1), 38);
+        assert_eq!(pattern_byte(255), pattern_byte(255));
+        assert_ne!(pattern_byte(3), pattern_byte(4));
     }
 
     #[test]
