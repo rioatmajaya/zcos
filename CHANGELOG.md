@@ -16,10 +16,17 @@ maintained.
 Roadmap phase **F6 — driver userspace** closed the runtime-authority story:
 what a domain may touch is now granted by data, delegated at runtime, and
 claimed explicitly. Phase **F7 — VFS & storage** has started: a write path
-(F7a) and a write-back cache (F7b).
+(F7a), a write-back cache (F7b), and a read-only FAT32 mount (F7c).
 
 ### Added
 
+- **Read-only FAT32** (F7c): `zc-kernel::mbr` parses the partition table and
+  `zc-kernel::fat32` mounts the volume — BPB validation, cluster math, the FAT
+  chain, 8.3 root-directory lookup, and file reads, all host-tested. The block
+  domain parses the MBR, mounts the partition, and reads `HELLO.TXT` through
+  the write-back cache, so a real filesystem consumes the cache seam.
+  `tools/check-disk-fs.sh` reads the same file with mtools, independently of
+  the driver.
 - **Write-back block cache** (F7b): a pure, host-tested `Cache<N>` in
   `zc-kernel::block_cache` owns the sector buffers and tracks dirty slots. The
   block domain holds a four-slot cache in `.bss` and reads/writes through it;
@@ -63,6 +70,10 @@ claimed explicitly. Phase **F7 — VFS & storage** has started: a write path
 
 ### Changed
 
+- `build/disk.img` is now a 64 MiB MBR disk whose first partition (LBA 2048)
+  is a real FAT32 volume, replacing the 1 MiB marker disk. The sector-zero
+  `ZCDISK01` magic and the write/cache test sectors are unchanged, so the
+  earlier proofs still run.
 - `docs/roadmap.md` was restructured around the skill's phases **F0–F9**, each
   with a goal, tasks, and machine-runnable pass criteria, plus detailed plans
   for F7 (VFS & storage), F8 (desktop), and F9 (distribution & daily driver).

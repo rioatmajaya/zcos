@@ -41,7 +41,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F4** | Thread + IPC | ✅ done | `task 0: producer sent 2000`, capability gates |
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 5 grants`, `task 6: devmgr: blk published` |
-| **F7** | VFS & penyimpanan | 🔨 F7a–F7b done | `blk: write ok`; `blk: cache evicted dirty`, `blk: cache flushed`, `blk: cache durable` |
+| **F7** | VFS & penyimpanan | 🔨 F7a–F7c done | `blk: write ok`; `blk: cache durable`; `blk: fs hello ok` |
 | **F8** | Desktop | ⬜ planned | — |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
@@ -281,8 +281,12 @@ VFS → write path → journaling → `fsck`**.
       dirty hit, an eviction write-back, a flush write-back, and a durable
       read-back that bypasses the cache; the host check confirms both markers
       reached the disk.
-- [ ] F7c: read-only mount of a real filesystem (FAT32 first, then ext2) on a
-      data partition, distinct from the ESP.
+- [x] F7c: read-only mount of a real **FAT32** filesystem on an MBR data
+      partition, distinct from the ESP. The driver parses the partition table
+      to find the volume, then reads `HELLO.TXT` through the block cache; a
+      host-side check reads the same file with mtools.
+- [ ] *(follow-up)* F7c-2: read-only **ext2** on the same data partition (the
+      "then ext2" half of the original F7c).
 - [ ] F7d: VFS core — mount table, node/inode abstraction, path resolution,
       descriptor tables, `open`/`read`/`write`/`close`/`stat`.
 - [ ] F7e: writable rootfs on a ZC data partition (ext2 or a documented
@@ -301,6 +305,9 @@ VFS → write path → journaling → `fsck`**.
 - F7b: `blk: cache miss`, `blk: cache hit`, `blk: cache dirty hit`,
   `blk: cache evicted dirty`, `blk: cache flushed`, `blk: cache durable`, and
   the host check finds the cache marker on the disk.
+- F7c: `blk: fs mbr ok`, `blk: fs mount ok`, `blk: fs root ok`,
+  `blk: fs hello ok` in the boot log, and `tools/check-disk-fs.sh` reads
+  `HELLO.TXT` with mtools.
 - Boot log contains `vfs: mounted` with the filesystem name and mount point.
 - A CI boot writes a known pattern to `/data/probe`, unmounts, remounts, and
   reads it back with a matching checksum: `vfs: persistence ok`.

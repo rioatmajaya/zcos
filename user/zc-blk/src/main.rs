@@ -14,7 +14,9 @@
 //! cache: a read miss then hit, a dirty write served from the cache, eviction
 //! writing a dirty sector back before reusing its slot, and a flush writing
 //! back what is left. A read, a write, and a flush all run through one
-//! descriptor-chain helper.
+//! descriptor-chain helper. Finally it parses the MBR, mounts the FAT32
+//! partition, and reads a known file through the cache — a real filesystem
+//! consumer for the cache seam.
 
 #![no_std]
 #![no_main]
@@ -25,6 +27,8 @@ use core::sync::atomic::{Ordering, compiler_fence};
 
 use zc_abi::{INFO_LEN, INFO_QUEUE0, INFO_VIRT, IPC_DISCOVERY, QUEUE_VIRT};
 use zc_kernel::block_cache::{CACHE_MAGIC, CACHE_TEST_SECTOR, Cache, cache_pattern_byte};
+use zc_kernel::fat32::{self, FatError, Sector};
+use zc_kernel::mbr;
 use zc_kernel::virtio;
 use zc_user::{
     abort, log, port_claim, port_inl, port_inw, port_outb, port_outl, port_outw, recv_from,
@@ -501,6 +505,64 @@ fn cache_probe(device: &mut Device, cache: &mut Cache<CACHE_SLOTS>, flush_offere
     log("blk: cache durable\n");
 }
 
+/// Parses the MBR, mounts the FAT32 partition, and reads a known file.
+///
+/// Every sector goes through `cache_read`, so the filesystem is a real
+/// consumer of the write-back cache rather than a second, bypassing path.
+fn fs_probe(device: &mut Device, cache: &mut Cache<CACHE_SLOTS>) {
+    // The partition table lives in sector zero. Parse it in its own scope so
+    // the borrow of `cache` ends before the reader closure captures it.
+    let partition_lba = {
+        let slot = cache_read(device, cache, 0);
+        match mbr::find_fat32(cache.slot_data(slot)) {
+            Ok(partition) => partition.start_lba,
+            Err(_) => {
+                log("blk: fs mbr failed\n");
+                abort()
+            }
+        }
+    };
+    log("blk: fs mbr ok\n");
+
+    let mut reader = |sector: u64, out: &mut Sector| -> Result<(), FatError> {
+        let slot = cache_read(device, cache, sector);
+        out.copy_from_slice(cache.slot_data(slot));
+        Ok(())
+    };
+
+    let volume = match fat32::Volume::mount(partition_lba, &mut reader) {
+        Ok(volume) => volume,
+        Err(_) => {
+            log("blk: fs mount failed\n");
+            abort()
+        }
+    };
+    log("blk: fs mount ok\n");
+
+    let entry = match volume.find_in_root(&mut reader, virtio::FS_FILE_NAME) {
+        Ok(entry) => entry,
+        Err(_) => {
+            log("blk: fs root failed\n");
+            abort()
+        }
+    };
+    log("blk: fs root ok\n");
+
+    let mut buffer = [0u8; 32];
+    let read = match volume.read_file(&mut reader, &entry, &mut buffer) {
+        Ok(read) => read,
+        Err(_) => {
+            log("blk: fs hello failed\n");
+            abort()
+        }
+    };
+    if read != virtio::FS_FILE_MAGIC.len() || &buffer[..read] != virtio::FS_FILE_MAGIC {
+        log("blk: fs hello failed\n");
+        abort()
+    }
+    log("blk: fs hello ok\n");
+}
+
 /// Task entry point; the kernel provides a fresh user stack.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
@@ -581,5 +643,6 @@ pub unsafe extern "C" fn _start() -> ! {
     let cache = unsafe { &mut *addr_of_mut!(CACHE) };
     raw_probe(&mut device, flush_offered);
     cache_probe(&mut device, cache, flush_offered);
+    fs_probe(&mut device, cache);
     task_exit()
 }

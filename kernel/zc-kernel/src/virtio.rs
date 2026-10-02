@@ -80,6 +80,12 @@ pub const WRITE_MAGIC: &[u8; 8] = b"ZCWRITE1";
 /// Sector the write test uses, past sector zero's magic and capacity.
 pub const TEST_SECTOR: u64 = 8;
 
+/// 8.3 name of the file the FAT32 probe reads.
+pub const FS_FILE_NAME: &[u8; 11] = b"HELLO   TXT";
+
+/// Contents the FAT32 probe expects in [`FS_FILE_NAME`].
+pub const FS_FILE_MAGIC: &[u8; 12] = b"ZC FAT32 OK\n";
+
 /// Deterministic byte for the write-test pattern.
 ///
 /// Both the write and the read-back verify call this, so a wrong byte at any
@@ -171,6 +177,12 @@ mod tests {
         assert_eq!(pattern_byte(1), 38);
         assert_eq!(pattern_byte(255), pattern_byte(255));
         assert_ne!(pattern_byte(3), pattern_byte(4));
+    }
+
+    #[test]
+    fn fat32_probe_constants_are_stable() {
+        assert_eq!(FS_FILE_NAME, b"HELLO   TXT");
+        assert_eq!(FS_FILE_MAGIC, b"ZC FAT32 OK\n");
     }
 
     #[test]
