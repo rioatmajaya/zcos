@@ -15,17 +15,25 @@ maintained.
 
 Roadmap phase **F6 — driver userspace** closed the runtime-authority story:
 what a domain may touch is now granted by data, delegated at runtime, and
-claimed explicitly. Phase **F7 — VFS & storage** has started with its write
-path.
+claimed explicitly. Phase **F7 — VFS & storage** has started: a write path
+(F7a) and a write-back cache (F7b).
 
 ### Added
 
+- **Write-back block cache** (F7b): a pure, host-tested `Cache<N>` in
+  `zc-kernel::block_cache` owns the sector buffers and tracks dirty slots. The
+  block domain holds a four-slot cache in `.bss` and reads/writes through it;
+  dirty data is written back before a slot is reused, and flush writes back
+  what remains before the device flush. The boot log proves a miss, a hit, a
+  dirty hit, an eviction write-back, a flush write-back, and a durable
+  read-back that bypasses the cache.
 - virtio-blk **write path** (F7a): the block domain negotiates
   `VIRTIO_BLK_F_FLUSH`, writes a known pattern to a data sector, flushes the
   device cache, then reads the sector back and compares every byte. Reads,
   writes, and flushes share one descriptor-chain helper.
-- `tools/check-disk-write.sh`: a host-side check that the written pattern
-  reached `build/disk.img`, proving durability and not just the DMA buffer.
+- `tools/check-disk-write.sh`: a host-side check that the raw write and both
+  cache write-backs reached `build/disk.img`, proving durability and not just
+  the DMA buffers.
 - `SYS_PORT_CLAIM` (F6i): a driver claims exactly the `(start, len)` port
   range its capability table holds. Ports are packed with a high bit so they
   never collide with IRQ indices, and the kernel records and projects the

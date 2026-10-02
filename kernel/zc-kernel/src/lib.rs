@@ -11,6 +11,7 @@ extern crate std;
 
 pub mod acpi;
 pub mod addrspace;
+pub mod block_cache;
 pub mod boot;
 pub mod capability;
 pub mod cpio;

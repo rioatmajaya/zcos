@@ -8,7 +8,8 @@ The system uses a native graphical stack and a capability-based microkernel.
 
 ZC OS is in roadmap phase **F7 — VFS & storage**: phases F0–F6 are done, so
 the full path from firmware to restartable userspace drivers works end to end,
-and the block domain now writes, flushes, and reads a sector back (F7a). See
+and the block domain now writes, flushes, and reads a sector back (F7a) behind
+a write-back cache with explicit eviction and flush ordering (F7b). See
 [the roadmap](docs/roadmap.md) for the phase map and pass criteria, and
 [CHANGELOG.md](CHANGELOG.md) for what changed.
 
@@ -52,9 +53,11 @@ ACPI/MADT parsing, and generation-safe capability tables — and is covered by
 host unit tests, as are the shared `zc-abi`/`zc-elf` crates and the loader's
 UEFI bindings.
 
-The block domain writes and flushes a data sector and reads it back, with a
-host-side check that the bytes reached `build/disk.img`. Next up is **F7b — a
-block cache**, then a real filesystem behind a VFS and `initd` supervision.
+The block domain writes and flushes a data sector and reads it back, and a
+four-slot write-back cache sits in front of the device (dirty data is written
+back before its slot is reused, and again by flush). A host-side check confirms
+the raw write and both cache write-backs reached `build/disk.img`. Next up is
+**F7c — a read-only filesystem**, then a VFS and `initd` supervision.
 
 ## Development
 

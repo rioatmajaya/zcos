@@ -73,6 +73,12 @@ jobs:
         grep -q "task 4: blk: write ok" build/boot.log
         grep -q "task 4: blk: flush ok" build/boot.log
         grep -q "task 4: blk: readback ok" build/boot.log
+        grep -q "task 4: blk: cache miss" build/boot.log
+        grep -q "task 4: blk: cache hit" build/boot.log
+        grep -q "task 4: blk: cache dirty hit" build/boot.log
+        grep -q "task 4: blk: cache evicted dirty" build/boot.log
+        grep -q "task 4: blk: cache flushed" build/boot.log
+        grep -q "task 4: blk: cache durable" build/boot.log
         grep -q "user: 7 address spaces" build/boot.log
         grep -q "device: 3 roles, 5 grants (blk 0, kbd 3, devmgr 2)" build/boot.log
         grep -q "cap: task 6 delegated" build/boot.log

@@ -8,18 +8,23 @@
 //! given. A failed device aborts loudly instead of taking the kernel down
 //! with it.
 //!
-//! Bring-up proves both directions: it reads sector zero's magic, writes a
-//! known pattern to a data sector, flushes the device cache, then reads the
-//! sector back and compares every byte. A read, a write, and a flush all run
-//! through one descriptor-chain helper.
+//! Bring-up proves three things. It reads sector zero's magic, writes a known
+//! pattern to a data sector, flushes the device cache, then reads the sector
+//! back and compares every byte (raw path). It then exercises the write-back
+//! cache: a read miss then hit, a dirty write served from the cache, eviction
+//! writing a dirty sector back before reusing its slot, and a flush writing
+//! back what is left. A read, a write, and a flush all run through one
+//! descriptor-chain helper.
 
 #![no_std]
 #![no_main]
 #![allow(unsafe_code)]
 
+use core::ptr::addr_of_mut;
 use core::sync::atomic::{Ordering, compiler_fence};
 
 use zc_abi::{INFO_LEN, INFO_QUEUE0, INFO_VIRT, IPC_DISCOVERY, QUEUE_VIRT};
+use zc_kernel::block_cache::{CACHE_MAGIC, CACHE_TEST_SECTOR, Cache, cache_pattern_byte};
 use zc_kernel::virtio;
 use zc_user::{
     abort, log, port_claim, port_inl, port_inw, port_outb, port_outl, port_outw, recv_from,
@@ -31,6 +36,15 @@ const COMPLETION_SPINS: u32 = 10_000_000;
 
 /// Marker the manager sends when no block device answers.
 const ABSENT: u64 = u64::MAX;
+
+/// Cache slots: four sectors is enough to prove a hit, an eviction, and a
+/// write-back without growing the image.
+const CACHE_SLOTS: usize = 4;
+
+/// Cached sectors live in `.bss`: each task has a single 4 KiB stack page, so
+/// the cache cannot live on the stack. `map_elf` maps `memsz`, so the static
+/// is mapped writable and zeroed before this task starts.
+static mut CACHE: Cache<CACHE_SLOTS> = Cache::new();
 
 /// Forms a device register port from a BAR base plus an offset.
 const fn reg(port: u16, offset: u16) -> u16 {
@@ -92,41 +106,6 @@ fn load8(area: *const u8, offset: usize) -> u8 {
 fn load16(area: *const u8, offset: usize) -> u16 {
     // SAFETY: the caller names mapped queue memory.
     unsafe { u16::from_le((area.add(offset) as *const u16).read_volatile()) }
-}
-
-/// Fills the data sector with the write-test pattern.
-fn fill_pattern(area: *mut u8) {
-    let mut index = 0;
-    while index < virtio::WRITE_MAGIC.len() {
-        store8(area, virtio::DATA_OFFSET + index, virtio::WRITE_MAGIC[index]);
-        index += 1;
-    }
-    while index < virtio::SECTOR {
-        store8(
-            area,
-            virtio::DATA_OFFSET + index,
-            virtio::pattern_byte(index),
-        );
-        index += 1;
-    }
-}
-
-/// Checks the data sector against the same pattern.
-fn verify_pattern(area: *const u8) -> bool {
-    let mut index = 0;
-    while index < virtio::WRITE_MAGIC.len() {
-        if load8(area, virtio::DATA_OFFSET + index) != virtio::WRITE_MAGIC[index] {
-            return false;
-        }
-        index += 1;
-    }
-    while index < virtio::SECTOR {
-        if load8(area, virtio::DATA_OFFSET + index) != virtio::pattern_byte(index) {
-            return false;
-        }
-        index += 1;
-    }
-    true
 }
 
 /// Submits one block request and waits for its completion.
@@ -215,6 +194,313 @@ fn submit(
     load8(area, virtio::STATUS_OFFSET)
 }
 
+/// Copies the device's staging sector into a cache slot.
+fn copy_dma_to_slot(area: *const u8, slot: &mut [u8; virtio::SECTOR]) {
+    let mut index = 0;
+    while index < virtio::SECTOR {
+        slot[index] = load8(area, virtio::DATA_OFFSET + index);
+        index += 1;
+    }
+}
+
+/// Copies a cache slot into the device's staging sector.
+fn copy_slot_to_dma(area: *mut u8, slot: &[u8; virtio::SECTOR]) {
+    let mut index = 0;
+    while index < virtio::SECTOR {
+        store8(area, virtio::DATA_OFFSET + index, slot[index]);
+        index += 1;
+    }
+}
+
+/// Fills the raw-path staging sector with the write-test pattern.
+fn fill_raw_pattern(area: *mut u8) {
+    let mut index = 0;
+    while index < virtio::WRITE_MAGIC.len() {
+        store8(area, virtio::DATA_OFFSET + index, virtio::WRITE_MAGIC[index]);
+        index += 1;
+    }
+    while index < virtio::SECTOR {
+        store8(
+            area,
+            virtio::DATA_OFFSET + index,
+            virtio::pattern_byte(index),
+        );
+        index += 1;
+    }
+}
+
+/// Fills a cache slot with the cache-test pattern.
+fn fill_cache_pattern(slot: &mut [u8; virtio::SECTOR]) {
+    let mut index = 0;
+    while index < CACHE_MAGIC.len() {
+        slot[index] = CACHE_MAGIC[index];
+        index += 1;
+    }
+    while index < virtio::SECTOR {
+        slot[index] = cache_pattern_byte(index);
+        index += 1;
+    }
+}
+
+/// Checks a cache slot against the cache-test pattern.
+fn slot_matches(slot: &[u8; virtio::SECTOR]) -> bool {
+    let mut index = 0;
+    while index < CACHE_MAGIC.len() {
+        if slot[index] != CACHE_MAGIC[index] {
+            return false;
+        }
+        index += 1;
+    }
+    while index < virtio::SECTOR {
+        if slot[index] != cache_pattern_byte(index) {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// Submission context: the device register window plus the DMA staging area.
+struct Device {
+    port: u16,
+    area: *mut u8,
+    base: u64,
+    max: u16,
+    seq: u16,
+}
+
+impl Device {
+    /// Reads one sector into the staging area.
+    fn read(&mut self, sector: u64) {
+        let (port, area, base, max) = (self.port, self.area, self.base, self.max);
+        if submit(
+            port,
+            area,
+            base,
+            max,
+            &mut self.seq,
+            virtio::BLK_READ,
+            sector,
+            virtio::SECTOR as u32,
+            true,
+        ) != virtio::BLK_OK
+        {
+            abort();
+        }
+    }
+
+    /// Writes a sector from the staging area.
+    fn write_staged(&mut self, sector: u64) {
+        let (port, area, base, max) = (self.port, self.area, self.base, self.max);
+        if submit(
+            port,
+            area,
+            base,
+            max,
+            &mut self.seq,
+            virtio::BLK_WRITE,
+            sector,
+            virtio::SECTOR as u32,
+            false,
+        ) != virtio::BLK_OK
+        {
+            abort();
+        }
+    }
+
+    /// Writes a sector from a buffer.
+    fn write(&mut self, sector: u64, data: &[u8; virtio::SECTOR]) {
+        copy_slot_to_dma(self.area, data);
+        self.write_staged(sector);
+    }
+
+    /// Flushes the device's writeback cache, returning whether it succeeded.
+    fn flush(&mut self) -> bool {
+        let (port, area, base, max) = (self.port, self.area, self.base, self.max);
+        submit(
+            port,
+            area,
+            base,
+            max,
+            &mut self.seq,
+            virtio::BLK_FLUSH,
+            0,
+            0,
+            false,
+        ) == virtio::BLK_OK
+    }
+
+    /// Reads the device capacity in sectors from its config space.
+    fn sectors(&self) -> u64 {
+        port_inl(reg(self.port, virtio::REG_CONFIG)) as u64
+            | ((port_inl(reg(self.port, virtio::REG_CONFIG + 4)) as u64) << 32)
+    }
+}
+
+/// Picks the slot for `sector`, writing back an evicted dirty sector first.
+///
+/// This is the ordering a write-back cache must not get wrong: the evicted
+/// bytes still occupy the slot, so they reach the device before the slot is
+/// reused.
+fn reserve_slot(
+    device: &mut Device,
+    cache: &mut Cache<CACHE_SLOTS>,
+    sector: u64,
+) -> usize {
+    let reservation = cache.reserve(sector);
+    if let Some(evicted) = reservation.evicted {
+        device.write(evicted, cache.slot_data(reservation.slot));
+        log("blk: cache evicted dirty\n");
+    }
+    reservation.slot
+}
+
+/// Reads `sector` through the cache, loading it from the device on a miss.
+fn cache_read(device: &mut Device, cache: &mut Cache<CACHE_SLOTS>, sector: u64) -> usize {
+    if let Some(slot) = cache.find(sector) {
+        if cache.is_dirty(slot) {
+            log("blk: cache dirty hit\n");
+        } else {
+            log("blk: cache hit\n");
+        }
+        return slot;
+    }
+    let slot = reserve_slot(device, cache, sector);
+    device.read(sector);
+    copy_dma_to_slot(device.area, cache.slot_data_mut(slot));
+    log("blk: cache miss\n");
+    slot
+}
+
+/// Writes the cache-test pattern to `sector` through the cache, marking it
+/// dirty. Nothing reaches the device until eviction or flush.
+fn cache_write_pattern(
+    device: &mut Device,
+    cache: &mut Cache<CACHE_SLOTS>,
+    sector: u64,
+) -> usize {
+    let slot = match cache.find(sector) {
+        Some(slot) => slot,
+        None => reserve_slot(device, cache, sector),
+    };
+    fill_cache_pattern(cache.slot_data_mut(slot));
+    cache.set_dirty(slot);
+    log("blk: cache write\n");
+    slot
+}
+
+/// Writes back every dirty slot in order, then flushes the device.
+fn cache_flush(device: &mut Device, cache: &mut Cache<CACHE_SLOTS>, flush_offered: bool) {
+    let mut slot = 0;
+    while slot < CACHE_SLOTS {
+        if cache.is_dirty(slot) {
+            let sector = cache.sector_of(slot);
+            device.write(sector, cache.slot_data(slot));
+            cache.clear_dirty(slot);
+        }
+        slot += 1;
+    }
+    if flush_offered && !device.flush() {
+        abort();
+    }
+    log("blk: cache flushed\n");
+}
+
+/// Reads a sector directly, bypassing the cache, and checks the cache pattern.
+fn verify_durable(device: &mut Device, sector: u64) {
+    device.read(sector);
+    let mut index = 0;
+    while index < virtio::SECTOR {
+        let expected = if index < CACHE_MAGIC.len() {
+            CACHE_MAGIC[index]
+        } else {
+            cache_pattern_byte(index)
+        };
+        if load8(device.area, virtio::DATA_OFFSET + index) != expected {
+            abort();
+        }
+        index += 1;
+    }
+}
+
+/// Raw device proof: sector-zero magic, then a direct write/flush/read-back.
+fn raw_probe(device: &mut Device, flush_offered: bool) {
+    device.read(0);
+    let mut index = 0;
+    while index < virtio::DISK_MAGIC.len() {
+        if load8(device.area, virtio::DATA_OFFSET + index) != virtio::DISK_MAGIC[index] {
+            abort();
+        }
+        index += 1;
+    }
+    let sectors = device.sectors();
+    if sectors == 0 || virtio::TEST_SECTOR >= sectors {
+        abort();
+    }
+    log("blk: disk magic ok\n");
+
+    fill_raw_pattern(device.area);
+    device.write_staged(virtio::TEST_SECTOR);
+    log("blk: write ok\n");
+
+    if flush_offered {
+        if !device.flush() {
+            abort();
+        }
+        log("blk: flush ok\n");
+    } else {
+        log("blk: flush unsupported\n");
+    }
+
+    device.read(virtio::TEST_SECTOR);
+    let mut index = 0;
+    while index < virtio::SECTOR {
+        let expected = if index < virtio::WRITE_MAGIC.len() {
+            virtio::WRITE_MAGIC[index]
+        } else {
+            virtio::pattern_byte(index)
+        };
+        if load8(device.area, virtio::DATA_OFFSET + index) != expected {
+            abort();
+        }
+        index += 1;
+    }
+    log("blk: readback ok\n");
+}
+
+/// Cache proof: hit, dirty read, eviction write-back, and flush write-back.
+fn cache_probe(device: &mut Device, cache: &mut Cache<CACHE_SLOTS>, flush_offered: bool) {
+    // Read-through: a miss loads the sector, the next read hits.
+    cache_read(device, cache, CACHE_TEST_SECTOR);
+    cache_read(device, cache, CACHE_TEST_SECTOR);
+
+    // Write the marker through the cache; the next read serves the dirty
+    // bytes without touching the device.
+    let written = cache_write_pattern(device, cache, CACHE_TEST_SECTOR);
+    let read_back = cache_read(device, cache, CACHE_TEST_SECTOR);
+    if read_back != written || !slot_matches(cache.slot_data(written)) {
+        abort();
+    }
+
+    // Fill the cache so the dirty marker is evicted; eviction writes it back
+    // before the slot is reused.
+    let mut sector = CACHE_TEST_SECTOR + 1;
+    while sector <= CACHE_TEST_SECTOR + 4 {
+        cache_read(device, cache, sector);
+        sector += 1;
+    }
+
+    // A dirty write that only the flush can persist.
+    let flush_sector = CACHE_TEST_SECTOR + 5;
+    cache_write_pattern(device, cache, flush_sector);
+    cache_flush(device, cache, flush_offered);
+
+    // Bypass the cache and confirm both sectors reached the device.
+    verify_durable(device, CACHE_TEST_SECTOR);
+    verify_durable(device, flush_sector);
+    log("blk: cache durable\n");
+}
+
 /// Task entry point; the kernel provides a fresh user stack.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
@@ -283,95 +569,17 @@ pub unsafe extern "C" fn _start() -> ! {
         virtio::STATUS_ACK | virtio::STATUS_DRIVER | virtio::STATUS_DRIVER_OK,
     );
 
-    let base = phys[0];
-    let mut seq: u16 = 0;
-
-    // Read sector zero: the original bring-up proof, unchanged.
-    if submit(
+    let mut device = Device {
         port,
         area,
-        base,
+        base: phys[0],
         max,
-        &mut seq,
-        virtio::BLK_READ,
-        0,
-        virtio::SECTOR as u32,
-        true,
-    ) != virtio::BLK_OK
-    {
-        abort();
-    }
-    let mut index = 0;
-    while index < virtio::DISK_MAGIC.len() {
-        if load8(area, virtio::DATA_OFFSET + index) != virtio::DISK_MAGIC[index] {
-            abort();
-        }
-        index += 1;
-    }
-    let sectors = port_inl(reg(port, virtio::REG_CONFIG)) as u64
-        | ((port_inl(reg(port, virtio::REG_CONFIG + 4)) as u64) << 32);
-    if sectors == 0 || virtio::TEST_SECTOR >= sectors {
-        abort();
-    }
-    log("blk: disk magic ok\n");
-
-    // Write a known pattern to a data sector.
-    fill_pattern(area);
-    if submit(
-        port,
-        area,
-        base,
-        max,
-        &mut seq,
-        virtio::BLK_WRITE,
-        virtio::TEST_SECTOR,
-        virtio::SECTOR as u32,
-        false,
-    ) != virtio::BLK_OK
-    {
-        abort();
-    }
-    log("blk: write ok\n");
-
-    // Flush so the write is durable, not just in the device's cache.
-    if flush_offered {
-        if submit(
-            port,
-            area,
-            base,
-            max,
-            &mut seq,
-            virtio::BLK_FLUSH,
-            0,
-            0,
-            false,
-        ) != virtio::BLK_OK
-        {
-            abort();
-        }
-        log("blk: flush ok\n");
-    } else {
-        log("blk: flush unsupported\n");
-    }
-
-    // Read the sector back and verify every byte.
-    if submit(
-        port,
-        area,
-        base,
-        max,
-        &mut seq,
-        virtio::BLK_READ,
-        virtio::TEST_SECTOR,
-        virtio::SECTOR as u32,
-        true,
-    ) != virtio::BLK_OK
-    {
-        abort();
-    }
-    if !verify_pattern(area as *const u8) {
-        abort();
-    }
-    log("blk: readback ok\n");
+        seq: 0,
+    };
+    // SAFETY: this task is single-threaded and the cache is not aliased; the
+    // borrow lives for the rest of `_start`.
+    let cache = unsafe { &mut *addr_of_mut!(CACHE) };
+    raw_probe(&mut device, flush_offered);
+    cache_probe(&mut device, cache, flush_offered);
     task_exit()
 }

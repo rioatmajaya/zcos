@@ -41,7 +41,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F4** | Thread + IPC | ✅ done | `task 0: producer sent 2000`, capability gates |
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 5 grants`, `task 6: devmgr: blk published` |
-| **F7** | VFS & penyimpanan | 🔨 F7a done | `blk: write ok`, `blk: flush ok`, `blk: readback ok` |
+| **F7** | VFS & penyimpanan | 🔨 F7a–F7b done | `blk: write ok`; `blk: cache evicted dirty`, `blk: cache flushed`, `blk: cache durable` |
 | **F8** | Desktop | ⬜ planned | — |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
@@ -273,7 +273,14 @@ VFS → write path → journaling → `fsck`**.
       through one descriptor-chain helper. A host-side check confirms the bytes
       reached `build/disk.img` after QEMU exits, so durability is proven, not
       just the in-guest buffer.
-- [ ] F7b: block cache with writeback and explicit flush ordering.
+- [x] F7b: block cache with writeback. A pure, host-tested `Cache<N>` in
+      `zc-kernel::block_cache` owns four sector buffers; the driver holds it in
+      `.bss` and drives it through `cache_read`/`cache_write`/`cache_flush`.
+      Dirty data is written back before a slot is reused (eviction) and again
+      by flush, so ordering is explicit. The boot log proves a miss, a hit, a
+      dirty hit, an eviction write-back, a flush write-back, and a durable
+      read-back that bypasses the cache; the host check confirms both markers
+      reached the disk.
 - [ ] F7c: read-only mount of a real filesystem (FAT32 first, then ext2) on a
       data partition, distinct from the ESP.
 - [ ] F7d: VFS core — mount table, node/inode abstraction, path resolution,
@@ -291,6 +298,9 @@ VFS → write path → journaling → `fsck`**.
 
 - F7a: `blk: write ok`, `blk: flush ok`, `blk: readback ok` in the boot log,
   and `tools/check-disk-write.sh` finds the pattern on the host image.
+- F7b: `blk: cache miss`, `blk: cache hit`, `blk: cache dirty hit`,
+  `blk: cache evicted dirty`, `blk: cache flushed`, `blk: cache durable`, and
+  the host check finds the cache marker on the disk.
 - Boot log contains `vfs: mounted` with the filesystem name and mount point.
 - A CI boot writes a known pattern to `/data/probe`, unmounts, remounts, and
   reads it back with a matching checksum: `vfs: persistence ok`.
