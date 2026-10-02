@@ -84,6 +84,17 @@ the device's authority — the keyboard domain gets the 8042 ports plus one
 shared ring page, and nothing else — which keeps "who may touch this device"
 and "who is told when it fires" the same decision.
 
+Ring-3 faults are kills, not machine stops. A CPU exception in user mode ends
+that domain: its IRQ claims, port grants, and shared ring page are revoked,
+and the scheduler iretq's into the next task with its own CR3 and port
+bitmap. A fault in ring 0 is still fatal — there is no broader scope to
+protect, and swallowing a kernel bug would corrupt everything below it. A
+slot with restart budget is respawned instead of killed: same address space
+and image, fresh registers from the saved spawn values, files dropped, and a
+re-claim of its device on the next run. The budget bounds the loop, so a
+domain that faults unconditionally restarts a fixed number of times and then
+stays dead.
+
 ## IPC and authority
 
 ZC OS uses synchronous message passing initially. Kernel objects are referenced

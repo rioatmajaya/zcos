@@ -148,7 +148,41 @@
   context switch), and a reload needs the `0x66` operand-size prefix that only
   a *named* 16-bit register in the assembly template produces.
   Remaining toward real driver domains: a userspace device manager and a
-  formal capability model for ports and IRQs.
+  formal capability model for ports and IRQs, which 4f makes possible: a
+  faulting domain is killed locally, the kernel and the other domains
+  continue, and the dead domain's authority is fully revoked. Capability
+  bits now gate every IRQ claim (4g). Port grants and revocations live in a
+  per-task policy table projected onto the single TSS bitmap on every
+  switch, so neither authority outlives its domain.
+- Landed as Milestone 4f: fault isolation. Every CPU exception vector in
+  ring 3 is now a recoverable event: the handler records which task faulted,
+  revokes its IRQ claims and ports and unmaps its ring page, marks the task
+  dead, and iretq switches into the next runnable task with its own CR3 and
+  port bitmap. A fault from ring 0 still stops the machine, because that is
+  a kernel bug, not a domain's. The keyboard domain spends a deliberately
+  wrong port read on this path, so the boot log proves a domain can die
+  loudly (`fault vector 13`) without taking the kernel down; its final
+  `forbidden port read succeeded` line never appears, by construction.
+  This is the property that makes driver restart possible: killing a domain
+  is currently final, but the state it held is released, so a supervisor can
+  later revive the same role on a clean slate.
+- Landed as Milestone 4g: capability-gated claims. A per-task capability
+  table ([`CapabilityTable`](../kernel/zc-kernel/src/capability.rs),
+  host-tested) is provisioned at spawn, and `SYS_IRQ_CLAIM` consults the
+  caller's rights on the source's object before touching the IRQ table. A
+  claim from a task that was not provisioned fails before any state changes,
+  so device ownership follows an explicit grant instead of first-come
+  arrival. The keyboard domain's boot log proves the gate: its own claim
+  succeeds, a claim of a source it was never given is refused.
+- Landed as Milestone 4h: automatic driver restart. A faulted slot with
+  restart budget is respawned in place instead of killed: the same address
+  space and image frames are reused, only register state resets to the saved
+  spawn values, open files are dropped, and IRQ claims plus port grants are
+  revoked before the re-run re-claims them. The budget (one for the keyboard
+  domain, zero elsewhere) stops an unconditionally faulting domain from
+  respawning forever: the first `#GP` restarts, the second kills. The boot
+  log shows the same domain starting twice with `restarting (budget 0 left)`
+  between the two faults, and every other domain plus the kernel continuing.
 
 ## Milestone 3 — desktop base
 

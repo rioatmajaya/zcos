@@ -95,6 +95,7 @@ impl Slot {
 ///
 /// `N` must not exceed 65,535 because a [`Handle`] stores its slot index in a
 /// `u16` to keep the task-visible ABI compact.
+#[derive(Clone, Copy)]
 pub struct CapabilityTable<const N: usize> {
     slots: [Slot; N],
 }
@@ -146,6 +147,21 @@ impl<const N: usize> CapabilityTable<N> {
             .ok_or(CapabilityError::InvalidHandle)?;
         slot.generation = next_generation(slot.generation);
         Ok(capability)
+    }
+
+    /// Returns whether this table holds a capability on `object` with at
+    /// least `rights`.
+    ///
+    /// This is the kernel-facing half of the model: the supervisor grants at
+    /// spawn, the claim/use paths only ever check. No grants accumulate at
+    /// runtime, so a check is a scan for a single matching live slot.
+    #[must_use]
+    pub fn holds_object(&self, object: u32, rights: Rights) -> bool {
+        self.slots.iter().any(|slot| {
+            slot.capability.is_some_and(|cap| {
+                cap.object() == object && cap.rights().contains(rights)
+            })
+        })
     }
 
     /// Delegates a non-amplifying subset of `source` into `destination`.
@@ -261,5 +277,21 @@ mod tests {
             table.insert(Capability::new(2, Rights::READ)),
             Err(CapabilityError::TableFull)
         );
+    }
+
+    #[test]
+    fn holds_object_checks_live_slots_only() {
+        let mut table = CapabilityTable::<2>::new();
+        let grant = table
+            .insert(Capability::new(7, Rights::READ.union(Rights::GRANT)))
+            .unwrap();
+        assert!(table.holds_object(7, Rights::READ));
+        assert!(!table.holds_object(7, Rights::WRITE));
+        assert!(!table.holds_object(8, Rights::READ));
+
+        // Removing revokes immediately, even with the generation still
+        // protecting the slot index.
+        table.remove(grant).unwrap();
+        assert!(!table.holds_object(7, Rights::READ));
     }
 }

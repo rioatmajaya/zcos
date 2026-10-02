@@ -11,6 +11,11 @@
 //! Port access is limited by the TSS bitmap: claiming the source grants
 //! exactly 0x60 and 0x64, so a stray read of any other port faults instead
 //! of silently succeeding.
+//!
+//! After delivering input the domain deliberately reads a port nobody owns:
+//! that #GP is the live proof that a domain can die loudly while the kernel
+//! survives. It is a test the kernel asked for, not a device bug — the
+//! wrong read is *the* proof, not a mistake.
 
 #![no_std]
 #![no_main]
@@ -78,6 +83,16 @@ pub unsafe extern "C" fn _start() -> ! {
         task_exit()
     }
 
+    // The same syscall from a task without the grant must be refused before
+    // any claim is made: this domain's second attempt is on a source it
+    // was never given, so the kernel must not hand it authority.
+    if irq_claim(1) == u64::MAX {
+        log("kbd: unprovided source correctly refused\n");
+    } else {
+        // What kbd was granted by setup cannot cover an unrelated source.
+        abort();
+    }
+
     let ring = shared_ring();
     if ring.len() != 0 {
         // The page must arrive empty; a stale value means the kernel mapped
@@ -114,5 +129,14 @@ pub unsafe extern "C" fn _start() -> ! {
     // per-task bitmap followed us into ring 3: had the kernel's own TSS been
     // loaded instead, these reads would raise #GP and stop the boot.
     log("kbd: claimed ports readable, other ports still fault\n");
+
+    // Now the proof that a fault in this domain does not take the kernel
+    // down: port 0 was claimed by no one, so this read raises #GP. Before
+    // fault isolation this stopped the machine.
+    log("kbd: probing a port nobody owns, kernel must survive\n");
+    let _ = port_inb(0);
+    // Unreachable: the #GP invalidates this task's state. Reaching it means
+    // the bitmap was ineffective, which is worse.
+    log("kbd: forbidden port read succeeded, bitmap ineffective\n");
     task_exit()
 }

@@ -347,6 +347,32 @@ impl<const N: usize> TaskTable<N> {
         Some(next)
     }
 
+    /// Restarts `current` in place after a fault, then schedules the next task.
+    ///
+    /// The slot keeps its address space and capability grants: only the
+    /// register and frame state is reset to `init_regs`/`init_frame`, and the
+    /// task stays alive and runnable. Returns the newly scheduled index, or
+    /// `None` when no task (including the restarted one) can run. The caller
+    /// decides the budget; this only performs the reset.
+    pub fn restart_current(
+        &mut self,
+        regs: &mut SyscallRegs,
+        frame: &mut IrqFrame,
+        init_regs: SyscallRegs,
+        init_frame: IrqFrame,
+    ) -> Option<usize> {
+        if let Some(task) = self.tasks[self.current].as_mut() {
+            task.regs = init_regs;
+            task.frame = init_frame;
+            task.alive = true;
+            task.blocked = false;
+        }
+        self.unblock_all();
+        let next = self.next_runnable(self.current)?;
+        self.load_into(next, regs, frame);
+        Some(next)
+    }
+
     /// Finds the next alive and unblocked task after `from`, wrapping around.
     fn next_runnable(&self, from: usize) -> Option<usize> {
         if N == 0 {
@@ -461,8 +487,47 @@ mod task_table_tests {
     }
 
     #[test]
-    fn blocked_tasks_are_skipped_until_woken() {
+    fn restart_resets_state_and_keeps_slot_alive() {
         let mut table = TaskTable::<4>::new();
+        table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000).unwrap();
+        table.spawn(SyscallRegs::EMPTY, frame(0x200), 0x1000).unwrap();
+
+        let mut regs = SyscallRegs::EMPTY;
+        let mut irq = IrqFrame::EMPTY;
+        // Corrupt the running task's saved state, then restart it.
+        regs.rax = 0xDEAD;
+        irq.rip = 0xBEEF;
+        let next = table
+            .restart_current(&mut regs, &mut irq, SyscallRegs::EMPTY, frame(0x100))
+            .unwrap();
+        // The scheduler moved on instead of resuming the faulting context.
+        assert_eq!(next, 1);
+        assert_eq!(table.current(), 1);
+        assert_eq!(table.alive_count(), 2);
+        // The restarted slot holds the fresh entry, not the corrupt state.
+        let mut regs2 = SyscallRegs::EMPTY;
+        let mut irq2 = IrqFrame::EMPTY;
+        assert_eq!(table.switch_from(&mut regs2, &mut irq2), Ok(0));
+        assert_eq!(irq2.rip, 0x100);
+        assert_eq!(regs2.rax, 0);
+    }
+
+    #[test]
+    fn restart_alone_resumes_itself() {
+        let mut table = TaskTable::<1>::new();
+        table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000).unwrap();
+
+        let mut regs = SyscallRegs::EMPTY;
+        let mut irq = IrqFrame::EMPTY;
+        let next = table
+            .restart_current(&mut regs, &mut irq, SyscallRegs::EMPTY, frame(0x500))
+            .unwrap();
+        assert_eq!(next, 0);
+        assert_eq!(irq.rip, 0x500);
+    }
+
+    #[test]
+    fn blocked_tasks_are_skipped_until_woken() {        let mut table = TaskTable::<4>::new();
         table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000).unwrap();
         table.spawn(SyscallRegs::EMPTY, frame(0x200), 0x1000).unwrap();
 

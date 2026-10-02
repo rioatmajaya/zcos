@@ -10,12 +10,14 @@ use core::arch::{asm, naked_asm};
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 
 use zc_abi::BootInfo;
+use zc_kernel::capability::{Capability, CapabilityTable, Rights};
 use zc_kernel::fs::{FdTable, Fs};
 use zc_kernel::gdt::{USER_CS, USER_RFLAGS, USER_SS};
 use zc_kernel::ipc::Endpoint;
 use zc_kernel::memory::{FrameAllocator, PAGE_SIZE};
 use zc_kernel::syscall::{Action, dispatch};
 use zc_kernel::task::{EXIT_TO_KERNEL, IrqFrame, SyscallRegs, TaskTable};
+use zc_kernel::trap::has_error_code;
 use zc_kernel::vm::VirtAddr;
 
 /// Tasks the setup brings up, in task-index order.
@@ -92,6 +94,9 @@ const KBD_NAME: &str = "kbd.elf";
 /// and the setup spawns them in that same order.
 pub const BLK_TASK: usize = 4;
 
+/// Task index of the keyboard driver domain.
+const KBD_INDEX: usize = 5;
+
 /// User virtual address the display framebuffer is mapped at.
 const FB_VIRT: u64 = 0x10_00000;
 
@@ -112,6 +117,24 @@ type Irqs = zc_kernel::irq::IrqInbox<{ zc_abi::IRQ_SOURCES }>;
 
 /// Per-source interrupt counters with per-task ownership.
 static mut IRQS: Irqs = Irqs::new();
+
+/// Domain entry points, saved at spawn so a fault can respawn a slot.
+///
+/// Restart reuses the same address space and image frames: only the register
+/// and frame state is reset to these values. The image itself is untouched,
+/// which is why a restart is cheap and why a domain that faults
+/// unconditionally will fault again unless its budget stops it.
+static mut DOMAIN_ENTRY: [u64; TASK_COUNT] = [0; TASK_COUNT];
+
+/// User stack tops, saved at spawn for the same reason.
+static mut DOMAIN_STACK: [u64; TASK_COUNT] = [0; TASK_COUNT];
+
+/// How many more times each slot may be restarted after a fault.
+///
+/// One-shot per role: the keyboard domain proves restart with a single
+/// respawn, and a second fault is final. Without a budget a domain that
+/// faults unconditionally would respawn forever.
+static mut RESTART_BUDGET: [u8; TASK_COUNT] = [0; TASK_COUNT];
 
 /// Physical address of the keyboard domain's shared input ring.
 ///
@@ -207,6 +230,13 @@ static mut FS: Option<Fs<'static>> = None;
 /// Per-task descriptor tables, indexed by task index.
 static mut FDS: [FdTable<'static>; 8] = [FdTable::new(); 8];
 
+/// Per-task capability tables, indexed by task index.
+///
+/// The kernel provisions each table at spawn; tasks can only claim the
+/// sources their table allows, so ownership comes from an explicit grant at
+/// setup rather than a first-come syscall.
+static mut CAPS: [CapabilityTable<8>; 8] = [CapabilityTable::<8>::new(); 8];
+
 /// Longest single userspace buffer accepted per syscall.
 const MAX_USER_IO_LEN: u64 = 512;
 
@@ -263,10 +293,6 @@ unsafe extern "C" fn syscall_stub() {
         "mov rdx, [rip + EXIT_MAGIC]",
         "cmp rax, rdx",
         "je to_kernel",
-        // CR3 and the TSS both follow the task, so port rights and mappings
-        // switch together. Called rather than inlined because `ltr` needs a
-        // 16-bit operand, and every register this clobbers was already
-        // saved on the stack above rbx.
         // CR3 and the task's port authority both follow the task, and both are
         // applied by `user_syscall`/`sched_tick` before this runs; only the
         // TLB load is left. Called rather than inlined because it runs after
@@ -299,6 +325,129 @@ unsafe extern "C" fn syscall_stub() {
 /// Returns the handler address for the syscall vector.
 fn syscall_handler() -> u64 {
     syscall_stub as *const () as u64
+}
+
+/// Dispatches one userspace exception: a CPU fault in ring 3 ends the task
+/// whose presence caused it, never the kernel.
+///
+/// The stub passes both saved areas exactly like a syscall, plus the vector
+/// number. A fault from ring 3 kills that task unless it still holds restart
+/// budget, in which case the slot is respawned in place (same address space,
+/// fresh registers, files dropped, device re-claimed on its next run) and the
+/// next runnable task is scheduled. A fault from ring 0 is a kernel bug and
+/// stops the machine.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn user_exception_entry(
+    regs: *mut SyscallRegs,
+    frame: *mut IrqFrame,
+    vector: u64,
+) -> u64 {
+    // SAFETY: the stub passes pointers to the areas it pushed.
+    let tasks = unsafe { &mut *addr_of_mut!(TASKS) };
+    let number = u8::try_from(vector & 0xFF).unwrap_or(0xFF);
+    // The frame's first word differs per vector: #GP and #PF push an error
+    // code, so their saved RIP sits one word later. The log must never lie.
+    // SAFETY: the stub passes a pointer to the CPU frame it pushed.
+    let (rip, cs) = unsafe {
+        let words = frame as *const u64;
+        let offset = if has_error_code(number) { 1 } else { 0 };
+        (*words.add(offset), *words.add(offset + 1))
+    };
+    let is_user = cs & 3 != 0;
+    if !is_user {
+        let _ = crate::serial::print(format_args!(
+            "trap: vector {number} ({}) in kernel at rip {rip:#x}\n",
+            zc_kernel::trap::name(number),
+        ));
+        crate::fail("cpu exception in kernel context");
+    }
+
+    let me = tasks.current();
+    let _ = crate::serial::print(format_args!(
+        "task {me}: fault vector {number} ({}) at rip {rip:#x}\n",
+        zc_kernel::trap::name(number),
+    ));
+
+    // Revoke everything this domain held before the scheduler picks a
+    // replacement that has no right to inherit any of it.
+    // SAFETY: owned here; traps cannot nest.
+    let released = unsafe { (&mut *addr_of_mut!(IRQS)).release_task(me as u32) };
+    if released > 0 {
+        revoke_keyboard(me as u32);
+    }
+    crate::gdt::revoke_task_ports(me);
+
+    // The stub passed writable pointers for both save areas; the raw CPU
+    // frame sits past the register save block.
+    // SAFETY: as documented on the function entry.
+    let regs = unsafe { &mut *regs };
+    // SAFETY: the CPU frame sits just past the register save block, and
+    // exit/restart overwrites it wholesale when a successor exists.
+    let frame_mut = unsafe { &mut *frame };
+    // A budgeted slot is restarted in place instead of killed: the same
+    // address space and image frames are reused, only the register state is
+    // reset to the spawn values. The budget stops a domain that faults
+    // unconditionally from respawning forever.
+    // SAFETY: owned here; traps cannot nest.
+    let budget = unsafe { (*addr_of!(RESTART_BUDGET))[me] };
+    if budget > 0 {
+        // SAFETY: written at spawn before any task ran; read-only since.
+        let (entry, stack) = unsafe {
+            (
+                (*addr_of!(DOMAIN_ENTRY))[me],
+                (*addr_of!(DOMAIN_STACK))[me],
+            )
+        };
+        unsafe { (*addr_of_mut!(RESTART_BUDGET))[me] = budget - 1 };
+        // The restarted domain must not inherit open files across the fault.
+        // SAFETY: owned here; the faulting task cannot touch its table while
+        // the handler runs.
+        unsafe { (*addr_of_mut!(FDS))[me] = FdTable::new() };
+        let init_frame = IrqFrame {
+            rip: entry,
+            cs: u64::from(USER_CS),
+            rflags: USER_RFLAGS,
+            rsp: stack,
+            ss: u64::from(USER_SS),
+        };
+        match tasks.restart_current(regs, frame_mut, SyscallRegs::EMPTY, init_frame) {
+            Some(_next) => {
+                trace(8, tasks.current(), 0, number as u64);
+                publish_next_cr3(tasks);
+                let _ = crate::serial::print(format_args!(
+                    "task {me}: faulted; restarting (budget {} left), scheduling task {}\n",
+                    budget - 1,
+                    tasks.current(),
+                ));
+                return 0;
+            }
+            None => {
+                let _ = crate::serial::print(format_args!(
+                    "task {me}: faulted and no task remained\n",
+                ));
+                return EXIT_TO_KERNEL;
+            }
+        }
+    }
+    match tasks.exit_current(regs, frame_mut) {
+        Some(_next) => {
+            trace(7, tasks.current(), 0, number as u64);
+            publish_next_cr3(tasks);
+            let _ = crate::serial::print(format_args!(
+                "task {me}: faulted; kernel survived, scheduling task {}\n",
+                tasks.current(),
+            ));
+            0
+        }
+        None => {
+            // The faulting task was the last one alive: that is a clean end
+            // of userspace, the same contract as the last task exiting.
+            let _ = crate::serial::print(format_args!(
+                "task {me}: faulted and no task remained\n",
+            ));
+            EXIT_TO_KERNEL
+        }
+    }
 }
 
 /// Dispatches one userspace syscall.
@@ -501,6 +650,17 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             // SAFETY: owned here; traps cannot nest inside a handler.
             let irqs = unsafe { &mut *addr_of_mut!(IRQS) };
             let source = regs.rdi as usize;
+            // Capability gate: only a task holding a device object grant may
+            // claim its source. Object ids share the source index today; they
+            // become real resource ids with the device manager.
+            // SAFETY: owned here; interrupts are masked through this arm.
+            let granted = unsafe {
+                (*addr_of!(CAPS))[me as usize].holds_object(source as u32, Rights::READ)
+            };
+            if !granted {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
             match irqs.claim(source, me) {
                 Ok(()) => {
                     // Claiming the keyboard source also publishes its shared
@@ -603,8 +763,9 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
 /// Ring-buffer event trace for deadlock diagnosis.
 ///
 /// Each entry packs (kind, task, endpoint-len, value): kinds are 1 send-ok,
-/// 2 send-block, 3 recv-ok, 4 recv-block, 5 exit-next, 6 exit-last. Dumped
-/// only when blocking finds no runnable peer.
+/// 2 send-block, 3 recv-ok, 4 recv-block, 5 exit-next, 6 exit-last,
+/// 7 fault-kill, 8 fault-restart. Dumped only when blocking finds no
+/// runnable peer.
 const EVENTS_CAP: usize = 32;
 /// Next ring slot.
 static mut EVENTS: [(u8, u8, u8, u32); EVENTS_CAP] = [(0, 0, 0, 0); EVENTS_CAP];
@@ -1183,8 +1344,21 @@ pub fn enter(
         cr3s[0],
     ));
 
+    // SAFETY: interrupts stay masked for the whole setup, so the cap table
+    // is complete before any task can execute a gated syscall.
+    let caps = unsafe { &mut *addr_of_mut!(CAPS) };
+    // Keyboard object grants the kbd domain; the block domain gets none today
+    // (it polls and claims no source), so it correctly refuses any claim.
+    let _ = caps[KBD_INDEX].insert(Capability::new(
+        zc_abi::IRQ_KEYBOARD as u32,
+        Rights::READ,
+    ));
+    let _ = caps;
+
     // SAFETY: the table is owned here; interrupts are masked for the whole
-    // setup, so no tick can observe a half-built table.
+    // setup, so no tick can observe a half-built table. Entry points and
+    // stack tops are saved for the restart path, which resets a faulted slot
+    // to these exact values.
     let tasks = unsafe { &mut *addr_of_mut!(TASKS) };
     let mut index = 0;
     while index < TASK_COUNT {
@@ -1205,8 +1379,18 @@ pub fn enter(
         {
             crate::fail("task table is full");
         }
+        // SAFETY: written once here before any task runs.
+        unsafe {
+            (*addr_of_mut!(DOMAIN_ENTRY))[index] = entries[index];
+            (*addr_of_mut!(DOMAIN_STACK))[index] = stack_tops[index];
+        }
         index += 1;
     }
+    // Only the keyboard domain may be restarted, exactly once: it faults
+    // deliberately to prove the path, and a second fault must stay fatal or
+    // the supervisor would loop forever.
+    // SAFETY: written once here before any task runs.
+    unsafe { (*addr_of_mut!(RESTART_BUDGET))[KBD_INDEX] = 1 };
     publish_next_cr3(tasks);
 
     let rsp: u64;

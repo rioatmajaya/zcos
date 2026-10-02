@@ -44,15 +44,65 @@ const UNEXPECTED_VECTOR: u64 = 0xFE;
 /// The kernel's interrupt descriptor table: 256 gates of 16 bytes.
 static mut IDT: [IdtEntry; 256] = [IdtEntry::EMPTY; 256];
 
-/// Declares one exception stub that reports its baked-in vector number.
+/// Declares one exception stub that goes through the recoverable user
+/// exception path, or the fatal kernel path for ring-0 faults.
 ///
-/// The CPU-pushed error code, when present, is left on the stack: the common
-/// entry never returns, so there is nothing to clean up.
+/// The CPU-pushed error code, when present, is left on the stack; the
+/// dispatcher accounts for it when locating the saved RIP.
 macro_rules! exception {
     ($name:ident, $vector:expr) => {
         #[unsafe(naked)]
         unsafe extern "C" fn $name() -> ! {
-            naked_asm!("mov rdi, {v}", "jmp trap_common", v = const $vector)
+            naked_asm!(
+                "sub rsp, 128",
+                "push rax",
+                "push rcx",
+                "push rdx",
+                "push rbx",
+                "push rbp",
+                "push rsi",
+                "push rdi",
+                "push r8",
+                "push r9",
+                "push r10",
+                "push r11",
+                "push r12",
+                "push r13",
+                "push r14",
+                "push r15",
+                "mov rbx, rsp",
+                "and rsp, -16",
+                "mov rdi, rbx",
+                "lea rsi, [rbx + 248]",
+                "mov edx, {v}",
+                "call user_exception_entry",
+                "mov rdx, [rip + EXIT_MAGIC]",
+                "cmp rax, rdx",
+                "je 1f",
+                "call apply_next_context",
+                "mov rsp, rbx",
+                "pop r15",
+                "pop r14",
+                "pop r13",
+                "pop r12",
+                "pop r11",
+                "pop r10",
+                "pop r9",
+                "pop r8",
+                "pop rdi",
+                "pop rsi",
+                "pop rbp",
+                "pop rbx",
+                "pop rdx",
+                "pop rcx",
+                "pop rax",
+                "add rsp, 128",
+                "iretq",
+                "1:",
+                "mov rsp, [rip + RESUME_RSP]",
+                "jmp user_finished",
+                v = const $vector,
+            );
         }
     };
 }

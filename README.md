@@ -35,11 +35,19 @@ address spaces (six private page-table roots, loaded on every context
 switch, with a boot self-check proving no task maps another's pages). Port
 rights are per task too: a policy table records which ranges each domain
 owns and the TSS bitmap is rebuilt from the running task's entry on every
-switch, so a domain's authority cannot outlive it.
+switch, so a domain's authority cannot outlive it. IRQ ownership likewise
+goes through per-task capability tables, not first-come arrival. A fault in
+ring 3 kills only its domain; the kernel and the other domains continue.
 Interrupts reach a domain as a message too: the keyboard handler only counts
 and EOIs, and `user/zc-kbd` claims the source, blocks until the interrupt
 arrives, then drains the 8042 itself and publishes ASCII through a shared
 ring page.
+CPU faults in ring 3 are recoverable: the offending domain is killed, its
+ports and IRQ claims and ring page are revoked, and the kernel keeps
+scheduling the rest — a deliberately bad read in `user/zc-kbd` proves that
+path in the boot log. A budgeted domain is restarted in place instead: same
+address space, fresh registers, re-claimed device, with the budget stopping
+an infinite fault loop. A ring-0 fault is still fatal, on purpose.
 
 The kernel crate provides the mechanisms — boot-contract validation, a
 physical frame allocator with recycling, virtual-memory helpers, task and

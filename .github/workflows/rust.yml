@@ -64,8 +64,13 @@ jobs:
         grep -q "user: 6 address spaces" build/boot.log
         grep -q "iomap: block domain holds 264 ports" build/boot.log
         grep -q "iomap: keyboard domain holds 3 ports" build/boot.log
+        grep -q "kbd: unprovided source correctly refused" build/boot.log
         grep -q "task 5: kbd: irq 33 delivered" build/boot.log
         grep -q "kbd: task 5 released 3 ports" build/boot.log
+        grep -q "fault vector 13 (general protection)" build/boot.log
+        grep -q "restarting (budget 0 left)" build/boot.log
+        grep -q "kernel survived" build/boot.log
+        ! grep -q "forbidden port read succeeded" build/boot.log
         grep -q "input: loopback ok" build/boot.log
         grep -q "input: irq self-test ok" build/boot.log
         grep -q "task 3: fb painted" build/boot.log
