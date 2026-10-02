@@ -10,7 +10,8 @@ ZC OS is in roadmap phase **F7 — VFS & storage**: phases F0–F6 are done, so
 the full path from firmware to restartable userspace drivers works end to end,
 and the block domain writes, flushes, and reads a sector back (F7a) behind a
 write-back cache with explicit eviction and flush ordering (F7b), then mounts
-a read-only FAT32 partition and reads a file through that cache (F7c). See
+a read-only FAT32 partition (F7c) and a read-only ext2 partition (F7c-2),
+reading a file from each through that cache. See
 [the roadmap](docs/roadmap.md) for the phase map and pass criteria, and
 [CHANGELOG.md](CHANGELOG.md) for what changed.
 
@@ -56,11 +57,12 @@ UEFI bindings.
 
 The block domain writes and flushes a data sector and reads it back, and a
 four-slot write-back cache sits in front of the device (dirty data is written
-back before its slot is reused, and again by flush). It then parses the MBR,
-mounts a real FAT32 partition, and reads `HELLO.TXT` through the cache; host
-checks confirm the writes reached `build/disk.img` and that mtools reads the
-same file. Next up is **F7d — a VFS core**, then a writable rootfs and `initd`
-supervision.
+back before its slot is reused, and again by flush). It then parses the MBR
+and mounts two real partitions read-only through that cache: FAT32, reading
+`HELLO.TXT`, and ext2, reading `EXT2.TXT`. Host checks confirm the writes
+reached `build/disk.img`, that mtools reads the FAT32 file, and that `debugfs`
+reads the ext2 file. Next up is **F7d — a VFS core**, then a writable rootfs
+and `initd` supervision.
 
 ## Development
 

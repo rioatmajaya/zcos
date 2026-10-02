@@ -16,6 +16,7 @@ pub mod boot;
 pub mod capability;
 pub mod cpio;
 pub mod device;
+pub mod ext2;
 pub mod fat32;
 pub mod fs;
 pub mod gdt;

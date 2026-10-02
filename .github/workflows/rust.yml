@@ -35,7 +35,7 @@ jobs:
     - name: Install QEMU, OVMF, and image tools
       run: |
         sudo apt-get update
-        sudo apt-get install -y qemu-system-x86 ovmf mtools dosfstools
+        sudo apt-get install -y qemu-system-x86 ovmf mtools dosfstools e2fsprogs
     - name: Install boot targets
       run: |
         rustup target add x86_64-unknown-uefi
@@ -83,6 +83,10 @@ jobs:
         grep -q "task 4: blk: fs mount ok" build/boot.log
         grep -q "task 4: blk: fs root ok" build/boot.log
         grep -q "task 4: blk: fs hello ok" build/boot.log
+        grep -q "task 4: blk: ext2 mbr ok" build/boot.log
+        grep -q "task 4: blk: ext2 mount ok" build/boot.log
+        grep -q "task 4: blk: ext2 root ok" build/boot.log
+        grep -q "task 4: blk: ext2 hello ok" build/boot.log
         grep -q "user: 7 address spaces" build/boot.log
         grep -q "device: 3 roles, 5 grants (blk 0, kbd 3, devmgr 2)" build/boot.log
         grep -q "cap: task 6 delegated" build/boot.log
@@ -113,3 +117,5 @@ jobs:
       run: ./tools/check-disk-write.sh
     - name: Check the FAT32 partition on the disk
       run: ./tools/check-disk-fs.sh
+    - name: Check the ext2 partition on the disk
+      run: ./tools/check-disk-ext2.sh

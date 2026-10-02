@@ -14,9 +14,9 @@
 //! cache: a read miss then hit, a dirty write served from the cache, eviction
 //! writing a dirty sector back before reusing its slot, and a flush writing
 //! back what is left. A read, a write, and a flush all run through one
-//! descriptor-chain helper. Finally it parses the MBR, mounts the FAT32
-//! partition, and reads a known file through the cache — a real filesystem
-//! consumer for the cache seam.
+//! descriptor-chain helper. Finally it parses the MBR and mounts two
+//! partitions read-only through the same cache — FAT32 first, then ext2,
+//! each reading a known file — so two filesystems share the cache seam.
 
 #![no_std]
 #![no_main]
@@ -27,6 +27,7 @@ use core::sync::atomic::{Ordering, compiler_fence};
 
 use zc_abi::{INFO_LEN, INFO_QUEUE0, INFO_VIRT, IPC_DISCOVERY, QUEUE_VIRT};
 use zc_kernel::block_cache::{CACHE_MAGIC, CACHE_TEST_SECTOR, Cache, cache_pattern_byte};
+use zc_kernel::ext2::{self, Ext2Error};
 use zc_kernel::fat32::{self, FatError, Sector};
 use zc_kernel::mbr;
 use zc_kernel::virtio;
@@ -563,6 +564,79 @@ fn fs_probe(device: &mut Device, cache: &mut Cache<CACHE_SLOTS>) {
     log("blk: fs hello ok\n");
 }
 
+/// Parses the MBR, mounts the ext2 partition, and reads a known file.
+///
+/// The same shape as `fs_probe`, on a second partition and a second parser:
+/// every sector still goes through `cache_read`, so the ext2 mount is another
+/// real consumer of the write-back cache rather than a bypassing path.
+fn ext2_probe(device: &mut Device, cache: &mut Cache<CACHE_SLOTS>) {
+    // Parse the partition table in its own scope so the borrow of `cache`
+    // ends before the reader closure captures it.
+    let partition_lba = {
+        let slot = cache_read(device, cache, 0);
+        match mbr::find_ext2(cache.slot_data(slot)) {
+            Ok(partition) => partition.start_lba,
+            Err(_) => {
+                log("blk: ext2 mbr failed\n");
+                abort()
+            }
+        }
+    };
+    log("blk: ext2 mbr ok\n");
+
+    let mut reader = |sector: u64, out: &mut Sector| -> Result<(), Ext2Error> {
+        let slot = cache_read(device, cache, sector);
+        out.copy_from_slice(cache.slot_data(slot));
+        Ok(())
+    };
+
+    let superblock = match ext2::Superblock::mount(partition_lba, &mut reader) {
+        Ok(superblock) => superblock,
+        Err(_) => {
+            log("blk: ext2 mount failed\n");
+            abort()
+        }
+    };
+    log("blk: ext2 mount ok\n");
+
+    let root = match superblock.read_inode(&mut reader, ext2::ROOT_INODE) {
+        Ok(root) => root,
+        Err(_) => {
+            log("blk: ext2 root failed\n");
+            abort()
+        }
+    };
+    let entry = match superblock.read_dir_entry(&mut reader, &root, virtio::FS_EXT2_FILE_NAME) {
+        Ok(entry) => entry,
+        Err(_) => {
+            log("blk: ext2 root failed\n");
+            abort()
+        }
+    };
+    log("blk: ext2 root ok\n");
+
+    let file = match superblock.read_inode(&mut reader, entry.inode) {
+        Ok(file) => file,
+        Err(_) => {
+            log("blk: ext2 hello failed\n");
+            abort()
+        }
+    };
+    let mut buffer = [0u8; 32];
+    let read = match superblock.read_file(&mut reader, &file, &mut buffer) {
+        Ok(read) => read,
+        Err(_) => {
+            log("blk: ext2 hello failed\n");
+            abort()
+        }
+    };
+    if read != virtio::FS_EXT2_MAGIC.len() || &buffer[..read] != virtio::FS_EXT2_MAGIC {
+        log("blk: ext2 hello failed\n");
+        abort()
+    }
+    log("blk: ext2 hello ok\n");
+}
+
 /// Task entry point; the kernel provides a fresh user stack.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
@@ -644,5 +718,6 @@ pub unsafe extern "C" fn _start() -> ! {
     raw_probe(&mut device, flush_offered);
     cache_probe(&mut device, cache, flush_offered);
     fs_probe(&mut device, cache);
+    ext2_probe(&mut device, cache);
     task_exit()
 }

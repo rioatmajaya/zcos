@@ -1,9 +1,9 @@
 //! Minimal MBR partition-table parsing.
 //!
-//! The data disk carries one partition entry pointing at a FAT32 volume. This
-//! module reads that table and nothing else: it never touches hardware, so the
-//! same code runs on the host under test and inside the block domain. GPT is
-//! deliberately out of scope until F9a.
+//! The data disk carries two partition entries: a FAT32 volume and an ext2
+//! volume. This module reads that table and nothing else: it never touches
+//! hardware, so the same code runs on the host under test and inside the block
+//! domain. GPT is deliberately out of scope until F9a.
 
 /// Offset of the `0x55AA` boot signature inside sector zero.
 pub const SIGNATURE_OFFSET: usize = 510;
@@ -22,6 +22,9 @@ pub const PARTITION_TYPE_FAT32_LBA: u8 = 0x0C;
 
 /// Partition type: FAT32 with CHS addressing, accepted as well.
 pub const PARTITION_TYPE_FAT32_CHS: u8 = 0x0B;
+
+/// Partition type: Linux, which the data disk uses for its ext2 volume.
+pub const PARTITION_TYPE_EXT2: u8 = 0x83;
 
 /// Why parsing a partition table failed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -86,21 +89,35 @@ pub fn parse_partition(sector: &[u8; 512], index: usize) -> Result<Partition, Mb
     })
 }
 
-/// Returns the first FAT32 partition in the table, if any.
-pub fn find_fat32(sector: &[u8; 512]) -> Result<Partition, MbrError> {
+/// Returns the first partition whose type byte `accepts` allows.
+fn find_first<F>(sector: &[u8; 512], accepts: F) -> Result<Partition, MbrError>
+where
+    F: Fn(u8) -> bool,
+{
     if !has_signature(sector) {
         return Err(MbrError::BadSignature);
     }
     let mut index = 0;
     while index < PARTITION_COUNT {
         let base = PARTITION_TABLE_OFFSET + index * PARTITION_ENTRY_SIZE;
-        let kind = sector[base + 4];
-        if kind == PARTITION_TYPE_FAT32_LBA || kind == PARTITION_TYPE_FAT32_CHS {
+        if accepts(sector[base + 4]) {
             return parse_partition(sector, index);
         }
         index += 1;
     }
     Err(MbrError::EmptyPartition)
+}
+
+/// Returns the first FAT32 partition in the table, if any.
+pub fn find_fat32(sector: &[u8; 512]) -> Result<Partition, MbrError> {
+    find_first(sector, |kind| {
+        kind == PARTITION_TYPE_FAT32_LBA || kind == PARTITION_TYPE_FAT32_CHS
+    })
+}
+
+/// Returns the first ext2 (Linux) partition in the table, if any.
+pub fn find_ext2(sector: &[u8; 512]) -> Result<Partition, MbrError> {
+    find_first(sector, |kind| kind == PARTITION_TYPE_EXT2)
 }
 
 #[cfg(test)]
@@ -144,6 +161,30 @@ mod tests {
     fn accepts_fat32_chs_type() {
         let sector = sector_with(fat32_entry(PARTITION_TYPE_FAT32_CHS, 63, 100));
         assert_eq!(find_fat32(&sector).map(|partition| partition.kind), Ok(0x0B));
+    }
+
+    #[test]
+    fn finds_ext2_in_the_second_slot() {
+        let mut sector = sector_with(fat32_entry(PARTITION_TYPE_FAT32_LBA, 2048, 81_920));
+        let second = PARTITION_TABLE_OFFSET + PARTITION_ENTRY_SIZE;
+        sector[second + 4] = PARTITION_TYPE_EXT2;
+        sector[second + 8..second + 12].copy_from_slice(&83_968u32.to_le_bytes());
+        sector[second + 12..second + 16].copy_from_slice(&131_072u32.to_le_bytes());
+        assert_eq!(find_fat32(&sector).map(|partition| partition.start_lba), Ok(2048));
+        assert_eq!(
+            find_ext2(&sector),
+            Ok(Partition {
+                kind: PARTITION_TYPE_EXT2,
+                start_lba: 83_968,
+                sectors: 131_072,
+            })
+        );
+    }
+
+    #[test]
+    fn missing_ext2_reports_empty() {
+        let sector = sector_with(fat32_entry(PARTITION_TYPE_FAT32_LBA, 2048, 100));
+        assert_eq!(find_ext2(&sector), Err(MbrError::EmptyPartition));
     }
 
     #[test]

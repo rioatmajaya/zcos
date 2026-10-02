@@ -16,10 +16,19 @@ maintained.
 Roadmap phase **F6 — driver userspace** closed the runtime-authority story:
 what a domain may touch is now granted by data, delegated at runtime, and
 claimed explicitly. Phase **F7 — VFS & storage** has started: a write path
-(F7a), a write-back cache (F7b), and a read-only FAT32 mount (F7c).
+(F7a), a write-back cache (F7b), a read-only FAT32 mount (F7c), and a
+read-only ext2 mount (F7c-2).
 
 ### Added
 
+- **Read-only ext2** (F7c-2): `zc-kernel::ext2` mounts a real ext2 volume —
+  superblock validation, the group descriptor, inode locations, directory
+  entries with `rec_len` walking, and direct/single/double/triple indirect
+  block maps with sparse holes, all host-tested. The block domain mounts the
+  second MBR partition through the same write-back cache and reads
+  `EXT2.TXT`, so two filesystems share one cache seam.
+  `tools/check-disk-ext2.sh` reads the same file with `debugfs`, independently
+  of the driver. Blocks are 1024 bytes only.
 - **Read-only FAT32** (F7c): `zc-kernel::mbr` parses the partition table and
   `zc-kernel::fat32` mounts the volume — BPB validation, cluster math, the FAT
   chain, 8.3 root-directory lookup, and file reads, all host-tested. The block
@@ -70,8 +79,9 @@ claimed explicitly. Phase **F7 — VFS & storage** has started: a write path
 
 ### Changed
 
-- `build/disk.img` is now a 64 MiB MBR disk whose first partition (LBA 2048)
-  is a real FAT32 volume, replacing the 1 MiB marker disk. The sector-zero
+- `build/disk.img` is now a 128 MiB MBR disk carrying two real filesystems:
+  a FAT32 volume in the first partition (LBA 2048) and an ext2 volume in the
+  second (LBA 83968), replacing the 1 MiB marker disk. The sector-zero
   `ZCDISK01` magic and the write/cache test sectors are unchanged, so the
   earlier proofs still run.
 - `docs/roadmap.md` was restructured around the skill's phases **F0–F9**, each

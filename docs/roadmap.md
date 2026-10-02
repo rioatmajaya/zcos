@@ -41,7 +41,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F4** | Thread + IPC | ✅ done | `task 0: producer sent 2000`, capability gates |
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 5 grants`, `task 6: devmgr: blk published` |
-| **F7** | VFS & penyimpanan | 🔨 F7a–F7c done | `blk: write ok`; `blk: cache durable`; `blk: fs hello ok` |
+| **F7** | VFS & penyimpanan | 🔨 F7a–F7c, F7c-2 done | `blk: write ok`; `blk: cache durable`; `blk: fs hello ok`; `blk: ext2 hello ok` |
 | **F8** | Desktop | ⬜ planned | — |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
@@ -285,8 +285,13 @@ VFS → write path → journaling → `fsck`**.
       partition, distinct from the ESP. The driver parses the partition table
       to find the volume, then reads `HELLO.TXT` through the block cache; a
       host-side check reads the same file with mtools.
-- [ ] *(follow-up)* F7c-2: read-only **ext2** on the same data partition (the
-      "then ext2" half of the original F7c).
+- [x] *(follow-up)* F7c-2: read-only **ext2** on a second MBR partition (the
+      "then ext2" half of the original F7c). `zc-kernel::ext2` parses the
+      superblock, the group descriptor, inode locations, directory entries,
+      and direct/single/double/triple indirect block maps, all host-tested
+      against an in-memory image. The driver mounts the ext2 partition through
+      the same block cache and reads `EXT2.TXT`; a host-side check reads the
+      same file with `debugfs`. Blocks are 1024 bytes only.
 - [ ] F7d: VFS core — mount table, node/inode abstraction, path resolution,
       descriptor tables, `open`/`read`/`write`/`close`/`stat`.
 - [ ] F7e: writable rootfs on a ZC data partition (ext2 or a documented
@@ -308,6 +313,9 @@ VFS → write path → journaling → `fsck`**.
 - F7c: `blk: fs mbr ok`, `blk: fs mount ok`, `blk: fs root ok`,
   `blk: fs hello ok` in the boot log, and `tools/check-disk-fs.sh` reads
   `HELLO.TXT` with mtools.
+- F7c-2: `blk: ext2 mbr ok`, `blk: ext2 mount ok`, `blk: ext2 root ok`,
+  `blk: ext2 hello ok` in the boot log, and `tools/check-disk-ext2.sh` reads
+  `EXT2.TXT` with `debugfs`.
 - Boot log contains `vfs: mounted` with the filesystem name and mount point.
 - A CI boot writes a known pattern to `/data/probe`, unmounts, remounts, and
   reads it back with a matching checksum: `vfs: persistence ok`.

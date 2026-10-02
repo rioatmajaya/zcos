@@ -86,6 +86,12 @@ pub const FS_FILE_NAME: &[u8; 11] = b"HELLO   TXT";
 /// Contents the FAT32 probe expects in [`FS_FILE_NAME`].
 pub const FS_FILE_MAGIC: &[u8; 12] = b"ZC FAT32 OK\n";
 
+/// Name of the file the ext2 probe reads.
+pub const FS_EXT2_FILE_NAME: &[u8] = b"EXT2.TXT";
+
+/// Contents the ext2 probe expects in [`FS_EXT2_FILE_NAME`].
+pub const FS_EXT2_MAGIC: &[u8; 11] = b"ZC EXT2 OK\n";
+
 /// Deterministic byte for the write-test pattern.
 ///
 /// Both the write and the read-back verify call this, so a wrong byte at any
@@ -183,6 +189,12 @@ mod tests {
     fn fat32_probe_constants_are_stable() {
         assert_eq!(FS_FILE_NAME, b"HELLO   TXT");
         assert_eq!(FS_FILE_MAGIC, b"ZC FAT32 OK\n");
+    }
+
+    #[test]
+    fn ext2_probe_constants_are_stable() {
+        assert_eq!(FS_EXT2_FILE_NAME, b"EXT2.TXT");
+        assert_eq!(FS_EXT2_MAGIC, b"ZC EXT2 OK\n");
     }
 
     #[test]

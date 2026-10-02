@@ -22,6 +22,8 @@ require_command mcopy
 require_command mmd
 require_command mdir
 require_command mtype
+require_command mke2fs
+require_command debugfs
 
 if command -v rustup >/dev/null 2>&1; then
     if rustup component list --toolchain 1.95.0 --installed | grep -qx 'rust-src'; then
