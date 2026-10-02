@@ -42,6 +42,24 @@ impl Stat {
         out[16..24].copy_from_slice(&self.node.to_le_bytes());
         Some(())
     }
+
+    /// Decodes the structure from `bytes`, little-endian.
+    ///
+    /// The inverse of [`Self::write_into`]; returns `None` when `bytes` is
+    /// shorter than [`STAT_LEN`]. The kernel uses it to decode a `Stat` that
+    /// arrived over IPC, so the layout is known in exactly one place.
+    #[must_use]
+    pub fn read_from(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < STAT_LEN {
+            return None;
+        }
+        Some(Self {
+            kind: u32::from_le_bytes(bytes[0..4].try_into().ok()?),
+            mode: u32::from_le_bytes(bytes[4..8].try_into().ok()?),
+            size: u64::from_le_bytes(bytes[8..16].try_into().ok()?),
+            node: u64::from_le_bytes(bytes[16..24].try_into().ok()?),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -70,6 +88,20 @@ mod tests {
         assert_eq!(&out[4..8], &0o644u32.to_le_bytes());
         assert_eq!(&out[8..16], &31u64.to_le_bytes());
         assert_eq!(&out[16..24], &7u64.to_le_bytes());
+    }
+
+    #[test]
+    fn read_from_inverts_write_into() {
+        let stat = Stat {
+            kind: KIND_DIR,
+            mode: 0o755,
+            size: 4096,
+            node: 42,
+        };
+        let mut out = [0u8; STAT_LEN];
+        assert_eq!(stat.write_into(&mut out), Some(()));
+        assert_eq!(Stat::read_from(&out), Some(stat));
+        assert_eq!(Stat::read_from(&out[..STAT_LEN - 1]), None);
     }
 
     #[test]

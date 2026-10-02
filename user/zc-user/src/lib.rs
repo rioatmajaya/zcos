@@ -11,10 +11,10 @@
 use core::arch::asm;
 
 pub use zc_abi::{
-    KIND_DIR, KIND_FILE, SYS_CAP_DELEGATE, SYS_CLOSE, SYS_FB_INFO, SYS_IRQ_CLAIM, SYS_IRQ_TEST,
-    SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ, SYS_RECV,
-    SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_STAT, SYS_TASK_EXIT, SYS_YIELD,
-    Stat, SyscallError,
+    FS_ID_ZCFS, FS_OP_STOP, IPC_FS, KIND_DIR, KIND_FILE, SYS_CAP_DELEGATE, SYS_CLOSE, SYS_CREATE,
+    SYS_FB_INFO, SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME,
+    SYS_MOUNT, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ, SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO,
+    SYS_SERIAL_READ, SYS_STAT, SYS_TASK_EXIT, SYS_UMOUNT, SYS_WRITE, SYS_YIELD, Stat, SyscallError,
 };
 
 /// Issues a syscall with no arguments.
@@ -66,7 +66,8 @@ pub fn syscall2(number: u64, arg0: u64, arg1: u64) -> u64 {
     result
 }
 
-/// Issues a syscall with three arguments in `rdi`, `rsi`, and `rdx`.#[inline(always)]
+/// Issues a syscall with three arguments in `rdi`, `rsi`, and `rdx`.
+#[inline(always)]
 pub fn syscall3(number: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
     let result: u64;
     // SAFETY: as in `syscall0`; `rdx` carries the third argument.
@@ -158,6 +159,33 @@ pub fn serial_read() -> u8 {
 #[inline(always)]
 pub fn close(fd: u64) -> u64 {
     syscall1(SYS_CLOSE, fd)
+}
+
+/// Writes `data` to a descriptor, returning the count or `u64::MAX`.
+#[inline(always)]
+pub fn write(fd: u64, data: &[u8]) -> u64 {
+    syscall3(SYS_WRITE, fd, data.as_ptr() as u64, data.len() as u64)
+}
+
+/// Mounts filesystem `id` at `path`, returning 0 or `u64::MAX`.
+///
+/// `id` is [`zc_abi::FS_ID_ZCFS`] for zcfs; the kernel accepts only the
+/// filesystems it knows and only at the mount points it publishes.
+#[inline(always)]
+pub fn mount(path: &str, id: u64) -> u64 {
+    syscall3(SYS_MOUNT, path.as_ptr() as u64, path.len() as u64, id)
+}
+
+/// Unmounts the filesystem at `path`, returning 0 or `u64::MAX`.
+#[inline(always)]
+pub fn umount(path: &str) -> u64 {
+    syscall2(SYS_UMOUNT, path.as_ptr() as u64, path.len() as u64)
+}
+
+/// Creates the file `path`, returning 0 or `u64::MAX`.
+#[inline(always)]
+pub fn create(path: &str) -> u64 {
+    syscall2(SYS_CREATE, path.as_ptr() as u64, path.len() as u64)
 }
 
 /// Copies the framebuffer description into `info`.

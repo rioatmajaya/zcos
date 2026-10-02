@@ -37,6 +37,7 @@ mod serial;
 mod idt;
 mod smp;
 mod user;
+mod zcfs_proxy;
 
 /// Kernel entry point.
 ///

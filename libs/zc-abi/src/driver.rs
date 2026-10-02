@@ -12,6 +12,83 @@ pub const QUEUE_VIRT: u64 = 0x45_0000;
 /// User address of the driver descriptor page (one page).
 pub const INFO_VIRT: u64 = 0x45_3000;
 
+/// User address of the filesystem exchange page (one page).
+///
+/// The kernel filesystem proxy and the block domain share this page instead of
+/// copying through IPC messages, which carry only four words. It sits directly
+/// above [`INFO_VIRT`] and well below the next task image at `0x46_0000`, so a
+/// driver image can grow into the queue area but never into this page without
+/// tripping the bound check the block domain runs at start-up.
+pub const FS_EXCHANGE_VIRT: u64 = 0x45_4000;
+
+/// Length in bytes of the filesystem exchange page.
+pub const FS_EXCHANGE_LEN: usize = 4096;
+
+/// Offset of the request opcode or reply status (u32).
+pub const FS_EXCHANGE_OP: usize = 0;
+/// Offset of the request/reply sequence number (u32).
+pub const FS_EXCHANGE_SEQ: usize = 4;
+/// Offset of the requesting task index (u32).
+pub const FS_EXCHANGE_TASK: usize = 8;
+/// Offset of the payload length in bytes (u32).
+pub const FS_EXCHANGE_PAYLOAD: usize = 12;
+/// Offset of the node id (u64).
+pub const FS_EXCHANGE_NODE: usize = 16;
+/// Offset of the file offset (u64).
+pub const FS_EXCHANGE_OFFSET: usize = 24;
+/// Offset of the result value: bytes read or written, or a node id (u64).
+pub const FS_EXCHANGE_RESULT: usize = 32;
+/// Offset of the request payload or reply bytes.
+pub const FS_EXCHANGE_DATA: usize = 40;
+
+/// Largest payload that fits in the exchange page.
+pub const FS_EXCHANGE_DATA_MAX: usize = FS_EXCHANGE_LEN - FS_EXCHANGE_DATA;
+
+/// Filesystem id `SYS_MOUNT` accepts for the ZC-native zcfs volume.
+pub const FS_ID_ZCFS: u64 = 1;
+
+/// Request opcode: resolve a name inside a directory.
+pub const FS_OP_LOOKUP: u32 = 1;
+/// Request opcode: return a node's kind, mode, and size.
+pub const FS_OP_STAT: u32 = 2;
+/// Request opcode: read bytes from a node.
+pub const FS_OP_READ: u32 = 3;
+/// Request opcode: write bytes into a node.
+pub const FS_OP_WRITE: u32 = 4;
+/// Request opcode: create a name inside a directory.
+pub const FS_OP_CREATE: u32 = 5;
+/// Request opcode: write back and flush the device.
+pub const FS_OP_FLUSH: u32 = 6;
+/// Request opcode: mount the volume, replaying the log with a cold cache.
+pub const FS_OP_MOUNT: u32 = 7;
+/// Request opcode: flush, then drop the replayed table.
+pub const FS_OP_UNMOUNT: u32 = 8;
+/// Request opcode: flush and stop serving; the domain then exits.
+pub const FS_OP_STOP: u32 = 9;
+
+/// Reply status: the operation succeeded.
+pub const FS_STATUS_OK: u32 = 0;
+/// Reply status: the node or name does not exist.
+pub const FS_STATUS_NOT_FOUND: u32 = 1;
+/// Reply status: a path component is not a directory.
+pub const FS_STATUS_NOT_A_DIRECTORY: u32 = 2;
+/// Reply status: the path is malformed or the name is too long.
+pub const FS_STATUS_BAD_PATH: u32 = 3;
+/// Reply status: the filesystem does not support the operation.
+pub const FS_STATUS_NOT_SUPPORTED: u32 = 4;
+/// Reply status: the on-disk data is inconsistent.
+pub const FS_STATUS_CORRUPT: u32 = 5;
+/// Reply status: the node table has no free slot.
+pub const FS_STATUS_TABLE_FULL: u32 = 6;
+/// Reply status: the descriptor is invalid.
+pub const FS_STATUS_BAD_FD: u32 = 7;
+/// Reply status: a buffer argument is malformed.
+pub const FS_STATUS_BAD_BUFFER: u32 = 8;
+/// Reply status: the volume has no room for the write.
+pub const FS_STATUS_NO_SPACE: u32 = 9;
+/// Reply status: the block device reported an error.
+pub const FS_STATUS_IO: u32 = 10;
+
 /// Interrupt source index of the PS/2 keyboard line.
 ///
 /// Sources are indices into the kernel's IRQ table, not CPU vectors: the
@@ -59,6 +136,52 @@ mod tests {
         assert_eq!(QUEUE_VIRT + 3 * 4096, INFO_VIRT);
         assert!(INFO_LEN <= 4096);
         assert_eq!(INFO_QUEUE2 + 8, INFO_LEN);
+    }
+
+    #[test]
+    fn the_exchange_page_clears_every_neighbour() {
+        // Directly above the descriptor page, and below the keyboard image.
+        assert_eq!(INFO_VIRT + 4096, FS_EXCHANGE_VIRT);
+        assert!(FS_EXCHANGE_VIRT + FS_EXCHANGE_LEN as u64 <= 0x46_0000);
+        // Every field, and the payload, stays inside the page.
+        assert!(FS_EXCHANGE_RESULT + 8 <= FS_EXCHANGE_DATA);
+        assert_eq!(FS_EXCHANGE_DATA_MAX, 4056);
+        assert_eq!(FS_EXCHANGE_DATA + FS_EXCHANGE_DATA_MAX, FS_EXCHANGE_LEN);
+    }
+
+    #[test]
+    fn fs_opcodes_and_statuses_are_distinct() {
+        assert_eq!(FS_ID_ZCFS, 1);
+        let ops = [
+            FS_OP_LOOKUP,
+            FS_OP_STAT,
+            FS_OP_READ,
+            FS_OP_WRITE,
+            FS_OP_CREATE,
+            FS_OP_FLUSH,
+            FS_OP_MOUNT,
+            FS_OP_UNMOUNT,
+            FS_OP_STOP,
+        ];
+        for (index, op) in ops.iter().enumerate() {
+            assert_eq!(*op as usize, index + 1);
+        }
+        let statuses = [
+            FS_STATUS_OK,
+            FS_STATUS_NOT_FOUND,
+            FS_STATUS_NOT_A_DIRECTORY,
+            FS_STATUS_BAD_PATH,
+            FS_STATUS_NOT_SUPPORTED,
+            FS_STATUS_CORRUPT,
+            FS_STATUS_TABLE_FULL,
+            FS_STATUS_BAD_FD,
+            FS_STATUS_BAD_BUFFER,
+            FS_STATUS_NO_SPACE,
+            FS_STATUS_IO,
+        ];
+        for (index, status) in statuses.iter().enumerate() {
+            assert_eq!(*status as usize, index);
+        }
     }
 
     #[test]

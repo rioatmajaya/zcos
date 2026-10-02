@@ -1,15 +1,32 @@
 //! Shell task: an interactive command line over the serial port.
 //!
 //! Reads keystrokes with blocking serial reads, edits a single line with
-//! backspace support, and runs `help`, `echo`, `cat`, `stat`, and `exit`.
-//! Output goes through the log syscall, so the transcript appears in the
-//! kernel serial log.
+//! backspace support, and runs `help`, `echo`, `cat`, `stat`, `write`,
+//! `persist`, `mount`, `umount`, and `exit`. Output goes through the log
+//! syscall, so the transcript appears in the kernel serial log.
+//!
+//! `persist` is the durability proof: it writes the zcfs volume through the
+//! VFS, unmounts and remounts it, and reads its own bytes back. The remount
+//! replays the log from the disk with a cold cache, so a matching read cannot
+//! have come from RAM.
 
 #![no_std]
 #![no_main]
 #![allow(unsafe_code)]
 
-use zc_user::{KIND_DIR, Stat, close, log, open, read, serial_read, stat, task_exit};
+use zc_user::{
+    FS_ID_ZCFS, FS_OP_STOP, IPC_FS, KIND_DIR, Stat, close, create, log, mount, open, read,
+    send_to, serial_read, stat, task_exit, umount, write,
+};
+
+/// Contents `persist` writes and expects to read back.
+const PERSIST_PATTERN: &[u8] = b"ZCPERSIST1";
+
+/// The one mount point the kernel accepts for zcfs.
+const DATA_MOUNT: &str = "/data";
+
+/// The file `persist` writes, on the zcfs volume mounted at [`DATA_MOUNT`].
+const PERSIST_PATH: &str = "/data/probe";
 
 /// Longest command line accepted.
 const LINE_CAP: usize = 128;
@@ -155,7 +172,7 @@ fn run(line: &[u8]) -> bool {
     }
     match argv[0] {
         b"help" => {
-            log("Commands: help echo cat stat exit\n");
+            log("Commands: help echo cat stat write persist mount umount exit\n");
         }
         b"echo" => {
             for index in 1..count {
@@ -215,8 +232,87 @@ fn run(line: &[u8]) -> bool {
             out_bytes(b" bytes\n");
             out_flush();
         }
+        b"write" => {
+            if count < 3 {
+                log("usage: write <file> <text>\n");
+                return false;
+            }
+            let path = core::str::from_utf8(argv[1]).unwrap_or("");
+            let mut fd = open(path);
+            if fd == u64::MAX {
+                // A missing file is created on demand, so `write` can make one.
+                if create(path) == u64::MAX {
+                    log("write: cannot create\n");
+                    return false;
+                }
+                fd = open(path);
+            }
+            if fd == u64::MAX {
+                log("write: no such file\n");
+                return false;
+            }
+            let wrote = write(fd, argv[2]);
+            close(fd);
+            if wrote == u64::MAX {
+                log("write: failed\n");
+                return false;
+            }
+            log("write: ok\n");
+        }
+        b"mount" => {
+            if mount(DATA_MOUNT, FS_ID_ZCFS) == 0 {
+                log("mount: /data ok\n");
+            } else {
+                log("mount: /data failed\n");
+            }
+        }
+        b"umount" => {
+            if umount(DATA_MOUNT) == 0 {
+                log("umount: /data ok\n");
+            } else {
+                log("umount: /data failed\n");
+            }
+        }
+        b"persist" => {
+            let fd = open(PERSIST_PATH);
+            if fd == u64::MAX {
+                log("persist: open failed\n");
+                return false;
+            }
+            let wrote = write(fd, PERSIST_PATTERN);
+            close(fd);
+            if wrote != PERSIST_PATTERN.len() as u64 {
+                log("persist: write failed\n");
+                return false;
+            }
+            // Unmount, then mount again. The second mount replays the volume
+            // from the disk with a cold cache, so the read below proves the
+            // bytes are durable rather than cached.
+            if umount(DATA_MOUNT) != 0 || mount(DATA_MOUNT, FS_ID_ZCFS) != 0 {
+                log("persist: remount failed\n");
+                return false;
+            }
+            let fd = open(PERSIST_PATH);
+            if fd == u64::MAX {
+                log("persist: reopen failed\n");
+                return false;
+            }
+            let mut buffer = [0u8; 32];
+            let got = read(fd, &mut buffer);
+            close(fd);
+            if got != PERSIST_PATTERN.len() as u64
+                || &buffer[..got as usize] != PERSIST_PATTERN
+            {
+                log("persist: mismatch\n");
+                return false;
+            }
+            log("vfs: persistence ok\n");
+        }
         b"exit" => {
             log("shell exiting\n");
+            // Tell the block domain to flush and stop, so the boot can end
+            // with the volume clean instead of waiting out the timeout.
+            let _ = send_to(IPC_FS as u64, FS_OP_STOP as u64);
             return true;
         }
         _ => {

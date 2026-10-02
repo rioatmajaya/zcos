@@ -17,7 +17,10 @@ a mount table, and serves `open`/`read`/`close`/`stat` from per-task
 descriptors. A ZC-native log-structured filesystem, **zcfs** (F7e), adds the
 writable path: the block domain mounts the volume, reads a host-planted file,
 writes one of its own, then remounts from the disk to prove the write durable.
-See [the roadmap](docs/roadmap.md) for the phase map and pass
+F7e-2 mounts that volume into the kernel VFS at `/data` over a filesystem IPC
+bridge, so `SYS_WRITE` and friends reach the disk: the shell writes
+`/data/probe`, unmounts, remounts, and reads it back. See
+[the roadmap](docs/roadmap.md) for the phase map and pass
 criteria, and [CHANGELOG.md](CHANGELOG.md) for what changed.
 
 **F1 — bootloader.** The UEFI loader boots in QEMU/OVMF, reads a kernel ELF
@@ -70,10 +73,12 @@ the host-planted `/probe`, creating and writing `/written`, then dropping the
 cache and remounting from the disk to read its own file back. Host checks
 confirm the writes reached `build/disk.img`, that mtools reads the FAT32 file,
 that `debugfs` reads the ext2 file, and that an independent replay of the zcfs
-log finds both `/probe` and `/written`. The VFS mounts the initramfs as `ramfs`
-at `/`, and the serial shell's `stat` command reports file metadata over the
-new `SYS_STAT` syscall. Next up is **F7e-2 — mounting zcfs into the VFS at
-`/data`**, then `initd` supervision.
+log finds `/written` and the `/probe` the shell rewrites. The VFS mounts the
+initramfs as `ramfs` at `/` and the zcfs volume at `/data`, so the serial
+shell's `write`, `stat`, `mount`, `umount`, and `persist` commands reach the
+disk through the same `FileSystem` trait; `persist` proves durability by
+unmounting, remounting from the device, and reading its own write back. Next up
+is **F7f — `initd` supervision**.
 
 ## Development
 

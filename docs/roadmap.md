@@ -41,7 +41,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F4** | Thread + IPC | ✅ done | `task 0: producer sent 2000`, capability gates |
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 5 grants`, `task 6: devmgr: blk published` |
-| **F7** | VFS & penyimpanan | 🔨 F7a–F7e, F7c-2 done | `blk: write ok`; `blk: cache durable`; `blk: fs hello ok`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok` |
+| **F7** | VFS & penyimpanan | 🔨 F7a–F7e-2, F7c-2 done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok` |
 | **F8** | Desktop | ⬜ planned | — |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
@@ -312,10 +312,16 @@ VFS → write path → journaling → `fsck`**.
       implementation of the same format, and `tools/check-disk-zcfs.sh` replays
       the guest's log to confirm `/written` (see
       [ADR 0008](adr/0008-zc-native-log-structured-fs.md)).
-- [ ] F7e-2: mount the writable zcfs volume into the kernel VFS at `/data` and
+- [x] F7e-2: mount the writable zcfs volume into the kernel VFS at `/data` and
       reach it through `SYS_WRITE`/`SYS_MOUNT`/`SYS_UMOUNT`/`SYS_CREATE`, with
-      the block domain serving the volume over a filesystem IPC channel. The
-      shell gains `write`/`persist`/`mount`/`umount`, and a boot writes
+      the block domain serving the volume over a filesystem IPC channel. A
+      kernel proxy turns each `FileSystem` call into a request on the `IPC_FS`
+      channel, shared through a mapped exchange page; because a trait method
+      cannot block, it returns `WouldBlock` and the syscall handler blocks on
+      its behalf, replaying the syscall when the reply arrives. A per-task
+      replay log makes a multi-call syscall (a path walk then the operation)
+      replay without re-sending or misattributing the waiting reply. The shell
+      gains `write`/`persist`/`mount`/`umount`, and a boot writes
       `/data/probe`, unmounts, remounts, and reads it back.
 - [ ] F7f: `initd` — the manifest's `init=/sbin/initd` becomes real: a
       supervisor that starts, restarts, and stops service domains.
@@ -342,10 +348,13 @@ VFS → write path → journaling → `fsck`**.
   resolve through the VFS.
 - F7e: `blk: zcfs mbr ok`, `blk: zcfs mount ok`, `blk: zcfs probe ok`,
   `blk: zcfs write ok`, `blk: zcfs replay ok` in the boot log, and
-  `tools/check-disk-zcfs.sh` replays both the host-planted `/probe` and the
-  guest-written `/written` on the host image.
+  `tools/check-disk-zcfs.sh` replays the guest-written `/written` (and the
+  `/probe` the shell rewrites through the VFS) on the host image.
 - F7e-2: `vfs: mounted zcfs at /data` in the boot log, and a boot writes
   `/data/probe`, unmounts, remounts, and reads it back: `vfs: persistence ok`.
+  `task 2: write: ok` and `task 2: /data/probe: file, 10 bytes` show the write
+  and stat paths, and `task 4: blk: zcfs stopped` shows the domain flush and
+  exit on `exit`.
 - Boot log contains `vfs: mounted` with the filesystem name and mount point.
 - A CI boot writes a known pattern to `/data/probe`, unmounts, remounts, and
   reads it back with a matching checksum: `vfs: persistence ok`.

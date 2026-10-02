@@ -10,16 +10,25 @@ pub const MESSAGE_WORDS: usize = 4;
 /// Independent IPC channels in the bring-up fabric.
 ///
 /// Channel 0 carries the original data stream (producer/consumer words).
-/// Channel 1 carries device discovery (manager to driver). Queues are fully
-/// separate, so discovery traffic can never corrupt the data sequence — the
-/// property a shared bus scan could never give.
-pub const IPC_CHANNELS: usize = 2;
+/// Channel 1 carries device discovery (manager to driver). Channels 2 and 3
+/// carry the filesystem bridge: the kernel proxy sends requests on channel 2
+/// and the block domain replies on channel 3, so a request can never be
+/// mistaken for a reply. Queues are fully separate, so discovery traffic can
+/// never corrupt the data sequence — the property a shared bus scan could
+/// never give.
+pub const IPC_CHANNELS: usize = 4;
 
 /// Data-stream channel: the legacy `SYS_SEND`/`SYS_RECV` path.
 pub const IPC_DATA: usize = 0;
 
 /// Device-discovery channel: manager publishes, driver consumes.
 pub const IPC_DISCOVERY: usize = 1;
+
+/// Filesystem-request channel: the kernel proxy sends, the block domain serves.
+pub const IPC_FS: usize = 2;
+
+/// Filesystem-reply channel: the block domain replies, the kernel proxy routes.
+pub const IPC_FS_REPLY: usize = 3;
 
 /// A copied IPC message.
 ///
@@ -98,9 +107,12 @@ mod tests {
 
     #[test]
     fn channels_are_distinct_and_bounded() {
-        assert_eq!(IPC_CHANNELS, 2);
+        assert_eq!(IPC_CHANNELS, 4);
         assert_ne!(IPC_DATA, IPC_DISCOVERY);
+        assert_ne!(IPC_FS, IPC_FS_REPLY);
         assert!(IPC_DATA < IPC_CHANNELS);
         assert!(IPC_DISCOVERY < IPC_CHANNELS);
+        assert!(IPC_FS < IPC_CHANNELS);
+        assert!(IPC_FS_REPLY < IPC_CHANNELS);
     }
 }

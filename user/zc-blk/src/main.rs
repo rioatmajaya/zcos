@@ -28,7 +28,14 @@
 use core::ptr::addr_of_mut;
 use core::sync::atomic::{Ordering, compiler_fence};
 
-use zc_abi::{INFO_LEN, INFO_QUEUE0, INFO_VIRT, IPC_DISCOVERY, QUEUE_VIRT};
+use zc_abi::{
+    FS_EXCHANGE_DATA, FS_EXCHANGE_NODE, FS_EXCHANGE_OFFSET, FS_EXCHANGE_OP, FS_EXCHANGE_PAYLOAD,
+    FS_EXCHANGE_RESULT, FS_EXCHANGE_VIRT, FS_OP_CREATE, FS_OP_FLUSH, FS_OP_LOOKUP, FS_OP_MOUNT,
+    FS_OP_READ, FS_OP_STAT, FS_OP_STOP, FS_OP_UNMOUNT, FS_OP_WRITE, FS_STATUS_BAD_BUFFER,
+    FS_STATUS_BAD_PATH, FS_STATUS_CORRUPT, FS_STATUS_NOT_A_DIRECTORY, FS_STATUS_NOT_FOUND,
+    FS_STATUS_NOT_SUPPORTED, FS_STATUS_NO_SPACE, FS_STATUS_OK, FS_STATUS_TABLE_FULL, INFO_LEN,
+    INFO_QUEUE0, INFO_VIRT, IPC_DISCOVERY, IPC_FS, IPC_FS_REPLY, QUEUE_VIRT,
+};
 use zc_kernel::block_cache::{CACHE_MAGIC, CACHE_TEST_SECTOR, Cache, cache_pattern_byte};
 use zc_kernel::ext2::{self, Ext2Error};
 use zc_kernel::fat32::{self, FatError, Sector};
@@ -36,7 +43,7 @@ use zc_kernel::mbr;
 use zc_kernel::virtio;
 use zc_kernel::zcfs::{self, BlockIo, ZcfsError};
 use zc_user::{
-    abort, log, port_claim, port_inl, port_inw, port_outb, port_outl, port_outw, recv_from,
+    abort, log, port_claim, port_inl, port_inw, port_outb, port_outl, port_outw, recv_from, send_to,
     task_exit,
 };
 
@@ -62,6 +69,10 @@ const ZCFS_SLOTS: usize = 8;
 /// The mounted zcfs volume, also in `.bss` for the same reason: a `Volume<8>`
 /// is several kilobytes, far more than the 4 KiB stack page allows.
 static mut ZCFS: zcfs::Volume<ZCFS_SLOTS> = zcfs::Volume::new();
+
+/// Partition LBA of the zcfs volume, recorded by the probe so `OP_MOUNT` can
+/// replay the same partition again.
+static mut ZCFS_LBA: u32 = 0;
 
 /// Forms a device register port from a BAR base plus an offset.
 const fn reg(port: u16, offset: u16) -> u16 {
@@ -705,6 +716,8 @@ fn zcfs_probe(device: &mut Device, cache: &mut Cache<CACHE_SLOTS>, flush_offered
         }
     };
     log("blk: zcfs mbr ok\n");
+    // SAFETY: single-threaded; the word is read back by `zcfs_serve`.
+    unsafe { addr_of_mut!(ZCFS_LBA).write(partition_lba) };
 
     // SAFETY: this task is single-threaded and the volume is not aliased; the
     // borrow lives for the rest of `_start`.
@@ -817,6 +830,254 @@ fn zcfs_probe(device: &mut Device, cache: &mut Cache<CACHE_SLOTS>, flush_offered
     log("blk: zcfs replay ok\n");
 }
 
+/// Reads a little-endian u32 from the shared filesystem exchange page.
+fn ex_load32(offset: usize) -> u32 {
+    // SAFETY: the kernel mapped the exchange page at FS_EXCHANGE_VIRT with
+    // user rights before this task started.
+    unsafe { u32::from_le(((FS_EXCHANGE_VIRT as usize + offset) as *const u32).read_volatile()) }
+}
+
+/// Reads a little-endian u64 from the shared filesystem exchange page.
+fn ex_load64(offset: usize) -> u64 {
+    // SAFETY: as in `ex_load32`.
+    unsafe { u64::from_le(((FS_EXCHANGE_VIRT as usize + offset) as *const u64).read_volatile()) }
+}
+
+/// Writes a little-endian u32 into the shared filesystem exchange page.
+fn ex_store32(offset: usize, value: u32) {
+    // SAFETY: as in `ex_load32`; offsets stay inside the page by construction.
+    unsafe {
+        ((FS_EXCHANGE_VIRT as usize + offset) as *mut u32).write_volatile(value.to_le());
+    }
+}
+
+/// Writes a little-endian u64 into the shared filesystem exchange page.
+fn ex_store64(offset: usize, value: u64) {
+    // SAFETY: as in `ex_load32`.
+    unsafe {
+        ((FS_EXCHANGE_VIRT as usize + offset) as *mut u64).write_volatile(value.to_le());
+    }
+}
+
+/// Copies the exchange page's payload area into `out`.
+fn ex_read_bytes(out: &mut [u8]) {
+    // SAFETY: the caller bounds `out` by the payload length it read, which the
+    // kernel keeps inside the page.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            (FS_EXCHANGE_VIRT as usize + FS_EXCHANGE_DATA) as *const u8,
+            out.as_mut_ptr(),
+            out.len(),
+        );
+    }
+}
+
+/// Copies `data` into the exchange page's payload area.
+fn ex_write_bytes(data: &[u8]) {
+    // SAFETY: as in `ex_read_bytes`; `data` is at most `zcfs::CONTENT_MAX`.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            data.as_ptr(),
+            (FS_EXCHANGE_VIRT as usize + FS_EXCHANGE_DATA) as *mut u8,
+            data.len(),
+        );
+    }
+}
+
+/// Maps a filesystem error onto the bridge's status code.
+fn status_of(error: ZcfsError) -> u32 {
+    match error {
+        ZcfsError::NotFound => FS_STATUS_NOT_FOUND,
+        ZcfsError::NotADirectory => FS_STATUS_NOT_A_DIRECTORY,
+        ZcfsError::BadPath => FS_STATUS_BAD_PATH,
+        ZcfsError::TableFull => FS_STATUS_TABLE_FULL,
+        ZcfsError::NoSpace => FS_STATUS_NO_SPACE,
+        ZcfsError::Io => FS_STATUS_CORRUPT,
+        _ => FS_STATUS_CORRUPT,
+    }
+}
+
+/// Serves one request from the exchange page, returning its status.
+///
+/// The request fields were already read by the caller; this decodes the
+/// opcode, touches the volume, and writes the reply fields back.
+fn serve_op(
+    device: &mut Device,
+    cache: &mut Cache<CACHE_SLOTS>,
+    flush_offered: bool,
+    op: u32,
+) -> u32 {
+    // SAFETY: single-threaded; the volume lives in `.bss` for the whole task.
+    let volume = unsafe { &mut *addr_of_mut!(ZCFS) };
+    let node = ex_load64(FS_EXCHANGE_NODE);
+    let offset = ex_load64(FS_EXCHANGE_OFFSET);
+    let payload_len = ex_load32(FS_EXCHANGE_PAYLOAD) as usize;
+    // The payload and result slots are dual-use: the request fills them, the
+    // reply overwrites them. They are read into locals above, so clearing
+    // them now means a reply that carries no payload reports a length of
+    // zero instead of echoing the request's — the kernel proxy reads that
+    // field as the reply length. Every arm with a payload or result writes
+    // its own value back.
+    ex_store32(FS_EXCHANGE_PAYLOAD, 0);
+    ex_store64(FS_EXCHANGE_RESULT, 0);
+    // One payload buffer, reused by every arm: a task stack is only 4 KiB.
+    let mut buffer = [0u8; zcfs::CONTENT_MAX];
+
+    match op {
+        FS_OP_LOOKUP => {
+            if payload_len == 0 || payload_len > zcfs::NAME_MAX {
+                return FS_STATUS_BAD_PATH;
+            }
+            ex_read_bytes(&mut buffer[..payload_len]);
+            match volume.lookup(node, &buffer[..payload_len]) {
+                Ok(found) => {
+                    ex_store64(FS_EXCHANGE_RESULT, found);
+                    FS_STATUS_OK
+                }
+                Err(error) => status_of(error),
+            }
+        }
+        FS_OP_STAT => match volume.stat(node) {
+            Ok((kind, mode, size)) => {
+                // The ABI `Stat` layout: kind, mode, size, node, little-endian.
+                let mut bytes = [0u8; 24];
+                bytes[0..4].copy_from_slice(&kind.to_le_bytes());
+                bytes[4..8].copy_from_slice(&mode.to_le_bytes());
+                bytes[8..16].copy_from_slice(&u64::from(size).to_le_bytes());
+                bytes[16..24].copy_from_slice(&node.to_le_bytes());
+                ex_write_bytes(&bytes);
+                ex_store32(FS_EXCHANGE_PAYLOAD, bytes.len() as u32);
+                FS_STATUS_OK
+            }
+            Err(error) => status_of(error),
+        },
+        FS_OP_READ => {
+            let want = payload_len.min(zcfs::CONTENT_MAX);
+            match volume.read(node, offset, &mut buffer[..want]) {
+                Ok(count) => {
+                    ex_write_bytes(&buffer[..count]);
+                    ex_store32(FS_EXCHANGE_PAYLOAD, count as u32);
+                    ex_store64(FS_EXCHANGE_RESULT, count as u64);
+                    FS_STATUS_OK
+                }
+                Err(error) => status_of(error),
+            }
+        }
+        FS_OP_WRITE => {
+            if payload_len == 0 || payload_len > zcfs::CONTENT_MAX || offset > u32::MAX as u64 {
+                return FS_STATUS_BAD_BUFFER;
+            }
+            ex_read_bytes(&mut buffer[..payload_len]);
+            let mut io = CacheIo {
+                device: &mut *device,
+                cache: &mut *cache,
+                flush_offered,
+            };
+            match volume.write(&mut io, node, offset as u32, &buffer[..payload_len]) {
+                Ok(count) => {
+                    ex_store64(FS_EXCHANGE_RESULT, count as u64);
+                    FS_STATUS_OK
+                }
+                Err(error) => status_of(error),
+            }
+        }
+        FS_OP_CREATE => {
+            if payload_len == 0 || payload_len > zcfs::NAME_MAX || offset > u32::MAX as u64 {
+                return FS_STATUS_BAD_PATH;
+            }
+            ex_read_bytes(&mut buffer[..payload_len]);
+            let mut io = CacheIo {
+                device: &mut *device,
+                cache: &mut *cache,
+                flush_offered,
+            };
+            match volume.create(&mut io, node, &buffer[..payload_len], offset as u32) {
+                Ok(created) => {
+                    ex_store64(FS_EXCHANGE_RESULT, created);
+                    FS_STATUS_OK
+                }
+                Err(error) => status_of(error),
+            }
+        }
+        FS_OP_FLUSH => {
+            let mut io = CacheIo {
+                device: &mut *device,
+                cache: &mut *cache,
+                flush_offered,
+            };
+            match io.flush() {
+                Ok(()) => FS_STATUS_OK,
+                Err(error) => status_of(error),
+            }
+        }
+        FS_OP_MOUNT => {
+            // A cold cache is the point: the replay must come from the disk.
+            *cache = Cache::new();
+            // SAFETY: written by the probe before serving began.
+            let lba = unsafe { core::ptr::addr_of!(ZCFS_LBA).read() };
+            let mut io = CacheIo {
+                device: &mut *device,
+                cache: &mut *cache,
+                flush_offered,
+            };
+            match volume.mount_into(lba, &mut io) {
+                Ok(()) => FS_STATUS_OK,
+                Err(error) => status_of(error),
+            }
+        }
+        FS_OP_UNMOUNT => {
+            {
+                let mut io = CacheIo {
+                    device: &mut *device,
+                    cache: &mut *cache,
+                    flush_offered,
+                };
+                if let Err(error) = io.flush() {
+                    return status_of(error);
+                }
+            }
+            *volume = zcfs::Volume::new();
+            *cache = Cache::new();
+            FS_STATUS_OK
+        }
+        FS_OP_STOP => {
+            let mut io = CacheIo {
+                device: &mut *device,
+                cache: &mut *cache,
+                flush_offered,
+            };
+            match io.flush() {
+                Ok(()) => FS_STATUS_OK,
+                Err(error) => status_of(error),
+            }
+        }
+        _ => FS_STATUS_NOT_SUPPORTED,
+    }
+}
+
+/// Serves filesystem requests until the shell sends `OP_STOP`.
+///
+/// The kernel proxy blocks a caller until its reply arrives, so the reply must
+/// be sent for every request the kernel can issue. `OP_STOP` is the exception:
+/// the shell sends it directly on the request channel and does not wait, so
+/// the domain flushes and exits without replying.
+fn zcfs_serve(device: &mut Device, cache: &mut Cache<CACHE_SLOTS>, flush_offered: bool) -> ! {
+    log("blk: zcfs serving\n");
+    loop {
+        let word = recv_from(IPC_FS as u64);
+        let op = (word & 0xFFFF_FFFF) as u32;
+        let seq = (word >> 32) as u32;
+        let status = serve_op(device, cache, flush_offered, op);
+        if op == FS_OP_STOP {
+            log("blk: zcfs stopped\n");
+            task_exit()
+        }
+        ex_store32(FS_EXCHANGE_OP, status);
+        let reply = (u64::from(seq) << 32) | u64::from(status);
+        let _ = send_to(IPC_FS_REPLY as u64, reply);
+    }
+}
+
 /// Task entry point; the kernel provides a fresh user stack.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
@@ -910,5 +1171,5 @@ pub unsafe extern "C" fn _start() -> ! {
     fs_probe(&mut device, cache);
     ext2_probe(&mut device, cache);
     zcfs_probe(&mut device, cache, flush_offered);
-    task_exit()
+    zcfs_serve(&mut device, cache, flush_offered);
 }

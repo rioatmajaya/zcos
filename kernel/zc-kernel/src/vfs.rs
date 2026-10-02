@@ -52,6 +52,15 @@ pub enum VfsError {
     BadFd,
     /// The read or write buffer is unusable.
     BadBuffer,
+    /// The backing store has no room for the operation.
+    NoSpace,
+    /// The operation needs the filesystem to run and must be retried.
+    ///
+    /// A [`FileSystem`] method cannot block — it has no access to the
+    /// scheduler — so a filesystem served by another task returns this and the
+    /// syscall layer blocks on its behalf. On retry the whole call repeats and
+    /// the filesystem finds the reply waiting.
+    WouldBlock,
 }
 
 /// One mounted filesystem.
@@ -80,6 +89,13 @@ pub trait FileSystem {
     ///
     /// The default is read-only; a writable filesystem overrides it.
     fn write(&self, _node: NodeId, _offset: u64, _data: &[u8]) -> Result<usize, VfsError> {
+        Err(VfsError::NotSupported)
+    }
+
+    /// Creates `name` in directory `dir` and returns the new node.
+    ///
+    /// The default is read-only; a writable filesystem overrides it.
+    fn create(&self, _dir: NodeId, _name: &[u8], _mode: u32) -> Result<NodeId, VfsError> {
         Err(VfsError::NotSupported)
     }
 }
@@ -163,6 +179,37 @@ impl MountTable {
     /// The mount with the longest matching prefix wins, compared at component
     /// granularity, so `/data` never captures `/database`.
     pub fn resolve(&self, path: &[u8]) -> Result<Resolved, VfsError> {
+        let (mount, rest) = self.locate(path)?;
+        Ok(Resolved {
+            fs: mount.fs,
+            node: walk(mount, rest)?,
+        })
+    }
+
+    /// Creates the entry `path` names, returning its node.
+    ///
+    /// The parent directory is resolved through the mount, so `create` on a
+    /// path whose parent is missing fails with [`VfsError::NotFound`] rather
+    /// than creating anything.
+    pub fn create(&self, path: &[u8], mode: u32) -> Result<NodeId, VfsError> {
+        let (mount, rest) = self.locate(path)?;
+        let Some(at) = rest.iter().rposition(|&byte| byte == b'/') else {
+            if rest.is_empty() {
+                return Err(VfsError::BadPath);
+            }
+            return mount.fs.create(mount.fs.root(), rest, mode);
+        };
+        let (parent, name) = (&rest[..at], &rest[at + 1..]);
+        if name.is_empty() {
+            return Err(VfsError::BadPath);
+        }
+        let parent = walk(mount, parent)?;
+        mount.fs.create(parent, name, mode)
+    }
+
+    /// Finds the mount with the longest matching prefix and returns it with
+    /// the remaining path below it.
+    fn locate<'a>(&self, path: &'a [u8]) -> Result<(&Mount, &'a [u8]), VfsError> {
         let path = normalize_path(path)?;
         let mut best: Option<(&Mount, &[u8], usize)> = None;
         for slot in self.mounts.iter().flatten() {
@@ -176,20 +223,8 @@ impl MountTable {
                 best = Some((slot, rest, point.len()));
             }
         }
-        let (mount, mut rest, _) = best.ok_or(VfsError::NotFound)?;
-        let mut node = mount.fs.root();
-        while !rest.is_empty() {
-            let (name, next) = match rest.iter().position(|&byte| byte == b'/') {
-                Some(at) => (&rest[..at], &rest[at + 1..]),
-                None => (rest, &rest[rest.len()..]),
-            };
-            node = mount.fs.lookup(node, name)?;
-            rest = next;
-        }
-        Ok(Resolved {
-            fs: mount.fs,
-            node,
-        })
+        let (mount, rest, _) = best.ok_or(VfsError::NotFound)?;
+        Ok((mount, rest))
     }
 }
 
@@ -331,6 +366,23 @@ fn normalize_path(path: &[u8]) -> Result<&[u8], VfsError> {
     Ok(inner)
 }
 
+/// Walks `rest`, a normalised path below a mount point, from the mount root.
+///
+/// `rest` has no leading, trailing, or doubled slash, so every component is a
+/// real name and the empty path is the root itself.
+fn walk(mount: &Mount, mut rest: &[u8]) -> Result<NodeId, VfsError> {
+    let mut node = mount.fs.root();
+    while !rest.is_empty() {
+        let (name, next) = match rest.iter().position(|&byte| byte == b'/') {
+            Some(at) => (&rest[..at], &rest[at + 1..]),
+            None => (rest, &rest[rest.len()..]),
+        };
+        node = mount.fs.lookup(node, name)?;
+        rest = next;
+    }
+    Ok(node)
+}
+
 /// Returns the part of `path` below `point`, or `None` when `point` is not a
 /// whole-component prefix of `path`.
 fn strip_prefix<'a>(path: &'a [u8], point: &[u8]) -> Option<&'a [u8]> {
@@ -349,6 +401,7 @@ fn strip_prefix<'a>(path: &'a [u8], point: &[u8]) -> Option<&'a [u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::sync::atomic::{AtomicU32, Ordering};
     use zc_abi::{KIND_DIR, KIND_FILE};
 
     /// A minimal filesystem: root and one directory both hold `a`, and `a` is
@@ -415,6 +468,141 @@ mod tests {
         table.mount(b"/", &ROOT_FS).expect("root mount");
         table.mount(b"/data", &DATA_FS).expect("data mount");
         table
+    }
+
+    /// A writable filesystem: root holds `a` (a file) and `dir` (a directory),
+    /// and `create` counts how many names it has been asked to make.
+    struct WritableFs;
+
+    static WRITABLE_FS: WritableFs = WritableFs;
+    static CREATED: AtomicU32 = AtomicU32::new(0);
+
+    impl FileSystem for WritableFs {
+        fn name(&self) -> &str {
+            "writable"
+        }
+
+        fn root(&self) -> NodeId {
+            0
+        }
+
+        fn lookup(&self, dir: NodeId, name: &[u8]) -> Result<NodeId, VfsError> {
+            if dir != 0 {
+                return Err(VfsError::NotADirectory);
+            }
+            match name {
+                b"a" => Ok(1),
+                b"dir" => Ok(2),
+                _ => Err(VfsError::NotFound),
+            }
+        }
+
+        fn stat(&self, _node: NodeId) -> Result<Stat, VfsError> {
+            Err(VfsError::NotFound)
+        }
+
+        fn read(&self, _node: NodeId, _offset: u64, _out: &mut [u8]) -> Result<usize, VfsError> {
+            Err(VfsError::NotADirectory)
+        }
+
+        fn create(&self, dir: NodeId, name: &[u8], _mode: u32) -> Result<NodeId, VfsError> {
+            if name.is_empty() {
+                return Err(VfsError::BadPath);
+            }
+            CREATED.fetch_add(1, Ordering::Relaxed);
+            Ok(3 + dir)
+        }
+    }
+
+    /// A filesystem that is served elsewhere: every operation needs a reply.
+    struct BlockingFs;
+
+    static BLOCKING_FS: BlockingFs = BlockingFs;
+
+    impl FileSystem for BlockingFs {
+        fn name(&self) -> &str {
+            "blocking"
+        }
+
+        fn root(&self) -> NodeId {
+            0
+        }
+
+        fn lookup(&self, _dir: NodeId, _name: &[u8]) -> Result<NodeId, VfsError> {
+            Err(VfsError::WouldBlock)
+        }
+
+        fn stat(&self, _node: NodeId) -> Result<Stat, VfsError> {
+            Err(VfsError::WouldBlock)
+        }
+
+        fn read(&self, _node: NodeId, _offset: u64, _out: &mut [u8]) -> Result<usize, VfsError> {
+            Err(VfsError::WouldBlock)
+        }
+
+        fn write(&self, _node: NodeId, _offset: u64, _data: &[u8]) -> Result<usize, VfsError> {
+            Err(VfsError::WouldBlock)
+        }
+
+        fn create(&self, _dir: NodeId, _name: &[u8], _mode: u32) -> Result<NodeId, VfsError> {
+            Err(VfsError::WouldBlock)
+        }
+    }
+
+    #[test]
+    fn create_resolves_the_parent_then_creates() {
+        let mut table = MountTable::new();
+        table.mount(b"/", &ROOT_FS).expect("root mount");
+        table.mount(b"/data", &WRITABLE_FS).expect("data mount");
+
+        // Directly under the mount point: the parent is the mount root.
+        assert!(table.create(b"/data/new", 0o644).is_ok());
+        // Below a directory: the parent is resolved through `lookup` first.
+        assert!(table.create(b"/data/dir/new", 0o644).is_ok());
+        // A missing parent must not create anything.
+        assert_eq!(table.create(b"/data/missing/new", 0o644), Err(VfsError::NotFound));
+        // The mount point itself is a directory, not a creatable name.
+        assert_eq!(table.create(b"/data", 0o644), Err(VfsError::BadPath));
+        assert_eq!(table.create(b"/data/", 0o644), Err(VfsError::BadPath));
+    }
+
+    #[test]
+    fn create_on_a_read_only_mount_is_not_supported() {
+        let table = table();
+        assert_eq!(table.create(b"/new", 0o644), Err(VfsError::NotSupported));
+    }
+
+    #[test]
+    fn would_block_propagates_unchanged() {
+        let mut table = MountTable::new();
+        table.mount(b"/blocking", &BLOCKING_FS).expect("mount");
+
+        // Through path resolution: the lookup that needs a reply surfaces it.
+        assert_eq!(
+            table.resolve(b"/blocking/a").unwrap_err(),
+            VfsError::WouldBlock
+        );
+        assert_eq!(
+            table.create(b"/blocking/a", 0o644),
+            Err(VfsError::WouldBlock)
+        );
+
+        // Through the descriptor table: read and write must not be rewritten.
+        let mut descriptors = DescriptorTable::new();
+        let fd = descriptors.open(&BLOCKING_FS, 0).expect("descriptor");
+        let mut buffer = [0u8; 4];
+        assert_eq!(descriptors.read(fd, &mut buffer), Err(VfsError::WouldBlock));
+        assert_eq!(descriptors.write(fd, b"x"), Err(VfsError::WouldBlock));
+    }
+
+    #[test]
+    fn writable_fs_records_each_create() {
+        let mut table = MountTable::new();
+        table.mount(b"/data", &WRITABLE_FS).expect("mount");
+        let before = CREATED.load(Ordering::Relaxed);
+        table.create(b"/data/one", 0o644).expect("create");
+        table.create(b"/data/two", 0o644).expect("create");
+        assert_eq!(CREATED.load(Ordering::Relaxed), before + 2);
     }
 
     #[test]

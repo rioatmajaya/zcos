@@ -3,11 +3,12 @@
 # the driver.
 #
 # The block domain parses the MBR, mounts the volume, reads the host-planted
-# /probe, and creates /written. This check reads the same image with the
-# independent Python format implementation in tools/zcfs.py and replays the log
-# itself, so the driver is not the only thing validating the volume: the host
-# wrote what the guest read, and the host reads back what the guest wrote. Run
-# after tools/build-efi.sh and a boot.
+# /probe, and creates /written; the shell then rewrites /probe through the
+# kernel VFS. This check reads the same image with the independent Python
+# format implementation in tools/zcfs.py and replays the log itself, so the
+# driver is not the only thing validating the volume: the host wrote what the
+# guest read, and the host reads back what the guest wrote. Run after
+# tools/build-efi.sh and a boot.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -55,14 +56,17 @@ print("sb: head_seq %d, tail_seq %d, flags %#x"
 # Replay the log exactly as the guest does, from the durable prefix only.
 _, nodes = zcfs.replay(image, lba)
 
-# The host planted /probe; the guest read it, so a matching replay proves both
-# implementations agree on the on-disk format.
+# The host planted /probe and the guest read it at boot, so a successful
+# `blk: zcfs probe ok` already proves the host-to-guest direction. The shell
+# then rewrites the same path through the VFS, so after a boot the durable
+# content is the shell's pattern: replaying it proves the guest-to-host
+# direction and that both implementations agree on the DATA record.
 _, probe = zcfs.find(nodes, zcfs.ROOT_NODE, b"probe")
 if probe is None:
     sys.exit("error: /probe missing from the replayed tree")
-if bytes(probe["content"]) != zcfs.HOST_PATTERN:
+if bytes(probe["content"]) != zcfs.PERSIST_PATTERN:
     sys.exit("error: /probe content is %r, not %r"
-             % (bytes(probe["content"]), zcfs.HOST_PATTERN))
+             % (bytes(probe["content"]), zcfs.PERSIST_PATTERN))
 print("file: /probe ok", file=sys.stderr)
 
 # The guest created and wrote /written. Only the host can confirm this: the

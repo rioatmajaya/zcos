@@ -39,6 +39,10 @@ DATA_CONTENT_OFFSET = 6
 
 # The pattern the host plants in /probe for the guest to verify.
 HOST_PATTERN = b"ZCHOST1\n"
+# The pattern the shell writes to /data/probe through the VFS, overwriting the
+# host's copy. The host replays it back, proving the guest's write is durable
+# and that both implementations agree on the DATA record it produced.
+PERSIST_PATTERN = b"ZCPERSIST1"
 
 
 def crc32(data):

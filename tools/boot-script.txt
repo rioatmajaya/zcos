@@ -3,4 +3,7 @@ echo hello os
 cat hello.txt
 cat zc.manifest
 stat hello.txt
+write /data/probe ZCPERSIST1
+stat /data/probe
+persist
 exit

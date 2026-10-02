@@ -17,10 +17,34 @@ Roadmap phase **F6 — driver userspace** closed the runtime-authority story:
 what a domain may touch is now granted by data, delegated at runtime, and
 claimed explicitly. Phase **F7 — VFS & storage** has started: a write path
 (F7a), a write-back cache (F7b), a read-only FAT32 mount (F7c), a read-only
-ext2 mount (F7c-2), a read-only VFS core (F7d), and a ZC-native log-structured
-filesystem (F7e).
+ext2 mount (F7c-2), a read-only VFS core (F7d), a ZC-native log-structured
+filesystem (F7e), and the writable volume mounted into the kernel VFS (F7e-2).
 
 ### Added
+
+- **Writable zcfs in the kernel VFS** (F7e-2): the volume the block domain
+  serves is mounted at `/data`, so `SYS_WRITE`, `SYS_CREATE`, `SYS_MOUNT`, and
+  `SYS_UMOUNT` reach the disk through the ordinary VFS path. The kernel holds
+  only a proxy: it shares one mapped exchange page with the domain and turns
+  each `FileSystem` call into a request on the new `IPC_FS` channel, taking the
+  reply on `IPC_FS_REPLY` (the IPC table grows from two channels to four).
+  Because a trait method cannot block, the proxy returns `WouldBlock` and the
+  syscall handler blocks on its behalf, replaying the syscall when the reply
+  arrives. A per-task replay log records the calls a syscall has already made,
+  so a replay answers them from the log instead of re-sending and consuming the
+  reply that is still in flight for the call that blocked. The domain's server
+  always publishes its reply length, so a reply without a payload reports zero
+  instead of echoing the request's. The shell gains `write`, `persist`,
+  `mount`, and `umount`; `persist` writes `/data/probe`, unmounts, remounts (a
+  cold-cache replay from the device), reads it back, and logs
+  `vfs: persistence ok`. `exit` tells the domain to flush and stop, so the boot
+  ends with the volume clean.
+- **`SYS_WRITE`, `SYS_MOUNT`, `SYS_UMOUNT`, `SYS_CREATE`** (F7e-2): syscalls 18
+  and 20–22. `MountTable::create` splits the path at its last separator,
+  resolves the parent, and asks the filesystem to create the entry;
+  `FileSystem::create` defaults to `NotSupported`, so the read-only mounts keep
+  refusing writes. `VfsError::WouldBlock` carries the block-and-retry contract
+  through the trait, and `Stat::read_from` inverts the existing encoder.
 
 - **ZC-native log-structured filesystem** (F7e): `zc-kernel::zcfs` defines the
   format the writable volume uses. Two CRC-32 superblock copies sit at relative
@@ -38,7 +62,8 @@ filesystem (F7e).
   `/written`, then discards every cached sector and remounts from the disk to
   read its own file back. `tools/zcfs.py` is an independent host implementation
   of the format, and `tools/check-disk-zcfs.sh` replays the guest's log to
-  confirm both `/probe` and `/written`, so neither side validates its own work
+  confirm `/written` (and, once F7e-2's shell has rewritten it, `/probe`), so
+  neither side validates its own work
   (see [ADR 0008](docs/adr/0008-zc-native-log-structured-fs.md)).
 - **Read-only VFS core** (F7d): `zc-kernel::vfs` defines an object-safe
   `FileSystem` trait whose methods all take `&self`, so one mount is shared by

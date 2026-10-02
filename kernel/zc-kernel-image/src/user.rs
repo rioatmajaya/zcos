@@ -18,7 +18,7 @@ use zc_kernel::ramfs::RamFs;
 use zc_kernel::syscall::{Action, dispatch};
 use zc_kernel::task::{EXIT_TO_KERNEL, IrqFrame, SyscallRegs, TaskTable};
 use zc_kernel::trap::has_error_code;
-use zc_kernel::vfs::{DescriptorTable, MountTable};
+use zc_kernel::vfs::{DescriptorTable, MountTable, VfsError};
 use zc_kernel::vm::VirtAddr;
 
 /// Tasks the setup brings up, in task-index order.
@@ -119,11 +119,12 @@ static mut FB_INFO: zc_abi::FramebufferInfo = zc_abi::FramebufferInfo::UNAVAILAB
 
 /// IPC queues, one per channel.
 ///
-/// Channel 0 is the legacy data stream; channel 1 is device discovery. The
+/// Channel 0 is the legacy data stream; channel 1 is device discovery;
+/// channels 2 and 3 are the filesystem bridge (requests and replies). The
 /// queues are fully separate, so a manager publishing a BAR base can never
 /// disturb the producer/consumer word sequence no matter the interleaving.
 static mut ENDPOINTS: [Endpoint<4>; zc_abi::IPC_CHANNELS] =
-    [Endpoint::new(), Endpoint::new()];
+    [const { Endpoint::new() }; zc_abi::IPC_CHANNELS];
 
 /// Borrows one IPC channel by raw syscall argument.
 ///
@@ -141,6 +142,32 @@ unsafe fn endpoint_for(channel: u64) -> Option<&'static mut Endpoint<4>> {
     }
     // SAFETY: as documented; the index was range-checked above.
     unsafe { Some(&mut (*addr_of_mut!(ENDPOINTS))[index]) }
+}
+
+/// Queues one word on the filesystem request channel.
+///
+/// Returns whether the word was queued; a full queue means the caller should
+/// block and retry. The borrow of the endpoint ends with this call, so no
+/// aliasing outlives it, and every caller runs with interrupts masked.
+pub(crate) fn fs_send(word: u64) -> bool {
+    // SAFETY: channel 2 is always in range; see `endpoint_for`.
+    let Some(endpoint) = (unsafe { endpoint_for(zc_abi::IPC_FS as u64) }) else {
+        return false;
+    };
+    match zc_abi::Message::from_words(&[word]) {
+        Some(message) => endpoint.send(message).is_ok(),
+        None => false,
+    }
+}
+
+/// Takes one reply word from the filesystem reply channel, if any.
+///
+/// Non-blocking by design: it is called from the timer tick, which must never
+/// wait on a device.
+pub(crate) fn fs_recv_reply() -> Option<u64> {
+    // SAFETY: channel 3 is always in range; see `endpoint_for`.
+    let endpoint = unsafe { endpoint_for(zc_abi::IPC_FS_REPLY as u64) }?;
+    endpoint.recv().ok().map(|message| message.words[0])
 }
 
 /// Minimum timer ticks observed during the tasks to accept the demo.
@@ -215,6 +242,9 @@ fn publish_next_cr3(tasks: &TaskTable<8>) {
     // SAFETY: owned here; traps cannot nest while a handler runs.
     unsafe { addr_of_mut!(NEXT_CR3).write(cr3) };
     crate::gdt::switch_task_ports(tasks.current());
+    // The filesystem proxy runs inside a syscall handler, so it needs to know
+    // which task it is serving before any of its methods arm a request.
+    crate::zcfs_proxy::set_caller(tasks.current() as u32);
 }
 
 /// Loads the published page-table root before the stubs resume a task.
@@ -506,6 +536,10 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
     // SAFETY: the task table and endpoints are owned here; traps cannot
     // nest because every gate runs with interrupts masked.
     let tasks = unsafe { &mut *addr_of_mut!(TASKS) };
+    // A task that was blocked on a filesystem reply is replaying its syscall;
+    // any other entry is a fresh one. The bridge needs to tell them apart so a
+    // replay is answered from its log instead of re-sending earlier calls.
+    crate::zcfs_proxy::begin_syscall(tasks.current() as u32);
     match dispatch(regs.number()) {
         Ok(Action::TaskExit) => {
             // Leaving the domain must give up its interrupt sources and its
@@ -648,6 +682,12 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             let mounts = unsafe { &*core::ptr::addr_of!(MOUNTS) };
             let resolved = match mounts.resolve(path) {
                 Ok(resolved) => resolved,
+                Err(VfsError::WouldBlock) => {
+                    // The filesystem is served by another task; wait for its
+                    // reply and replay the whole syscall.
+                    tasks.unblock_all();
+                    return block_with_retry(tasks, regs, frame, 0);
+                }
                 Err(_) => {
                     regs.set_result(u64::MAX);
                     return 0;
@@ -686,6 +726,10 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             let mounts = unsafe { &*core::ptr::addr_of!(MOUNTS) };
             let resolved = match mounts.resolve(path) {
                 Ok(resolved) => resolved,
+                Err(VfsError::WouldBlock) => {
+                    tasks.unblock_all();
+                    return block_with_retry(tasks, regs, frame, 0);
+                }
                 Err(_) => {
                     regs.set_result(u64::MAX);
                     return 0;
@@ -693,6 +737,10 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             };
             let stat = match resolved.fs.stat(resolved.node) {
                 Ok(stat) => stat,
+                Err(VfsError::WouldBlock) => {
+                    tasks.unblock_all();
+                    return block_with_retry(tasks, regs, frame, 0);
+                }
                 Err(_) => {
                     regs.set_result(u64::MAX);
                     return 0;
@@ -724,6 +772,149 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             match table.read(fd, out) {
                 Ok(count) => {
                     regs.set_result(count as u64);
+                    0
+                }
+                Err(VfsError::WouldBlock) => {
+                    tasks.unblock_all();
+                    block_with_retry(tasks, regs, frame, 0)
+                }
+                Err(_) => {
+                    regs.set_result(u64::MAX);
+                    0
+                }
+            }
+        }
+        Ok(Action::Write) => {
+            let me = tasks.current();
+            let fd = regs.rdi as u32;
+            let data = match validate_user_slice(tasks, regs.rsi, regs.rdx) {
+                Some(data) => data,
+                None => {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+            };
+            // SAFETY: as in `Open`.
+            let table = unsafe { &mut (*core::ptr::addr_of_mut!(FDS))[me] };
+            match table.write(fd, data) {
+                Ok(count) => {
+                    regs.set_result(count as u64);
+                    0
+                }
+                Err(VfsError::WouldBlock) => {
+                    tasks.unblock_all();
+                    block_with_retry(tasks, regs, frame, 0)
+                }
+                Err(_) => {
+                    regs.set_result(u64::MAX);
+                    0
+                }
+            }
+        }
+        Ok(Action::Create) => {
+            let path = match validate_user_slice(tasks, regs.rdi, regs.rsi) {
+                Some(path) => path,
+                None => {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+            };
+            // SAFETY: mounted once during setup before any task runs.
+            let mounts = unsafe { &*core::ptr::addr_of!(MOUNTS) };
+            match mounts.create(path, crate::zcfs_proxy::CREATE_MODE) {
+                Ok(_) => {
+                    regs.set_result(0);
+                    0
+                }
+                Err(VfsError::WouldBlock) => {
+                    tasks.unblock_all();
+                    block_with_retry(tasks, regs, frame, 0)
+                }
+                Err(_) => {
+                    regs.set_result(u64::MAX);
+                    0
+                }
+            }
+        }
+        Ok(Action::Mount) => {
+            let path = match validate_user_slice(tasks, regs.rdi, regs.rsi) {
+                Some(path) => path,
+                None => {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+            };
+            // Only zcfs, and only at `/data`: the mount table stores a
+            // `'static` mount point, so a user-supplied path cannot be used.
+            if path != b"/data" || regs.rdx != zc_abi::FS_ID_ZCFS {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            match crate::zcfs_proxy::mount() {
+                Ok(()) => {}
+                Err(VfsError::WouldBlock) => {
+                    tasks.unblock_all();
+                    return block_with_retry(tasks, regs, frame, 0);
+                }
+                Err(_) => {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+            }
+            // SAFETY: mounted once during setup; this task owns the table.
+            let mounts = unsafe { &mut *core::ptr::addr_of_mut!(MOUNTS) };
+            match mounts.mount(b"/data", &crate::zcfs_proxy::PROXY) {
+                Ok(()) => {
+                    regs.set_result(0);
+                    0
+                }
+                Err(_) => {
+                    regs.set_result(u64::MAX);
+                    0
+                }
+            }
+        }
+        Ok(Action::Umount) => {
+            let path = match validate_user_slice(tasks, regs.rdi, regs.rsi) {
+                Some(path) => path,
+                None => {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+            };
+            if path != b"/data" {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            // Flush, then drop the domain's table, so a later mount is a
+            // genuine replay from the disk rather than a RAM echo.
+            match crate::zcfs_proxy::flush() {
+                Ok(()) => {}
+                Err(VfsError::WouldBlock) => {
+                    tasks.unblock_all();
+                    return block_with_retry(tasks, regs, frame, 0);
+                }
+                Err(_) => {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+            }
+            match crate::zcfs_proxy::unmount() {
+                Ok(()) => {}
+                Err(VfsError::WouldBlock) => {
+                    tasks.unblock_all();
+                    return block_with_retry(tasks, regs, frame, 0);
+                }
+                Err(_) => {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+            }
+            // SAFETY: as in `Mount`.
+            let mounts = unsafe { &mut *core::ptr::addr_of_mut!(MOUNTS) };
+            match mounts.unmount(b"/data") {
+                Ok(()) => {
+                    regs.set_result(0);
                     0
                 }
                 Err(_) => {
@@ -1095,6 +1286,10 @@ pub unsafe extern "C" fn sched_tick(regs: *mut SyscallRegs, frame: *mut IrqFrame
     // driver domain, which owns the 8042 and the shared ring.
     crate::serial::poll_input();
     drain_domain_input();
+    // A filesystem reply may have arrived while its caller slept. Routing it
+    // here means the next retry finds it even if no other wakeup fired; the
+    // reply's own `SendTo` already made the caller runnable.
+    crate::zcfs_proxy::poll();
     if crate::serial::input_available() {
         tasks.unblock_all();
     }
@@ -1473,6 +1668,21 @@ pub fn enter(
         }
     }
 
+    // Mount the zcfs proxy at `/data`. No request is sent here: the proxy
+    // only talks to the block domain when a task opens something, and the
+    // exchange page it uses is published with the block domain's DMA area
+    // below, still before any task runs.
+    // SAFETY: `MOUNTS` is written once here, before any task runs.
+    unsafe {
+        if (*core::ptr::addr_of_mut!(MOUNTS))
+            .mount(b"/data", &crate::zcfs_proxy::PROXY)
+            .is_err()
+        {
+            crate::fail("zcfs mount failed");
+        }
+    }
+    let _ = crate::serial::print(format_args!("vfs: mounted zcfs at /data\n"));
+
     // One stack frame per task; each maps into its owner's tables below.
     let mut stack_phys = [0u64; TASK_COUNT];
     {
@@ -1585,6 +1795,7 @@ pub fn enter(
             }
             if page_present(pts[i], zc_abi::QUEUE_VIRT) != owns_blk
                 || page_present(pts[i], zc_abi::INFO_VIRT) != owns_blk
+                || page_present(pts[i], zc_abi::FS_EXCHANGE_VIRT) != owns_blk
             {
                 crate::fail("driver area leaked into another task");
             }
@@ -1874,7 +2085,7 @@ fn find_initramfs_file(boot_info: *const BootInfo, name: &str) -> Option<&'stati
 /// Segments outside the image window, in the stack zone, or an entry
 /// point outside the loaded segments stops the boot.
 fn map_elf(
-    _name: &str,
+    name: &str,
     bytes: &[u8],
     alloc: &mut FrameAllocator<'_>,
     pt_phys: u64,
@@ -1894,6 +2105,12 @@ fn map_elf(
         };
         if vaddr < USER_CODE_VIRT || end > USER_WINDOW_END {
             crate::fail("user segment outside mapping window");
+        }
+        // The block domain's DMA queue is mapped just above its image, so its
+        // `.bss` must stop short of it. The window check above would allow an
+        // image to grow over the queue and corrupt the ring silently.
+        if name == BLK_NAME && end > zc_abi::QUEUE_VIRT {
+            crate::fail("block domain image reaches its DMA queue");
         }
         if vaddr < STACK_ZONE_END && STACK_ZONE_START < end {
             crate::fail("user segment overlaps stacks");
@@ -2108,6 +2325,10 @@ fn publish_driver_area(alloc: &mut FrameAllocator<'_>, pt_phys: u64) {
         crate::fail("driver setup found no descriptor frame");
     };
     let info_phys = info.start_address();
+    let Some(exchange) = alloc.allocate() else {
+        crate::fail("driver setup found no exchange frame");
+    };
+    let exchange_phys = exchange.start_address();
     // SAFETY: fresh frames inside the identity map; the user mappings go
     // in before anything is written through them. The descriptor is
     // written through the physical address because the new mappings only
@@ -2132,7 +2353,19 @@ fn publish_driver_area(alloc: &mut FrameAllocator<'_>, pt_phys: u64) {
         base
             .add((INFO_QUEUE0 + 16) / 8)
             .write_volatile(queue + 2 * PAGE_SIZE);
+
+        // The filesystem exchange page: one frame the kernel and the block
+        // domain both reach, so a request or reply never has to fit in four
+        // IPC words. It sits above the descriptor page and below the next
+        // task image, and the leak audit below checks it maps nowhere else.
+        core::slice::from_raw_parts_mut(exchange_phys as *mut u8, PAGE_SIZE as usize).fill(0);
+        set_table_entry(
+            pt_phys,
+            page_index(zc_abi::FS_EXCHANGE_VIRT),
+            exchange_phys | USER_PAGE_FLAGS,
+        );
     }
+    crate::zcfs_proxy::set_exchange(exchange_phys);
     let _ = crate::serial::print(format_args!(
         "driver: queue at {:#x}, info at {:#x}\n",
         QUEUE_VIRT, INFO_VIRT

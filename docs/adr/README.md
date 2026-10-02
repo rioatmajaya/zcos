@@ -15,6 +15,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0006](0006-userspace-drivers-and-device-manager.md) | Userspace drivers with a device manager | Accepted |
 | [0007](0007-vfs-core.md) | Read-only VFS with a trait-based filesystem | Accepted |
 | [0008](0008-zc-native-log-structured-fs.md) | ZC-native log-structured filesystem | Accepted |
+| [0009](0009-filesystem-rpc-replay.md) | Filesystem RPC with block-and-retry replay | Accepted |
 
 ## Adding a decision
 
