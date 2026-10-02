@@ -11,13 +11,14 @@ use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 
 use zc_abi::BootInfo;
 use zc_kernel::capability::{CapabilityTable, Rights};
-use zc_kernel::fs::{FdTable, Fs};
 use zc_kernel::gdt::{USER_CS, USER_RFLAGS, USER_SS};
 use zc_kernel::ipc::Endpoint;
 use zc_kernel::memory::{FrameAllocator, PAGE_SIZE};
+use zc_kernel::ramfs::RamFs;
 use zc_kernel::syscall::{Action, dispatch};
 use zc_kernel::task::{EXIT_TO_KERNEL, IrqFrame, SyscallRegs, TaskTable};
 use zc_kernel::trap::has_error_code;
+use zc_kernel::vfs::{DescriptorTable, MountTable};
 use zc_kernel::vm::VirtAddr;
 
 /// Tasks the setup brings up, in task-index order.
@@ -261,10 +262,13 @@ pub extern "C" fn irq_post(source: usize) {
 static mut TASKS: TaskTable<8> = TaskTable::new();
 
 /// Mounted initramfs filesystem, shared read-only by all tasks.
-static mut FS: Option<Fs<'static>> = None;
+static mut RAMFS: Option<RamFs<'static>> = None;
+
+/// Mount table: the root of the VFS namespace.
+static mut MOUNTS: MountTable = MountTable::new();
 
 /// Per-task descriptor tables, indexed by task index.
-static mut FDS: [FdTable<'static>; 8] = [FdTable::new(); 8];
+static mut FDS: [DescriptorTable; 8] = [DescriptorTable::new(); 8];
 
 /// Per-task capability tables, indexed by task index.
 ///
@@ -438,7 +442,7 @@ pub unsafe extern "C" fn user_exception_entry(
         // The restarted domain must not inherit open files across the fault.
         // SAFETY: owned here; the faulting task cannot touch its table while
         // the handler runs.
-        unsafe { (*addr_of_mut!(FDS))[me] = FdTable::new() };
+        unsafe { (*addr_of_mut!(FDS))[me] = DescriptorTable::new() };
         let init_frame = IrqFrame {
             rip: entry,
             cs: u64::from(USER_CS),
@@ -641,12 +645,9 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 }
             };
             // SAFETY: mounted once during setup before any task runs.
-            let fs = unsafe { &*core::ptr::addr_of!(FS) };
-            let Some(fs) = fs else {
-                crate::fail("fs not mounted")
-            };
-            let data = match fs.open(path) {
-                Ok(data) => data,
+            let mounts = unsafe { &*core::ptr::addr_of!(MOUNTS) };
+            let resolved = match mounts.resolve(path) {
+                Ok(resolved) => resolved,
                 Err(_) => {
                     regs.set_result(u64::MAX);
                     return 0;
@@ -654,12 +655,55 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             };
             // SAFETY: task indexes stay below the table length.
             let table = unsafe { &mut (*core::ptr::addr_of_mut!(FDS))[me] };
-            match table.open(data) {
+            match table.open(resolved.fs, resolved.node) {
                 Ok(fd) => {
                     regs.set_result(u64::from(fd));
                     0
                 }
                 Err(_) => {
+                    regs.set_result(u64::MAX);
+                    0
+                }
+            }
+        }
+        Ok(Action::Stat) => {
+            let path = match validate_user_slice(tasks, regs.rdi, regs.rsi) {
+                Some(path) => path,
+                None => {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+            };
+            // The ABI fixes the output size, so the length needs no argument.
+            let out = match validate_user_slice_mut(tasks, regs.rdx, zc_abi::STAT_LEN as u64) {
+                Some(out) => out,
+                None => {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+            };
+            // SAFETY: as in `Open`.
+            let mounts = unsafe { &*core::ptr::addr_of!(MOUNTS) };
+            let resolved = match mounts.resolve(path) {
+                Ok(resolved) => resolved,
+                Err(_) => {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+            };
+            let stat = match resolved.fs.stat(resolved.node) {
+                Ok(stat) => stat,
+                Err(_) => {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+            };
+            match stat.write_into(out) {
+                Some(()) => {
+                    regs.set_result(0);
+                    0
+                }
+                None => {
                     regs.set_result(u64::MAX);
                     0
                 }
@@ -1400,9 +1444,10 @@ pub fn enter(
         addr_of_mut!(INPUT_RING_PHYS).write(ring_phys);
     }
 
-    // Mount the initramfs for file syscalls before any task can open.
+    // Mount the initramfs as the VFS root before any task can open.
     // SAFETY: the loader wrote the archive into the identity map; the
-    // pages outlive the boot.
+    // pages outlive the boot, and `RAMFS` is written once here, before any
+    // task runs, so the reference taken below stays valid for the boot.
     unsafe {
         let info = &*boot_info;
         if info.initramfs_len != 0 && info.initramfs_start != 0 {
@@ -1410,10 +1455,21 @@ pub fn enter(
                 info.initramfs_start as *const u8,
                 info.initramfs_len as usize,
             );
-            match zc_kernel::fs::Fs::mount(bytes) {
-                Ok(fs) => core::ptr::addr_of_mut!(FS).write(Some(fs)),
+            match RamFs::mount(bytes) {
+                Ok(fs) => core::ptr::addr_of_mut!(RAMFS).write(Some(fs)),
                 Err(_) => crate::fail("initramfs corrupt"),
             }
+            let stored: &'static Option<RamFs<'static>> = &*core::ptr::addr_of!(RAMFS);
+            let Some(fs) = stored else {
+                crate::fail("ramfs not mounted")
+            };
+            if (*core::ptr::addr_of_mut!(MOUNTS))
+                .mount(b"/", fs)
+                .is_err()
+            {
+                crate::fail("ramfs mount failed");
+            }
+            let _ = crate::serial::print(format_args!("vfs: mounted ramfs at /\n"));
         }
     }
 

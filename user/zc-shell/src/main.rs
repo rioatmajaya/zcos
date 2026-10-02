@@ -1,15 +1,15 @@
 //! Shell task: an interactive command line over the serial port.
 //!
 //! Reads keystrokes with blocking serial reads, edits a single line with
-//! backspace support, and runs `help`, `echo`, `cat`, and `exit`. Output
-//! goes through the log syscall, so the transcript appears in the kernel
-//! serial log.
+//! backspace support, and runs `help`, `echo`, `cat`, `stat`, and `exit`.
+//! Output goes through the log syscall, so the transcript appears in the
+//! kernel serial log.
 
 #![no_std]
 #![no_main]
 #![allow(unsafe_code)]
 
-use zc_user::{close, log, open, read, serial_read, task_exit};
+use zc_user::{KIND_DIR, Stat, close, log, open, read, serial_read, stat, task_exit};
 
 /// Longest command line accepted.
 const LINE_CAP: usize = 128;
@@ -109,6 +109,25 @@ fn split<'a>(line: &'a [u8], mut visit: impl FnMut(&'a [u8])) {
     }
 }
 
+/// Appends an unsigned decimal number to the output staging.
+fn out_u64(mut value: u64) {
+    let mut digits = [0u8; 20];
+    let mut len = 0;
+    loop {
+        digits[len] = b'0' + (value % 10) as u8;
+        value /= 10;
+        len += 1;
+        if value == 0 {
+            break;
+        }
+    }
+    let mut ordered = [0u8; 20];
+    for index in 0..len {
+        ordered[index] = digits[len - 1 - index];
+    }
+    out_bytes(&ordered[..len]);
+}
+
 /// Logs a raw byte slice as text.
 fn print_bytes(bytes: &[u8]) {
     let mut chunk = [0u8; 64];
@@ -136,7 +155,7 @@ fn run(line: &[u8]) -> bool {
     }
     match argv[0] {
         b"help" => {
-            log("Commands: help echo cat exit\n");
+            log("Commands: help echo cat stat exit\n");
         }
         b"echo" => {
             for index in 1..count {
@@ -169,6 +188,32 @@ fn run(line: &[u8]) -> bool {
             }
             close(fd);
             log("\n");
+        }
+        b"stat" => {
+            if count < 2 {
+                log("usage: stat <file>\n");
+                return false;
+            }
+            let path = core::str::from_utf8(argv[1]).unwrap_or("");
+            let mut info = Stat {
+                kind: 0,
+                mode: 0,
+                size: 0,
+                node: 0,
+            };
+            if !stat(path, &mut info) {
+                log("stat: no such file\n");
+                return false;
+            }
+            out_bytes(argv[1]);
+            out_bytes(if info.kind == KIND_DIR {
+                b": dir, "
+            } else {
+                b": file, "
+            });
+            out_u64(info.size);
+            out_bytes(b" bytes\n");
+            out_flush();
         }
         b"exit" => {
             log("shell exiting\n");

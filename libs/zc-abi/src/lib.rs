@@ -15,6 +15,7 @@ pub mod driver;
 pub mod fb;
 pub mod ipc;
 pub mod syscall;
+pub mod vfs;
 
 pub use driver::{
     INFO_LEN, INFO_QUEUE0, INFO_QUEUE1, INFO_QUEUE2, INFO_VIRT, INPUT_RING_VIRT, IRQ_KEYBOARD,
@@ -25,8 +26,9 @@ pub use ipc::{IPC_CHANNELS, IPC_DATA, IPC_DISCOVERY, MESSAGE_WORDS, Message};
 pub use syscall::{
     SYS_CAP_DELEGATE, SYS_CLOSE, SYS_FB_INFO, SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT,
     SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ, SYS_RECV, SYS_RECV_FROM,
-    SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_TASK_EXIT, SYS_YIELD, SyscallError,
+    SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_STAT, SYS_TASK_EXIT, SYS_YIELD, SyscallError,
 };
+pub use vfs::{KIND_DIR, KIND_FILE, STAT_LEN, Stat};
 
 /// Current version of the loader-to-kernel boot protocol.
 pub const BOOT_PROTOCOL_VERSION: u32 = 2;

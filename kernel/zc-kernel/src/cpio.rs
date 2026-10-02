@@ -54,8 +54,12 @@ pub enum CpioError {
 /// Calls `visit` for every entry before `TRAILER!!!`.
 ///
 /// Returns the number of entries visited. Malformed data stops the walk
-/// with an error; visiting `TRAILER!!!` itself is never offered.
-pub fn walk(mut bytes: &[u8], mut visit: impl FnMut(Entry<'_>) -> bool) -> Result<usize, CpioError> {
+/// with an error; visiting `TRAILER!!!` itself is never offered. The entry
+/// borrows from `bytes`, so a visitor may keep the payload it was handed.
+pub fn walk<'a>(
+    mut bytes: &'a [u8],
+    mut visit: impl FnMut(Entry<'a>) -> bool,
+) -> Result<usize, CpioError> {
     let mut count = 0;
     loop {
         if bytes.len() < HEADER_SIZE {

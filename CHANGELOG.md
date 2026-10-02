@@ -16,12 +16,24 @@ maintained.
 Roadmap phase **F6 — driver userspace** closed the runtime-authority story:
 what a domain may touch is now granted by data, delegated at runtime, and
 claimed explicitly. Phase **F7 — VFS & storage** has started: a write path
-(F7a), a write-back cache (F7b), a read-only FAT32 mount (F7c), and a
-read-only ext2 mount (F7c-2).
+(F7a), a write-back cache (F7b), a read-only FAT32 mount (F7c), a read-only
+ext2 mount (F7c-2), and a read-only VFS core (F7d).
 
 ### Added
 
-- **Read-only ext2** (F7c-2): `zc-kernel::ext2` mounts a real ext2 volume —
+- **Read-only VFS core** (F7d): `zc-kernel::vfs` defines an object-safe
+  `FileSystem` trait whose methods all take `&self`, so one mount is shared by
+  every task and the read offset lives in the descriptor. A `MountTable`
+  resolves paths against the longest matching mount prefix, compared at
+  component granularity, so `/data` never captures `/database`; a
+  `DescriptorTable` tracks each task's open files above a reserved descriptor
+  base. `zc-kernel::ramfs` implements the trait over the cpio initramfs and the
+  kernel mounts it at `/`, replacing the flat `zc-kernel::fs`. The shell gains
+  a `stat` command, and the boot log records `vfs: mounted ramfs at /`.
+- **`Stat` and `SYS_STAT`** (F7d): file metadata crosses the syscall boundary
+  as a fixed 24-byte, little-endian record with a hand-written encoder, so the
+  layout is an ABI and needs no pointer casts. `SYS_STAT` is number 19; 18
+  stays reserved for the `SYS_WRITE` that arrives with F7e.- **Read-only ext2** (F7c-2): `zc-kernel::ext2` mounts a real ext2 volume —
   superblock validation, the group descriptor, inode locations, directory
   entries with `rec_len` walking, and direct/single/double/triple indirect
   block maps with sparse holes, all host-tested. The block domain mounts the
@@ -79,6 +91,12 @@ read-only ext2 mount (F7c-2).
 
 ### Changed
 
+- File syscalls now go through the VFS instead of the flat initramfs module:
+  `zc-kernel::fs` is replaced by `zc-kernel::ramfs` (a `FileSystem`) plus
+  `zc-kernel::vfs` (mount table and descriptors). `open` resolves against the
+  mount table, `stat` is available, and the shell's `help` line lists it.
+  Relative paths still resolve from the root, so existing scripts are
+  unaffected.
 - `build/disk.img` is now a 128 MiB MBR disk carrying two real filesystems:
   a FAT32 volume in the first partition (LBA 2048) and an ext2 volume in the
   second (LBA 83968), replacing the 1 MiB marker disk. The sector-zero

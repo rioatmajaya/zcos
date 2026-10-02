@@ -11,9 +11,10 @@
 use core::arch::asm;
 
 pub use zc_abi::{
-    SYS_CAP_DELEGATE, SYS_CLOSE, SYS_FB_INFO, SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT,
-    SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ, SYS_RECV, SYS_RECV_FROM,
-    SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_TASK_EXIT, SYS_YIELD, SyscallError,
+    KIND_DIR, KIND_FILE, SYS_CAP_DELEGATE, SYS_CLOSE, SYS_FB_INFO, SYS_IRQ_CLAIM, SYS_IRQ_TEST,
+    SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ, SYS_RECV,
+    SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_STAT, SYS_TASK_EXIT, SYS_YIELD,
+    Stat, SyscallError,
 };
 
 /// Issues a syscall with no arguments.
@@ -134,6 +135,17 @@ pub fn read(fd: u64, buffer: &mut [u8]) -> u64 {
         buffer.as_mut_ptr() as u64,
         buffer.len() as u64,
     )
+}
+
+/// Reads metadata for `path` into `stat`, returning `true` on success.
+#[inline(always)]
+pub fn stat(path: &str, stat: &mut Stat) -> bool {
+    syscall3(
+        SYS_STAT,
+        path.as_ptr() as u64,
+        path.len() as u64,
+        core::ptr::from_mut(stat) as u64,
+    ) == 0
 }
 
 /// Reads one serial byte, blocking until a key arrives.

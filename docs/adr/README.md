@@ -13,6 +13,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0004](0004-framebuffer-first-no-3d.md) | Framebuffer-first rendering, no 3D in v1 | Accepted |
 | [0005](0005-single-tss-port-bitmap.md) | One TSS, per-task port bitmap projected on switch | Accepted |
 | [0006](0006-userspace-drivers-and-device-manager.md) | Userspace drivers with a device manager | Accepted |
+| [0007](0007-vfs-core.md) | Read-only VFS with a trait-based filesystem | Accepted |
 
 ## Adding a decision
 

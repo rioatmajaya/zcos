@@ -63,10 +63,12 @@ jobs:
         grep -q "task 1: consumer received 2000" build/boot.log
         grep -q "task 1: hello verified" build/boot.log
         grep -q "task 0: manifest ok" build/boot.log
-        grep -q "task 2: Commands: help echo cat exit" build/boot.log
+        grep -q "task 2: Commands: help echo cat stat exit" build/boot.log
         grep -q "task 2: hello os" build/boot.log
         grep -q "task 2: hello from the ZC OS initramfs" build/boot.log
+        grep -q "task 2: hello.txt: file, 31 bytes" build/boot.log
         grep -q "task 2: shell exiting" build/boot.log
+        grep -q "vfs: mounted ramfs at /" build/boot.log
         grep -q "pci: 7 functions" build/boot.log
         grep -q "pci: blk device 00:02.0 claimed by driver task" build/boot.log
         grep -q "task 4: blk: disk magic ok" build/boot.log

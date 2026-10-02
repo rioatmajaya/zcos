@@ -41,7 +41,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F4** | Thread + IPC | ✅ done | `task 0: producer sent 2000`, capability gates |
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 5 grants`, `task 6: devmgr: blk published` |
-| **F7** | VFS & penyimpanan | 🔨 F7a–F7c, F7c-2 done | `blk: write ok`; `blk: cache durable`; `blk: fs hello ok`; `blk: ext2 hello ok` |
+| **F7** | VFS & penyimpanan | 🔨 F7a–F7d, F7c-2 done | `blk: write ok`; `blk: cache durable`; `blk: fs hello ok`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /` |
 | **F8** | Desktop | ⬜ planned | — |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
@@ -292,8 +292,15 @@ VFS → write path → journaling → `fsck`**.
       against an in-memory image. The driver mounts the ext2 partition through
       the same block cache and reads `EXT2.TXT`; a host-side check reads the
       same file with `debugfs`. Blocks are 1024 bytes only.
-- [ ] F7d: VFS core — mount table, node/inode abstraction, path resolution,
-      descriptor tables, `open`/`read`/`write`/`close`/`stat`.
+- [x] F7d: VFS core — a mount table, an object-safe `FileSystem` trait, path
+      resolution with longest-prefix mount matching, and per-task descriptor
+      tables with `open`/`read`/`close`/`stat`. The initramfs becomes
+      `zc-kernel::ramfs`, a read-only `FileSystem` over the cpio archive, and
+      the kernel mounts it at `/`; `stat` travels as a fixed-layout `Stat`
+      record over `SYS_STAT`. The shell gains a `stat` command, and the boot
+      log shows the mount and the file metadata. `write` exists in the trait
+      but the read-only default returns `NotSupported`; the writable path
+      lands in F7e.
 - [ ] F7e: writable rootfs on a ZC data partition (ext2 or a documented
       ZC-native log-structured filesystem).
 - [ ] F7f: `initd` — the manifest's `init=/sbin/initd` becomes real: a
@@ -316,6 +323,9 @@ VFS → write path → journaling → `fsck`**.
 - F7c-2: `blk: ext2 mbr ok`, `blk: ext2 mount ok`, `blk: ext2 root ok`,
   `blk: ext2 hello ok` in the boot log, and `tools/check-disk-ext2.sh` reads
   `EXT2.TXT` with `debugfs`.
+- F7d: `vfs: mounted ramfs at /` in the boot log, the shell's `stat hello.txt`
+  prints `hello.txt: file, 31 bytes`, and the existing `cat` commands still
+  resolve through the VFS.
 - Boot log contains `vfs: mounted` with the filesystem name and mount point.
 - A CI boot writes a known pattern to `/data/probe`, unmounts, remounts, and
   reads it back with a matching checksum: `vfs: persistence ok`.

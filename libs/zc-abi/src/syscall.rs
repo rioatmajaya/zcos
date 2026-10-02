@@ -55,6 +55,11 @@ pub const SYS_SEND_TO: u64 = 16;
 /// Receives a word from an explicit channel: arg is the channel; blocks
 /// while that channel's queue is empty.
 pub const SYS_RECV_FROM: u64 = 17;
+// 18 is reserved for SYS_WRITE, which arrives with the writable filesystem in
+// F7e. Numbers are never reused, so the gap stays a gap.
+/// Reads file metadata into a caller buffer: args are path pointer, path
+/// length, and a [`crate::Stat`] output pointer; returns 0 or `u64::MAX`.
+pub const SYS_STAT: u64 = 19;
 
 /// Error codes returned by failed syscalls.
 ///
@@ -128,6 +133,7 @@ mod tests {
         assert_eq!(SYS_PORT_CLAIM, 15);
         assert_eq!(SYS_SEND_TO, 16);
         assert_eq!(SYS_RECV_FROM, 17);
+        assert_eq!(SYS_STAT, 19);
     }
 
     #[test]

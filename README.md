@@ -11,9 +11,11 @@ the full path from firmware to restartable userspace drivers works end to end,
 and the block domain writes, flushes, and reads a sector back (F7a) behind a
 write-back cache with explicit eviction and flush ordering (F7b), then mounts
 a read-only FAT32 partition (F7c) and a read-only ext2 partition (F7c-2),
-reading a file from each through that cache. See
-[the roadmap](docs/roadmap.md) for the phase map and pass criteria, and
-[CHANGELOG.md](CHANGELOG.md) for what changed.
+reading a file from each through that cache. A read-only VFS core (F7d) now
+mounts the initramfs at `/` behind a `FileSystem` trait, resolves paths through
+a mount table, and serves `open`/`read`/`close`/`stat` from per-task
+descriptors. See [the roadmap](docs/roadmap.md) for the phase map and pass
+criteria, and [CHANGELOG.md](CHANGELOG.md) for what changed.
 
 **F1 — bootloader.** The UEFI loader boots in QEMU/OVMF, reads a kernel ELF
 from its own FAT volume, exits boot services, installs its own page tables and
@@ -50,10 +52,10 @@ budgeted domain restarts in place. A ring-0 fault is fatal, on purpose.
 
 The kernel crate provides the mechanisms — boot-contract validation, a
 physical frame allocator with recycling, virtual-memory helpers, task and
-scheduler tables, bounded IPC endpoints, a read-only initramfs filesystem,
-ACPI/MADT parsing, and generation-safe capability tables — and is covered by
-host unit tests, as are the shared `zc-abi`/`zc-elf` crates and the loader's
-UEFI bindings.
+scheduler tables, bounded IPC endpoints, a read-only VFS with a `FileSystem`
+trait and mount table, ACPI/MADT parsing, and generation-safe capability
+tables — and is covered by host unit tests, as are the shared
+`zc-abi`/`zc-elf` crates and the loader's UEFI bindings.
 
 The block domain writes and flushes a data sector and reads it back, and a
 four-slot write-back cache sits in front of the device (dirty data is written
@@ -61,8 +63,9 @@ back before its slot is reused, and again by flush). It then parses the MBR
 and mounts two real partitions read-only through that cache: FAT32, reading
 `HELLO.TXT`, and ext2, reading `EXT2.TXT`. Host checks confirm the writes
 reached `build/disk.img`, that mtools reads the FAT32 file, and that `debugfs`
-reads the ext2 file. Next up is **F7d — a VFS core**, then a writable rootfs
-and `initd` supervision.
+reads the ext2 file. The VFS mounts the initramfs as `ramfs` at `/`, and the
+serial shell's `stat` command reports file metadata over the new `SYS_STAT`
+syscall. Next up is **F7e — a writable rootfs**, then `initd` supervision.
 
 ## Development
 
