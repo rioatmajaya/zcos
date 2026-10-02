@@ -15,6 +15,7 @@ require_command() {
 
 require_command cargo
 require_command rustup
+require_command python3
 require_command qemu-system-x86_64
 require_command objdump
 require_command mkfs.vfat

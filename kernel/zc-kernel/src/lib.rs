@@ -36,3 +36,4 @@ pub mod trap;
 pub mod vfs;
 pub mod virtio;
 pub mod vm;
+pub mod zcfs;

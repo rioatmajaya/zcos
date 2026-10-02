@@ -14,9 +14,12 @@
 //! cache: a read miss then hit, a dirty write served from the cache, eviction
 //! writing a dirty sector back before reusing its slot, and a flush writing
 //! back what is left. A read, a write, and a flush all run through one
-//! descriptor-chain helper. Finally it parses the MBR and mounts two
-//! partitions read-only through the same cache — FAT32 first, then ext2,
-//! each reading a known file — so two filesystems share the cache seam.
+//! descriptor-chain helper. It then parses the MBR and mounts partitions
+//! through the same cache — FAT32, then ext2, each reading a known file. Last
+//! it mounts the ZC-native zcfs partition read-write: it reads the file the
+//! host planted, creates and writes a file of its own, drops the cache, and
+//! remounts from the disk, so the guest's append is proven durable rather than
+//! merely cached. Four filesystems now share the cache seam.
 
 #![no_std]
 #![no_main]
@@ -31,6 +34,7 @@ use zc_kernel::ext2::{self, Ext2Error};
 use zc_kernel::fat32::{self, FatError, Sector};
 use zc_kernel::mbr;
 use zc_kernel::virtio;
+use zc_kernel::zcfs::{self, BlockIo, ZcfsError};
 use zc_user::{
     abort, log, port_claim, port_inl, port_inw, port_outb, port_outl, port_outw, recv_from,
     task_exit,
@@ -50,6 +54,14 @@ const CACHE_SLOTS: usize = 4;
 /// the cache cannot live on the stack. `map_elf` maps `memsz`, so the static
 /// is mapped writable and zeroed before this task starts.
 static mut CACHE: Cache<CACHE_SLOTS> = Cache::new();
+
+/// Node slots for the replayed zcfs tree. Eight holds the root, the host's
+/// file, and the guest's file with room to spare without inflating `.bss`.
+const ZCFS_SLOTS: usize = 8;
+
+/// The mounted zcfs volume, also in `.bss` for the same reason: a `Volume<8>`
+/// is several kilobytes, far more than the 4 KiB stack page allows.
+static mut ZCFS: zcfs::Volume<ZCFS_SLOTS> = zcfs::Volume::new();
 
 /// Forms a device register port from a BAR base plus an offset.
 const fn reg(port: u16, offset: u16) -> u16 {
@@ -339,6 +351,39 @@ impl Device {
     fn sectors(&self) -> u64 {
         port_inl(reg(self.port, virtio::REG_CONFIG)) as u64
             | ((port_inl(reg(self.port, virtio::REG_CONFIG + 4)) as u64) << 32)
+    }
+}
+
+/// Sector I/O for the zcfs volume, served from the write-back cache.
+///
+/// zcfs sectors go through the same cache the read-only probes use, so a
+/// mount, an append, and a replay all share one write-back path rather than a
+/// second, bypassing one. `flush` is the ordering seam zcfs relies on: it
+/// writes back every dirty slot and then flushes the device, so a record is
+/// durable before the superblock that points at it.
+struct CacheIo<'a> {
+    device: &'a mut Device,
+    cache: &'a mut Cache<CACHE_SLOTS>,
+    flush_offered: bool,
+}
+
+impl zcfs::BlockIo for CacheIo<'_> {
+    fn read(&mut self, sector: u64, out: &mut [u8; zcfs::SECTOR_SIZE]) -> Result<(), ZcfsError> {
+        let slot = cache_read(&mut *self.device, &mut *self.cache, sector);
+        out.copy_from_slice(self.cache.slot_data(slot));
+        Ok(())
+    }
+
+    fn write(&mut self, sector: u64, data: &[u8; zcfs::SECTOR_SIZE]) -> Result<(), ZcfsError> {
+        let slot = reserve_slot(&mut *self.device, &mut *self.cache, sector);
+        self.cache.slot_data_mut(slot).copy_from_slice(data);
+        self.cache.set_dirty(slot);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), ZcfsError> {
+        cache_flush(&mut *self.device, &mut *self.cache, self.flush_offered);
+        Ok(())
     }
 }
 
@@ -637,6 +682,141 @@ fn ext2_probe(device: &mut Device, cache: &mut Cache<CACHE_SLOTS>) {
     log("blk: ext2 hello ok\n");
 }
 
+/// zcfs proof: mount the ZC-native partition, read the host-planted file,
+/// create and write a guest file, then remount from the disk and read it back.
+///
+/// Neither side confirms its own work: the host wrote `/probe` and will verify
+/// `/written` with an independent replay, while the guest can only see
+/// `/probe` by really parsing the host's log. Discarding every cached sector
+/// before the second mount forces a replay from durable storage, so a
+/// successful read of the guest's own file proves the append reached the
+/// device rather than lingering in the cache.
+fn zcfs_probe(device: &mut Device, cache: &mut Cache<CACHE_SLOTS>, flush_offered: bool) {
+    // Parse the partition table in its own scope so the borrow of `cache`
+    // ends before the volume takes it.
+    let partition_lba = {
+        let slot = cache_read(device, cache, 0);
+        match mbr::find_zcfs(cache.slot_data(slot)) {
+            Ok(partition) => partition.start_lba,
+            Err(_) => {
+                log("blk: zcfs mbr failed\n");
+                abort()
+            }
+        }
+    };
+    log("blk: zcfs mbr ok\n");
+
+    // SAFETY: this task is single-threaded and the volume is not aliased; the
+    // borrow lives for the rest of `_start`.
+    let volume = unsafe { &mut *addr_of_mut!(ZCFS) };
+
+    {
+        let mut io = CacheIo {
+            device: &mut *device,
+            cache: &mut *cache,
+            flush_offered,
+        };
+        if volume.mount_into(partition_lba, &mut io).is_err() {
+            log("blk: zcfs mount failed\n");
+            abort()
+        }
+    }
+    log("blk: zcfs mount ok\n");
+
+    // The host planted /probe; reading it proves both implementations agree
+    // on the on-disk format.
+    let mut buffer = [0u8; 32];
+    let node = match volume.lookup(zcfs::ROOT_NODE, virtio::FS_ZCFS_HOST_FILE) {
+        Ok(node) => node,
+        Err(_) => {
+            log("blk: zcfs probe failed\n");
+            abort()
+        }
+    };
+    let read = match volume.read(node, 0, &mut buffer) {
+        Ok(read) => read,
+        Err(_) => {
+            log("blk: zcfs probe failed\n");
+            abort()
+        }
+    };
+    if read != virtio::FS_ZCFS_HOST_MAGIC.len() || &buffer[..read] != virtio::FS_ZCFS_HOST_MAGIC {
+        log("blk: zcfs probe failed\n");
+        abort()
+    }
+    log("blk: zcfs probe ok\n");
+
+    // Create /written, put the guest pattern in it, and flush so the records
+    // and the superblock that references them reach the device. A reused disk
+    // may already carry the file from an earlier run, so reuse it rather than
+    // treating its presence as an error.
+    {
+        let mut io = CacheIo {
+            device: &mut *device,
+            cache: &mut *cache,
+            flush_offered,
+        };
+        let node = match volume.lookup(zcfs::ROOT_NODE, virtio::FS_ZCFS_GUEST_FILE) {
+            Ok(node) => node,
+            Err(_) => match volume.create(
+                &mut io,
+                zcfs::ROOT_NODE,
+                virtio::FS_ZCFS_GUEST_FILE,
+                zcfs::MODE_FILE | zcfs::MODE_PERM,
+            ) {
+                Ok(node) => node,
+                Err(_) => {
+                    log("blk: zcfs write failed\n");
+                    abort()
+                }
+            },
+        };
+        if volume
+            .write(&mut io, node, 0, virtio::FS_ZCFS_GUEST_MAGIC)
+            .is_err()
+            || io.flush().is_err()
+        {
+            log("blk: zcfs write failed\n");
+            abort()
+        }
+    }
+    log("blk: zcfs write ok\n");
+
+    // Discard every cached sector, then remount. A read that still succeeds
+    // can only have come from the device, not from the cache just dropped.
+    *cache = Cache::new();
+    {
+        let mut io = CacheIo {
+            device: &mut *device,
+            cache: &mut *cache,
+            flush_offered,
+        };
+        if volume.mount_into(partition_lba, &mut io).is_err() {
+            log("blk: zcfs replay failed\n");
+            abort()
+        }
+    }
+    let node = match volume.lookup(zcfs::ROOT_NODE, virtio::FS_ZCFS_GUEST_FILE) {
+        Ok(node) => node,
+        Err(_) => {
+            log("blk: zcfs replay failed\n");
+            abort()
+        }
+    };
+    let read = match volume.read(node, 0, &mut buffer) {
+        Ok(read) => read,
+        Err(_) => {
+            log("blk: zcfs replay failed\n");
+            abort()
+        }
+    };
+    if read != virtio::FS_ZCFS_GUEST_MAGIC.len() || &buffer[..read] != virtio::FS_ZCFS_GUEST_MAGIC {
+        log("blk: zcfs replay failed\n");
+        abort()
+    }
+    log("blk: zcfs replay ok\n");
+}
+
 /// Task entry point; the kernel provides a fresh user stack.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
@@ -712,6 +892,16 @@ pub unsafe extern "C" fn _start() -> ! {
         max,
         seq: 0,
     };
+    // The cache and the volume live in `.bss`, but the kernel mapped the DMA
+    // queue at QUEUE_VIRT just above the image. If `.bss` ever grew into it, a
+    // stray store would corrupt the ring, so refuse to run rather than fail
+    // obscurely mid-transfer.
+    let volume_end =
+        addr_of_mut!(ZCFS) as usize + core::mem::size_of::<zcfs::Volume<ZCFS_SLOTS>>();
+    let cache_end = addr_of_mut!(CACHE) as usize + core::mem::size_of::<Cache<CACHE_SLOTS>>();
+    if volume_end > QUEUE_VIRT as usize || cache_end > QUEUE_VIRT as usize {
+        abort();
+    }
     // SAFETY: this task is single-threaded and the cache is not aliased; the
     // borrow lives for the rest of `_start`.
     let cache = unsafe { &mut *addr_of_mut!(CACHE) };
@@ -719,5 +909,6 @@ pub unsafe extern "C" fn _start() -> ! {
     cache_probe(&mut device, cache, flush_offered);
     fs_probe(&mut device, cache);
     ext2_probe(&mut device, cache);
+    zcfs_probe(&mut device, cache, flush_offered);
     task_exit()
 }

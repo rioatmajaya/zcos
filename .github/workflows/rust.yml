@@ -89,6 +89,11 @@ jobs:
         grep -q "task 4: blk: ext2 mount ok" build/boot.log
         grep -q "task 4: blk: ext2 root ok" build/boot.log
         grep -q "task 4: blk: ext2 hello ok" build/boot.log
+        grep -q "task 4: blk: zcfs mbr ok" build/boot.log
+        grep -q "task 4: blk: zcfs mount ok" build/boot.log
+        grep -q "task 4: blk: zcfs probe ok" build/boot.log
+        grep -q "task 4: blk: zcfs write ok" build/boot.log
+        grep -q "task 4: blk: zcfs replay ok" build/boot.log
         grep -q "user: 7 address spaces" build/boot.log
         grep -q "device: 3 roles, 5 grants (blk 0, kbd 3, devmgr 2)" build/boot.log
         grep -q "cap: task 6 delegated" build/boot.log
@@ -121,3 +126,5 @@ jobs:
       run: ./tools/check-disk-fs.sh
     - name: Check the ext2 partition on the disk
       run: ./tools/check-disk-ext2.sh
+    - name: Check the zcfs partition on the disk
+      run: ./tools/check-disk-zcfs.sh

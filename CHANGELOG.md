@@ -17,10 +17,29 @@ Roadmap phase **F6 — driver userspace** closed the runtime-authority story:
 what a domain may touch is now granted by data, delegated at runtime, and
 claimed explicitly. Phase **F7 — VFS & storage** has started: a write path
 (F7a), a write-back cache (F7b), a read-only FAT32 mount (F7c), a read-only
-ext2 mount (F7c-2), and a read-only VFS core (F7d).
+ext2 mount (F7c-2), a read-only VFS core (F7d), and a ZC-native log-structured
+filesystem (F7e).
 
 ### Added
 
+- **ZC-native log-structured filesystem** (F7e): `zc-kernel::zcfs` defines the
+  format the writable volume uses. Two CRC-32 superblock copies sit at relative
+  sectors 0 and 1 and the log starts at sector 2, holding fixed 512-byte
+  `CREATE` (parent, mode, name) and `DATA` (offset, bytes) records, each
+  CRC-32-checked. A node's id is the sequence number of its `CREATE`, so replay
+  needs no allocator state. The write order is the crash rule: append the record
+  and flush, then advance `head_seq` in both superblock copies (B, flush, A,
+  flush). Replay reads the durable prefix and stops at the first torn or
+  mismatched record, so a crash leaks space instead of corrupting. Fifteen host
+  tests cover the checksums, torn tails, shadowing, and remounts.
+- **zcfs durable write proof** (F7e): the block domain finds the third MBR
+  partition (`0x7F`), mounts the volume through the same write-back cache the
+  read-only filesystems use, reads the host-planted `/probe`, creates and writes
+  `/written`, then discards every cached sector and remounts from the disk to
+  read its own file back. `tools/zcfs.py` is an independent host implementation
+  of the format, and `tools/check-disk-zcfs.sh` replays the guest's log to
+  confirm both `/probe` and `/written`, so neither side validates its own work
+  (see [ADR 0008](docs/adr/0008-zc-native-log-structured-fs.md)).
 - **Read-only VFS core** (F7d): `zc-kernel::vfs` defines an object-safe
   `FileSystem` trait whose methods all take `&self`, so one mount is shared by
   every task and the read offset lives in the descriptor. A `MountTable`
@@ -33,7 +52,8 @@ ext2 mount (F7c-2), and a read-only VFS core (F7d).
 - **`Stat` and `SYS_STAT`** (F7d): file metadata crosses the syscall boundary
   as a fixed 24-byte, little-endian record with a hand-written encoder, so the
   layout is an ABI and needs no pointer casts. `SYS_STAT` is number 19; 18
-  stays reserved for the `SYS_WRITE` that arrives with F7e.- **Read-only ext2** (F7c-2): `zc-kernel::ext2` mounts a real ext2 volume —
+  stays reserved for the `SYS_WRITE` that arrives with F7e-2.
+- **Read-only ext2** (F7c-2): `zc-kernel::ext2` mounts a real ext2 volume —
   superblock validation, the group descriptor, inode locations, directory
   entries with `rec_len` walking, and direct/single/double/triple indirect
   block maps with sparse holes, all host-tested. The block domain mounts the

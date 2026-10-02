@@ -1,13 +1,14 @@
 #!/usr/bin/env sh
-# Build the virtio test disk: a 128 MiB MBR disk with two real filesystems, a
-# FAT32 volume carrying HELLO.TXT and an ext2 volume carrying EXT2.TXT.
+# Build the virtio test disk: a 128 MiB MBR disk with three real filesystems,
+# a FAT32 volume carrying HELLO.TXT, an ext2 volume carrying EXT2.TXT, and a
+# ZC-native zcfs volume carrying PROBE.
 #
 # Usage: tools/mkdisk.sh
 #   Writes build/disk.img. Sector zero keeps the ZCDISK01 magic the raw probe
-#   checks and gains two MBR partition entries: type 0x0C (FAT32 LBA) at LBA
-#   2048 and type 0x83 (Linux, ext2) after it. The write and cache test markers
-#   at sectors 8 and 16..21 sit in the gap before the first partition, so they
-#   stay untouched.
+#   checks and gains three MBR partition entries: type 0x0C (FAT32 LBA) at LBA
+#   2048, type 0x83 (Linux, ext2) after it, and type 0x7F (zcfs) in the free
+#   tail. The write and cache test markers at sectors 8 and 16..21 sit in the
+#   gap before the first partition, so they stay untouched.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -20,8 +21,11 @@ fat_lba=2048
 fat_sectors=$((40 * 1024 * 1024 / 512))
 ext2_lba=$((fat_lba + fat_sectors))
 ext2_sectors=$((64 * 1024 * 1024 / 512))
+zcfs_lba=$((ext2_lba + ext2_sectors))
+zcfs_sectors=$((disk_size / 512 - zcfs_lba))
 fat=build/data.fat
 ext2=build/data.ext2
+zcfs=build/data.zcfs
 
 # A FAT32 partition in its own file. One sector per cluster keeps the cluster
 # math trivial and clears the >= 65525 cluster floor FAT32 requires.
@@ -56,14 +60,20 @@ with open(path, "wb") as handle:
 EOF
 mke2fs -t ext2 -b 1024 -I 256 -L ZCEXT2 -O ^orphan_file -F -q -d build/ext2root "$ext2"
 
-# Assemble the disk: magic and capacity, two MBR entries, the boot signature,
-# then both partitions at their LBAs.
-python3 - "$fat" "$ext2" "$disk_size" "$fat_lba" "$fat_sectors" "$ext2_lba" "$ext2_sectors" <<'EOF'
+# A zcfs partition built by the host tooling. The host writer plants /probe, so
+# the guest reads a file it did not write; the guest then creates /written,
+# which the host reader verifies. Neither side can confirm its own work.
+rm -f "$zcfs"
+python3 tools/zcfs.py format "$zcfs" "$zcfs_sectors" >/dev/null
+
+# Assemble the disk: magic and capacity, three MBR entries, the boot signature,
+# then all three partitions at their LBAs.
+python3 - "$fat" "$ext2" "$zcfs" "$disk_size" "$fat_lba" "$fat_sectors" "$ext2_lba" "$ext2_sectors" "$zcfs_lba" "$zcfs_sectors" <<'EOF'
 import sys
 
-fat_path, ext2_path = sys.argv[1], sys.argv[2]
-disk_size, fat_lba, fat_sectors, ext2_lba, ext2_sectors = (
-    int(value) for value in sys.argv[3:]
+fat_path, ext2_path, zcfs_path = sys.argv[1], sys.argv[2], sys.argv[3]
+disk_size, fat_lba, fat_sectors, ext2_lba, ext2_sectors, zcfs_lba, zcfs_sectors = (
+    int(value) for value in sys.argv[4:]
 )
 
 disk = bytearray(disk_size)
@@ -80,9 +90,10 @@ def entry(index, kind, lba, sectors):
 
 entry(0, 0x0C, fat_lba, fat_sectors)  # FAT32 with LBA addressing
 entry(1, 0x83, ext2_lba, ext2_sectors)  # Linux, the ext2 volume
+entry(2, 0x7F, zcfs_lba, zcfs_sectors)  # zcfs, the ZC-native volume
 disk[510:512] = b"\x55\xaa"
 
-for path, lba in ((fat_path, fat_lba), (ext2_path, ext2_lba)):
+for path, lba in ((fat_path, fat_lba), (ext2_path, ext2_lba), (zcfs_path, zcfs_lba)):
     with open(path, "rb") as handle:
         data = handle.read()
     start = lba * 512
@@ -91,7 +102,7 @@ for path, lba in ((fat_path, fat_lba), (ext2_path, ext2_lba)):
 with open("build/disk.img", "wb") as handle:
     handle.write(bytes(disk))
 print(
-    "wrote build/disk.img (%d bytes, FAT32 at LBA %d, ext2 at LBA %d)"
-    % (disk_size, fat_lba, ext2_lba)
+    "wrote build/disk.img (%d bytes, FAT32 at LBA %d, ext2 at LBA %d, zcfs at LBA %d)"
+    % (disk_size, fat_lba, ext2_lba, zcfs_lba)
 )
 EOF

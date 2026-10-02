@@ -92,6 +92,18 @@ pub const FS_EXT2_FILE_NAME: &[u8] = b"EXT2.TXT";
 /// Contents the ext2 probe expects in [`FS_EXT2_FILE_NAME`].
 pub const FS_EXT2_MAGIC: &[u8; 11] = b"ZC EXT2 OK\n";
 
+/// Name of the file the host writes into the zcfs volume for the guest.
+pub const FS_ZCFS_HOST_FILE: &[u8] = b"probe";
+
+/// Contents the guest expects in [`FS_ZCFS_HOST_FILE`], planted by the host.
+pub const FS_ZCFS_HOST_MAGIC: &[u8; 8] = b"ZCHOST1\n";
+
+/// Name of the file the guest creates in the zcfs volume.
+pub const FS_ZCFS_GUEST_FILE: &[u8] = b"written";
+
+/// Contents the guest writes to [`FS_ZCFS_GUEST_FILE`], checked by the host.
+pub const FS_ZCFS_GUEST_MAGIC: &[u8; 9] = b"ZCGUEST1\n";
+
 /// Deterministic byte for the write-test pattern.
 ///
 /// Both the write and the read-back verify call this, so a wrong byte at any
@@ -195,6 +207,14 @@ mod tests {
     fn ext2_probe_constants_are_stable() {
         assert_eq!(FS_EXT2_FILE_NAME, b"EXT2.TXT");
         assert_eq!(FS_EXT2_MAGIC, b"ZC EXT2 OK\n");
+    }
+
+    #[test]
+    fn zcfs_probe_constants_are_stable() {
+        assert_eq!(FS_ZCFS_HOST_FILE, b"probe");
+        assert_eq!(FS_ZCFS_HOST_MAGIC, b"ZCHOST1\n");
+        assert_eq!(FS_ZCFS_GUEST_FILE, b"written");
+        assert_eq!(FS_ZCFS_GUEST_MAGIC, b"ZCGUEST1\n");
     }
 
     #[test]

@@ -1,9 +1,10 @@
 //! Minimal MBR partition-table parsing.
 //!
-//! The data disk carries two partition entries: a FAT32 volume and an ext2
-//! volume. This module reads that table and nothing else: it never touches
-//! hardware, so the same code runs on the host under test and inside the block
-//! domain. GPT is deliberately out of scope until F9a.
+//! The data disk carries three partition entries: a FAT32 volume, an ext2
+//! volume, and a ZC-native `zcfs` volume. This module reads that table and
+//! nothing else: it never touches hardware, so the same code runs on the host
+//! under test and inside the block domain. GPT is deliberately out of scope
+//! until F9a.
 
 /// Offset of the `0x55AA` boot signature inside sector zero.
 pub const SIGNATURE_OFFSET: usize = 510;
@@ -25,6 +26,9 @@ pub const PARTITION_TYPE_FAT32_CHS: u8 = 0x0B;
 
 /// Partition type: Linux, which the data disk uses for its ext2 volume.
 pub const PARTITION_TYPE_EXT2: u8 = 0x83;
+
+/// Partition type: the ZC-native log-structured filesystem (`zcfs`).
+pub const PARTITION_TYPE_ZCFS: u8 = 0x7F;
 
 /// Why parsing a partition table failed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -120,6 +124,11 @@ pub fn find_ext2(sector: &[u8; 512]) -> Result<Partition, MbrError> {
     find_first(sector, |kind| kind == PARTITION_TYPE_EXT2)
 }
 
+/// Returns the first `zcfs` partition in the table, if any.
+pub fn find_zcfs(sector: &[u8; 512]) -> Result<Partition, MbrError> {
+    find_first(sector, |kind| kind == PARTITION_TYPE_ZCFS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,6 +194,32 @@ mod tests {
     fn missing_ext2_reports_empty() {
         let sector = sector_with(fat32_entry(PARTITION_TYPE_FAT32_LBA, 2048, 100));
         assert_eq!(find_ext2(&sector), Err(MbrError::EmptyPartition));
+    }
+
+    #[test]
+    fn finds_zcfs_in_the_third_slot() {
+        let mut sector = sector_with(fat32_entry(PARTITION_TYPE_FAT32_LBA, 2048, 81_920));
+        let third = PARTITION_TABLE_OFFSET + 2 * PARTITION_ENTRY_SIZE;
+        sector[third + 4] = PARTITION_TYPE_ZCFS;
+        sector[third + 8..third + 12].copy_from_slice(&215_040u32.to_le_bytes());
+        sector[third + 12..third + 16].copy_from_slice(&47_104u32.to_le_bytes());
+        // The earlier filesystems are still found first, so a third partition
+        // does not disturb the F7c/F7c-2 probes.
+        assert_eq!(find_fat32(&sector).map(|p| p.start_lba), Ok(2048));
+        assert_eq!(
+            find_zcfs(&sector),
+            Ok(Partition {
+                kind: PARTITION_TYPE_ZCFS,
+                start_lba: 215_040,
+                sectors: 47_104,
+            })
+        );
+    }
+
+    #[test]
+    fn missing_zcfs_reports_empty() {
+        let sector = sector_with(fat32_entry(PARTITION_TYPE_FAT32_LBA, 2048, 100));
+        assert_eq!(find_zcfs(&sector), Err(MbrError::EmptyPartition));
     }
 
     #[test]
