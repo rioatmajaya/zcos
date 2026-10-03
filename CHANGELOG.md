@@ -19,10 +19,30 @@ claimed explicitly. Phase **F7 — VFS & storage** has started: a write path
 (F7a), a write-back cache (F7b), a read-only FAT32 mount (F7c), a read-only
 ext2 mount (F7c-2), a read-only VFS core (F7d), a ZC-native log-structured
 filesystem (F7e), the writable volume mounted into the kernel VFS (F7e-2),
-and a userspace supervisor that owns service lifecycle (F7f).
+a userspace supervisor that owns service lifecycle (F7f), and crash recovery
+that clamps the log head (F7g).
 
 ### Added
 
+- **Crash recovery in `zcfs` mount** (F7g): `Volume::mount_into` now clamps
+  `head_seq` to the last record that actually replayed and reports it through
+  `was_recovered()`. A superblock can claim a record a crash never made durable,
+  and before the clamp `append` derived the next sequence from that claim — so
+  the new record landed *past* the gap and no later mount could ever reach it.
+  That was silent, permanent loss on the first write after a crash, and the
+  existing torn-tail test could not express it (its on-disk head already matched
+  the durable prefix, so the clamp was never exercised). Recovery is part of
+  mount, so it needs no separate tool and no flag: the corrected head is
+  persisted by the next append's superblock update, and re-clamping is
+  idempotent. Two host tests back it — a `BlockIo` double with a volatile
+  write-back layer sweeps every power-loss boundary in a mixed workload and
+  asserts the tree is always a consistent, appendable prefix, and a crafted
+  over-claiming superblock proves both the clamp and that the next append reuses
+  the gap. `tools/zcfs.py replay()` mirrors the clamp so the host and guest
+  cannot disagree about the head on exactly the images that need recovering, and
+  the host formatter now plants a torn, over-claiming tail so every boot
+  exercises recovery; the boot logs `blk: zcfs recovered`
+  (see [ADR 0011](docs/adr/0011-crash-recovery-clamps-log-head.md)).
 - **Userspace service supervision** (F7f): `initd` becomes the manifest's
   `init=/sbin/initd`, a ring-3 supervisor that decides whether a service
   domain is restarted or stopped. The kernel keeps only the mechanisms —

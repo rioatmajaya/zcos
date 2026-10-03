@@ -759,6 +759,11 @@ fn zcfs_probe(device: &mut Device, cache: &mut Cache<CACHE_SLOTS>, flush_offered
         }
     }
     log("blk: zcfs mount ok\n");
+    // The formatter plants a torn tail the superblock over-claims, so a healthy
+    // boot must report that it recovered and clamped the log head back.
+    if volume.was_recovered() {
+        log("blk: zcfs recovered\n");
+    }
 
     // The host planted /probe; reading it proves both implementations agree
     // on the on-disk format.

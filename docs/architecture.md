@@ -115,6 +115,28 @@ policy — restart, give up, stop — lives in userspace, while the mechanisms
 (building the address space, reviving a slot, killing one) stay in the kernel
 (see [ADR 0010](adr/0010-userspace-service-supervision.md)).
 
+## Storage and crash consistency
+
+The writable volume is a log-structured filesystem, **zcfs**: fixed 512-byte
+self-checksummed records appended to a log, never rewritten in place, with the
+head recorded in two superblock copies. The write order is the crash rule — the
+record is written and flushed *before* either superblock points at it — so a
+crash can leave a durable-but-unreferenced record, never a referenced-but-missing
+one.
+
+The superblock is the one thing that ordering does not cover: a crash can land
+after the superblock update and before the log write reaches the device, so the
+superblock may claim a record that does not exist. Recovery therefore trusts the
+log over the superblock. A mount replays as far as the log allows and clamps the
+head to the last record that actually replayed, so the next append reuses the
+gap instead of landing past it. Without that clamp the first write after a crash
+would be unreachable forever.
+
+Recovery is part of mount, so a volume cut short is usable immediately at the
+cost of whatever was not durable. What a crash does *not* yet handle is a bad
+sector in the middle of the log, which truncates the whole suffix after it;
+repair belongs to `fsck` (see [ADR 0011](adr/0011-crash-recovery-clamps-log-head.md)).
+
 ## IPC and authority
 
 ZC OS uses synchronous message passing initially, over independent channels

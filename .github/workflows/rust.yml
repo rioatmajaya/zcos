@@ -91,6 +91,7 @@ jobs:
         grep -q "task 4: blk: ext2 hello ok" build/boot.log
         grep -q "task 4: blk: zcfs mbr ok" build/boot.log
         grep -q "task 4: blk: zcfs mount ok" build/boot.log
+        grep -q "task 4: blk: zcfs recovered" build/boot.log
         grep -q "task 4: blk: zcfs probe ok" build/boot.log
         grep -q "task 4: blk: zcfs write ok" build/boot.log
         grep -q "task 4: blk: zcfs replay ok" build/boot.log

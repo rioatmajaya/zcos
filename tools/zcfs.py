@@ -225,6 +225,11 @@ def replay(image, partition_lba=0):
         else:
             break
         seq += 1
+    # Recovery, mirroring the guest: the log decides the head. A superblock may
+    # claim records a crash never made durable, so the head is clamped back to
+    # the last record that actually replayed. Without this the host would
+    # disagree with `Volume::mount_into` on any over-claiming image.
+    sb["head_seq"] = seq - 1
     return sb, nodes
 
 
@@ -236,7 +241,13 @@ def find(nodes, parent, name):
 
 
 def format_volume(path, sectors, pattern=HOST_PATTERN):
-    """Writes an empty volume holding the root directory and /probe."""
+    """Writes a volume holding the root directory, /probe, and a torn tail.
+
+    The torn tail is deliberate: it is the shape a power loss leaves behind, so
+    every boot has to recover before it can serve the volume. The superblock
+    claims the record the crash never made durable, which is exactly the
+    over-claim that `Volume::mount_into` must clamp.
+    """
     image = bytearray(sectors * SECTOR)
 
     def put(relative, sector):
@@ -259,19 +270,31 @@ def format_volume(path, sectors, pattern=HOST_PATTERN):
                    create_payload(ROOT_NODE, MODE_FILE | 0o644, b"probe"))
     append(KIND_DATA, probe, data_payload(0, pattern))
 
-    superblock = encode_superblock(sectors, seq)
+    # The power-loss tail: a well-formed record for the next sequence, then one
+    # flipped byte so its checksum can never pass. The superblock below points
+    # at it anyway.
+    torn_seq = seq + 1
+    torn = bytearray(encode_record(KIND_DATA, torn_seq, probe,
+                                    data_payload(0, b"lost")))
+    torn[200] ^= 0xFF
+    put(LOG_START + ((torn_seq - 1) % (sectors - LOG_START)), bytes(torn))
+
+    # Not clean: the volume was never unmounted, and the head over-claims the
+    # torn record.
+    superblock = encode_superblock(sectors, torn_seq, flags=0)
     put(SUPERBLOCK_A, superblock)
     put(SUPERBLOCK_B, superblock)
     with open(path, "wb") as handle:
         handle.write(bytes(image))
-    return seq
+    return torn_seq
 
 
 def main(argv):
     if len(argv) >= 4 and argv[1] == "format":
         sectors = int(argv[3])
         seq = format_volume(argv[2], sectors)
-        print("zcfs: formatted %s (%d sectors, head_seq %d)" % (argv[2], sectors, seq))
+        print("zcfs: formatted %s (%d sectors, head_seq %d, torn tail)"
+              % (argv[2], sectors, seq))
         return 0
     if len(argv) == 3 and argv[1] == "dump":
         with open(argv[2], "rb") as handle:

@@ -576,6 +576,7 @@ pub struct Volume<const N: usize> {
     partition_lba: u32,
     sb: Superblock,
     table: Table<N>,
+    recovered: bool,
 }
 
 impl<const N: usize> Volume<N> {
@@ -589,6 +590,7 @@ impl<const N: usize> Volume<N> {
             partition_lba: 0,
             sb: Superblock::EMPTY,
             table: Table::new(),
+            recovered: false,
         }
     }
 
@@ -603,6 +605,12 @@ impl<const N: usize> Volume<N> {
     ///
     /// Callers with a bounded stack mount this way: the table is rebuilt where
     /// it already lives instead of being moved through a temporary.
+    ///
+    /// Replay also recovers: the log, not the superblock, decides where the head
+    /// is. A superblock may claim records the crash never made durable, so the
+    /// head is clamped to the last record that actually replayed and
+    /// [`was_recovered`](Self::was_recovered) reports it. Without that clamp the
+    /// next append would land past the gap and be unreachable forever.
     pub fn mount_into(
         &mut self,
         partition_lba: u32,
@@ -615,6 +623,7 @@ impl<const N: usize> Volume<N> {
         let sb = Superblock::select(&a, &b)?;
         self.partition_lba = partition_lba;
         self.sb = sb;
+        self.recovered = false;
         self.table.reset();
         let mut sector = [0u8; SECTOR_SIZE];
         let mut seq = sb.tail_seq + 1;
@@ -649,6 +658,17 @@ impl<const N: usize> Volume<N> {
             }
             seq += 1;
         }
+        // The log decides the head. `seq - 1` is the last record that actually
+        // replayed in every exit path: the claimed head on a full replay, the
+        // last good record after a torn or mismatched tail, and `tail_seq` when
+        // nothing replayed at all. It cannot underflow because `seq` starts at
+        // `tail_seq + 1` and the superblock guarantees `tail_seq <= head_seq`.
+        //
+        // The correction is not written back here: the next append's
+        // superblock update persists it, and re-clamping on every mount is
+        // idempotent, so a repeated crash simply recovers again.
+        self.sb.head_seq = seq - 1;
+        self.recovered = self.sb.head_seq != sb.head_seq;
         Ok(())
     }
 
@@ -665,9 +685,21 @@ impl<const N: usize> Volume<N> {
     }
 
     /// Returns the highest committed sequence number.
+    ///
+    /// After a mount this is the last record that replayed, which may be lower
+    /// than the head the superblock on disk claimed.
     #[must_use]
     pub const fn head_seq(&self) -> u64 {
         self.sb.head_seq
+    }
+
+    /// Returns whether the mount had to clamp an over-claiming superblock.
+    ///
+    /// True means the log was shorter than the superblock said, so recovery
+    /// moved the head back and the next append will reuse the first gap.
+    #[must_use]
+    pub const fn was_recovered(&self) -> bool {
+        self.recovered
     }
 
     /// Looks up `name` inside directory `parent`.
@@ -875,6 +907,129 @@ mod tests {
         (io, volume)
     }
 
+    /// Builds a reader over a byte image, for remounting after a simulated
+    /// power loss.
+    fn reader_from(bytes: &[u8]) -> MemIo {
+        MemIo {
+            bytes: bytes.to_vec(),
+            flushes: 0,
+        }
+    }
+
+    /// A [`BlockIo`] with a volatile write-back layer that can lose power.
+    ///
+    /// `write` only buffers into `pending`, so a sector written but not yet
+    /// flushed is lost on power-off — the same exposure the production
+    /// `CacheIo` has. `crash_at` is the number of `write`/`flush` calls that
+    /// still take effect; every call past it is a no-op, which lets a test cut
+    /// power at each boundary in turn.
+    ///
+    /// A `flush` applies all pending writes or none, mirroring the all-or-
+    /// nothing flush the ordering rule depends on. `read` is served from the
+    /// newest pending write when there is one (read-your-writes) and never
+    /// counts as a step, because only writes can lose data.
+    struct CrashIo {
+        durable: vec::Vec<u8>,
+        pending: vec::Vec<(u64, [u8; SECTOR_SIZE])>,
+        steps: usize,
+        crash_at: usize,
+    }
+
+    impl CrashIo {
+        /// Starts from an existing image, losing power after `crash_at` writes.
+        fn from_image(bytes: &[u8], crash_at: usize) -> Self {
+            Self {
+                durable: bytes.to_vec(),
+                pending: vec::Vec::new(),
+                steps: 0,
+                crash_at,
+            }
+        }
+
+        /// Returns the bytes that survived the power loss.
+        fn durable_bytes(&self) -> &[u8] {
+            &self.durable
+        }
+
+        /// Charges one write or flush against the crash budget.
+        fn charge(&mut self) -> bool {
+            if self.steps >= self.crash_at {
+                return false;
+            }
+            self.steps += 1;
+            true
+        }
+    }
+
+    impl BlockIo for CrashIo {
+        fn read(&mut self, sector: u64, out: &mut [u8; SECTOR_SIZE]) -> Result<(), ZcfsError> {
+            if let Some((_, last)) = self
+                .pending
+                .iter()
+                .rev()
+                .find(|(at, _)| *at == sector)
+            {
+                out.copy_from_slice(last);
+                return Ok(());
+            }
+            let at = sector as usize * SECTOR_SIZE;
+            let end = at + SECTOR_SIZE;
+            let Some(slice) = self.durable.get(at..end) else {
+                return Err(ZcfsError::Io);
+            };
+            out.copy_from_slice(slice);
+            Ok(())
+        }
+
+        fn write(&mut self, sector: u64, data: &[u8; SECTOR_SIZE]) -> Result<(), ZcfsError> {
+            if self.charge() {
+                self.pending.push((sector, *data));
+            }
+            Ok(())
+        }
+
+        fn flush(&mut self) -> Result<(), ZcfsError> {
+            if !self.charge() {
+                return Ok(());
+            }
+            for (sector, data) in self.pending.drain(..).collect::<vec::Vec<_>>() {
+                let at = sector as usize * SECTOR_SIZE;
+                let end = at + SECTOR_SIZE;
+                let Some(slice) = self.durable.get_mut(at..end) else {
+                    return Err(ZcfsError::Io);
+                };
+                slice.copy_from_slice(&data);
+            }
+            Ok(())
+        }
+    }
+
+    /// Runs a short mixed workload: two creates and three writes.
+    ///
+    /// Every append is the same six calls — record write and flush, then
+    /// superblock B and A with a flush each — so a run of this is a dense sweep
+    /// of the boundaries where a crash can land.
+    fn exercise(io: &mut impl BlockIo, volume: &mut Volume<8>) {
+        let a = volume
+            .create(io, ROOT_NODE, b"a", MODE_FILE | 0o644)
+            .expect("create a");
+        volume.write(io, a, 0, b"AAAA").expect("write a");
+        // A shorter overwrite at the same offset: the tail bytes survive.
+        volume.write(io, a, 0, b"BB").expect("overwrite a");
+        volume
+            .create(io, ROOT_NODE, b"b", MODE_FILE | 0o644)
+            .expect("create b");
+    }
+
+    /// Reads a node's whole content, or `None` when the node is absent.
+    fn content_of(volume: &Volume<8>, node: u64) -> Option<vec::Vec<u8>> {
+        let (_, _, size) = volume.stat(node).ok()?;
+        let mut buffer = vec![0u8; size as usize];
+        let read = volume.read(node, 0, &mut buffer).ok()?;
+        buffer.truncate(read);
+        Some(buffer)
+    }
+
     #[test]
     fn crc32_matches_the_ieee_check_value() {
         // The standard check value for CRC-32/IEEE, so Python's zlib.crc32
@@ -996,6 +1151,137 @@ mod tests {
         let read = replayed.read(probe, 0, &mut buffer).expect("read");
         assert_eq!(&buffer[..read], b"ZCHOST1\n");
         assert_eq!(replayed.head_seq(), committed);
+    }
+
+    #[test]
+    fn a_superblock_that_over_claims_is_clamped_on_mount() {
+        let (mut io, volume) = seeded();
+        let committed = volume.head_seq();
+        let probe = volume.lookup(ROOT_NODE, b"probe").expect("probe");
+
+        // Plant a record the crash never made durable and then point the
+        // superblock at it anyway: the sector is torn, but the head claims it.
+        // This is the shape a real power loss leaves behind, and it is the case
+        // a plain torn tail cannot express.
+        let mut payload = [0u8; PAYLOAD_MAX];
+        let len = data_payload(0, b"lost", &mut payload).expect("payload");
+        let mut sector = [0u8; SECTOR_SIZE];
+        let claimed = committed + 1;
+        encode_record(KIND_DATA, claimed, probe, &payload[..len], &mut sector).expect("encode");
+        sector[200] ^= 0xFF;
+        io.write(LOG_START + (claimed - 1), &sector).expect("write");
+
+        let mut sb = *volume.superblock();
+        sb.head_seq = claimed;
+        sb.flags &= !FLAG_CLEAN;
+        let mut encoded = [0u8; SECTOR_SIZE];
+        sb.encode(&mut encoded);
+        io.write(SUPERBLOCK_A, &encoded).expect("sb a");
+        io.write(SUPERBLOCK_B, &encoded).expect("sb b");
+
+        let mut recovered = Volume::<8>::mount(0, &mut io).expect("mount");
+        assert!(recovered.was_recovered());
+        assert_eq!(recovered.head_seq(), committed);
+
+        // The point of the clamp: the next append reuses the gap instead of
+        // landing past it, so the new record is reachable on the next mount.
+        let fresh = recovered
+            .create(&mut io, ROOT_NODE, b"fresh", MODE_FILE | 0o644)
+            .expect("create fresh");
+        assert_eq!(fresh, claimed);
+        recovered.mark_clean(&mut io).expect("clean");
+
+        let mut reader = reader_from(&io.bytes);
+        let reloaded = Volume::<8>::mount(0, &mut reader).expect("remount");
+        assert!(!reloaded.was_recovered());
+        assert_eq!(reloaded.head_seq(), claimed);
+        assert_eq!(reloaded.lookup(ROOT_NODE, b"fresh"), Ok(fresh));
+        let mut buffer = [0u8; 16];
+        let read = reloaded.read(probe, 0, &mut buffer).expect("read");
+        assert_eq!(&buffer[..read], b"ZCHOST1\n");
+    }
+
+    #[test]
+    fn crash_at_every_step_keeps_the_tree_consistent() {
+        let (seed, _) = seeded();
+        let base = seed.bytes.clone();
+
+        // One uncrashed run bounds the sweep: every write and flush the
+        // workload performs, so no boundary is left untested.
+        let mut counting = CrashIo::from_image(&base, usize::MAX);
+        let mut volume = Volume::<8>::mount(0, &mut counting).expect("mount");
+        exercise(&mut counting, &mut volume);
+        let total = counting.steps;
+        assert!(total > 0);
+
+        for crash_at in 0..=total {
+            let mut io = CrashIo::from_image(&base, crash_at);
+            let mut volume = Volume::<8>::mount(0, &mut io).expect("mount");
+            // Writes past the crash point are silently dropped, so the workload
+            // must tolerate losing any suffix of its own calls.
+            exercise(&mut io, &mut volume);
+
+            let mut reader = reader_from(io.durable_bytes());
+            let mut reloaded = Volume::<8>::new();
+            reloaded.mount_into(0, &mut reader).expect("remount");
+
+            // The host-planted file is committed before the sweep starts, so it
+            // must survive every crash point.
+            let probe = reloaded
+                .lookup(ROOT_NODE, b"probe")
+                .unwrap_or_else(|_| panic!("crash_at {crash_at}: probe vanished"));
+            assert_eq!(
+                content_of(&reloaded, probe).as_deref(),
+                Some(&b"ZCHOST1\n"[..]),
+                "crash_at {crash_at}: probe content changed"
+            );
+
+            // The tree is a prefix of the workload: `a` cannot exist without the
+            // probe, and `b` cannot exist without `a`.
+            let a = reloaded.lookup(ROOT_NODE, b"a").ok();
+            if let Some(a) = a {
+                // Only values a committed prefix can produce: nothing yet, the
+                // first write, or the two-byte overwrite over it.
+                let content = content_of(&reloaded, a).expect("a content");
+                assert!(
+                    matches!(content.as_slice(), b"" | b"AAAA" | b"BBAA"),
+                    "crash_at {crash_at}: a has illegal content {content:?}"
+                );
+            }
+            if let Ok(b) = reloaded.lookup(ROOT_NODE, b"b") {
+                assert!(a.is_some(), "crash_at {crash_at}: b exists without a");
+                assert_eq!(
+                    content_of(&reloaded, b).as_deref(),
+                    Some(&b""[..]),
+                    "crash_at {crash_at}: b should be empty"
+                );
+            }
+
+            // Whatever survived must be appendable again with no gap: a fresh
+            // record has to be reachable after one more remount.
+            let mut writer = reader_from(io.durable_bytes());
+            let mut live = Volume::<8>::new();
+            live.mount_into(0, &mut writer).expect("re-mount for append");
+            let tail = live
+                .create(&mut writer, ROOT_NODE, b"c", MODE_FILE | 0o644)
+                .expect("append after crash");
+            live.mark_clean(&mut writer).expect("clean");
+            let mut reader = reader_from(&writer.bytes);
+            let mut grown = Volume::<8>::new();
+            grown.mount_into(0, &mut reader).expect("final remount");
+            assert_eq!(
+                grown.lookup(ROOT_NODE, b"c"),
+                Ok(tail),
+                "crash_at {crash_at}: appended record unreachable"
+            );
+            if let Some(a) = a {
+                assert_eq!(
+                    content_of(&grown, a),
+                    content_of(&reloaded, a),
+                    "crash_at {crash_at}: append changed an earlier file"
+                );
+            }
+        }
     }
 
     #[test]

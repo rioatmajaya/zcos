@@ -17,6 +17,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0008](0008-zc-native-log-structured-fs.md) | ZC-native log-structured filesystem | Accepted |
 | [0009](0009-filesystem-rpc-replay.md) | Filesystem RPC with block-and-retry replay | Accepted |
 | [0010](0010-userspace-service-supervision.md) | Userspace service supervision | Accepted |
+| [0011](0011-crash-recovery-clamps-log-head.md) | Crash recovery clamps the log head | Accepted |
 
 ## Adding a decision
 

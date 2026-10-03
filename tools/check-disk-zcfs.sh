@@ -14,20 +14,26 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 disk=build/disk.img
+planted=build/data.zcfs
 
 if [ ! -f "$disk" ]; then
     echo "error: $disk not found; run tools/build-efi.sh first" >&2
     exit 1
 fi
+if [ ! -f "$planted" ]; then
+    echo "error: $planted not found; run tools/build-efi.sh first" >&2
+    exit 1
+fi
 
-python3 - "$disk" <<'EOF'
+python3 - "$disk" "$planted" <<'EOF'
 import struct
 import sys
 
 sys.path.insert(0, "tools")
 import zcfs
 
-image = open(sys.argv[1], "rb").read()
+disk_path, planted_path = sys.argv[1], sys.argv[2]
+image = open(disk_path, "rb").read()
 if image[510:512] != b"\x55\xaa":
     sys.exit("error: missing MBR signature at 510")
 
@@ -79,6 +85,25 @@ if bytes(written["content"]) != expected:
     sys.exit("error: /written content is %r, not %r"
              % (bytes(written["content"]), expected))
 print("file: /written ok", file=sys.stderr)
+
+# The formatter plants a volume whose superblock over-claims a torn record, so
+# the guest had to recover before it could serve anything. Check the image it
+# started from: replay must clamp the head back by exactly the over-claim and
+# still find /probe, which is what proves recovery is what let the boot work.
+planted = open(planted_path, "rb").read()
+sector = zcfs.SECTOR
+claimed = zcfs.select_superblock(planted[0:sector],
+                                 planted[sector:2 * sector])
+recovered_sb, recovered_nodes = zcfs.replay(planted, 0)
+if claimed["head_seq"] != recovered_sb["head_seq"] + 1:
+    sys.exit("error: formatter did not plant a one-record over-claim "
+             "(claimed %d, replayed %d)"
+             % (claimed["head_seq"], recovered_sb["head_seq"]))
+_, recovered_probe = zcfs.find(recovered_nodes, zcfs.ROOT_NODE, b"probe")
+if recovered_probe is None or bytes(recovered_probe["content"]) != zcfs.HOST_PATTERN:
+    sys.exit("error: recovery lost /probe")
+print("recovery: head %d -> %d ok"
+      % (claimed["head_seq"], recovered_sb["head_seq"]), file=sys.stderr)
 EOF
 
-echo "disk zcfs verified: /probe and /written replayed by the host"
+echo "disk zcfs verified: recovery clamped, /probe and /written replayed by the host"

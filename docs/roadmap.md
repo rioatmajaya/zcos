@@ -41,7 +41,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F4** | Thread + IPC | ✅ done | `task 0: producer sent 2000`, capability gates |
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 5 grants`, `task 6: devmgr: blk published` |
-| **F7** | VFS & penyimpanan | 🔨 F7a–F7f done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk` |
+| **F7** | VFS & penyimpanan | 🔨 F7a–F7g done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered` |
 | **F8** | Desktop | ⬜ planned | — |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
@@ -333,8 +333,24 @@ VFS → write path → journaling → `fsck`**.
       probes, `initd` restarts it, and it resumes filesystem serving from
       persisted `.bss` state (see
       [ADR 0010](adr/0010-userspace-service-supervision.md)).
-- [ ] F7g: journaling / crash-consistency (ordered writes at minimum).
-- [ ] F7h: `fsck` / recovery tooling and a documented on-disk format.
+- [x] F7g: crash consistency. `Volume::mount_into` replays the log and then
+      **clamps `head_seq` to the last record that actually replayed**, reporting
+      it through `was_recovered()`. A superblock can claim a record a crash never
+      made durable; before the clamp, `append` derived the next sequence from
+      that claim, so the new record landed past the gap and no later mount could
+      ever reach it — silent, permanent loss on the first write after a crash.
+      The host implementation mirrors the clamp so the cross-check stays
+      meaningful, and the host formatter plants a torn, over-claiming tail so
+      *every* boot exercises recovery rather than only the tests. Two host tests
+      back it: a `BlockIo` double with a volatile write-back layer sweeps every
+      power-loss boundary in a mixed workload and asserts the tree is always a
+      consistent, appendable prefix, and a crafted over-claiming superblock
+      proves the clamp and that the next append reuses the gap (see
+      [ADR 0011](adr/0011-crash-recovery-clamps-log-head.md)).
+- [ ] F7h: `fsck` / recovery tooling and a documented on-disk format. It reads
+      `FLAG_CLEAN` (which `mark_clean` will set from `FS_OP_UNMOUNT`) to decide
+      whether a mount needed recovery, and repairs the mid-log truncation that
+      F7g deliberately leaves in place.
 - [ ] F7i: `devfs` and `tmpfs` mounts; device nodes for the block domain.
 - [ ] F7j: file permissions and ownership in the VFS (feeds F9 security).
 
@@ -363,6 +379,12 @@ VFS → write path → journaling → `fsck`**.
   `task 2: write: ok` and `task 2: /data/probe: file, 10 bytes` show the write
   and stat paths, and `task 4: blk: zcfs stopped` shows the domain flush and
   exit on `exit`.
+- F7g: `task 4: blk: zcfs recovered` in the boot log, proving the guest clamped
+  the torn, over-claiming tail the host formatter planted. The two host tests
+  `a_superblock_that_over_claims_is_clamped_on_mount` and
+  `crash_at_every_step_keeps_the_tree_consistent` pass, and
+  `tools/check-disk-zcfs.sh` reports `recovery: head 4 -> 3 ok` for the planted
+  image.
 - Boot log contains `vfs: mounted` with the filesystem name and mount point.
 - A CI boot writes a known pattern to `/data/probe`, unmounts, remounts, and
   reads it back with a matching checksum: `vfs: persistence ok`.

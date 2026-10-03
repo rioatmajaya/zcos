@@ -22,7 +22,10 @@ bridge, so `SYS_WRITE` and friends reach the disk: the shell writes
 `/data/probe`, unmounts, remounts, and reads it back. F7f adds `initd`, a
 ring-3 supervisor that owns service lifecycle: the block domain faults on
 purpose, the kernel posts the fault on a supervision channel, and `initd`
-restarts the domain, which resumes serving from persisted state. See
+restarts the domain, which resumes serving from persisted state. F7g makes that
+volume crash-safe: a mount clamps the log head to what actually reached the
+disk, so a superblock that over-claims a record the crash lost cannot strand
+the next write past the gap. See
 [the roadmap](docs/roadmap.md) for the phase map and pass
 criteria, and [CHANGELOG.md](CHANGELOG.md) for what changed.
 
@@ -83,8 +86,10 @@ disk through the same `FileSystem` trait; `persist` proves durability by
 unmounting, remounting from the device, and reading its own write back. The
 supervisor `initd` watches the block domain over the supervision channel and
 restarts it after a deliberate fault, so a service the kernel did not choose
-to keep alive comes back on a userspace decision. Next up is **F7g —
-journaling / crash-consistency**.
+to keep alive comes back on a userspace decision. The host formatter plants a
+torn, over-claiming tail so every boot must recover before serving, and both
+`zcfs` implementations clamp the log head to what actually reached the disk.
+Next up is **F7h — `fsck`**.
 
 ## Development
 
