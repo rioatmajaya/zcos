@@ -544,11 +544,26 @@ downloads. Order: virtio-net driver domain → ARP/IP/UDP → TCP → DNS →
 sockets API → TLS. Pass criteria: `net: dhcp lease`, `net: tcp echo ok`.
 Reference: `17-network-stack.md`.
 
-### Track C — Kompatibilitas Linux (after F9)
+### Track C — Kompatibilitas Linux (driver domain)
 
-A DDE-style userspace adapter presenting a small Linux-kernel API shim to an
-individual driver, mapping resource access to ZC OS IPC/capabilities. Linux
-code must never run in kernel privilege. First targets are virtio devices.
+Mikrokernel tidak menulis driver sendiri; ia memakai driver Linux di sebuah
+**driver domain** userspace, dan Linux tidak pernah berjalan di kernel
+privilege ([ADR 0014](adr/0014-linux-driver-domain.md)). Dua fase:
+
+1. **DDE** — port driver core Linux + driver terpilih ke userspace (model
+   Genode `dde_linux`/`lx_kit`). Menutup driver MMIO + IRQ + DMA sederhana dan
+   seluruh stack: jaringan, USB, input, storage sederhana, sound, TCP/IP, WiFi.
+2. **Driver container** — kernel Linux utuh sebagai satu domain di atas
+   virtualisasi, sehingga driver yang butuh ring 0 (GPU, NVMe, storage
+   high-performance) jalan tanpa perubahan.
+
+Kedua fase memakai kontrak device-server yang sama dengan domain native:
+capability untuk MMIO/port dan IRQ, lalu menyajikan device lewat IPC; domain
+driver disupervisi dan bisa di-restart seperti `zc-blk`. Batas yang diakui ada
+di ADR 0014 (driver ring-0 di fase 1, framework yang belum di-port, semantik
+SMP/atomic, DMA/IOMMU). Subsystem **rootfs** Linux (menjalankan distro hasil
+unduh) adalah goal terpisah yang lebih besar, bukan bagian track ini.
+
 Reference: `12-driver-lainnya.md`, `25-virtio.md`.
 
 ### Track H — Hardware enablement (feeds F8/F9)
@@ -568,5 +583,6 @@ recorded in [`CHANGELOG.md`](../CHANGELOG.md) + no dangling TODO on that path.
 
 - [`CHANGELOG.md`](../CHANGELOG.md) — what changed, per release.
 - [`docs/adr/`](adr/README.md) — why the architecture is what it is.
+- [`docs/carry-over.md`](carry-over.md) — what to reuse from the earlier prototype.
 - [`docs/blocked/`](blocked/TEMPLATE.md) — parked components.
 - [`CONTRIBUTING.md`](../CONTRIBUTING.md) — how to build, test, and commit.

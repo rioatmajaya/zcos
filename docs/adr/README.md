@@ -20,6 +20,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0011](0011-crash-recovery-clamps-log-head.md) | Crash recovery clamps the log head | Accepted |
 | [0012](0012-fsck-repairs-the-durable-prefix.md) | fsck repairs the durable prefix | Accepted |
 | [0013](0013-permissions-and-ownership.md) | File permissions and ownership in the VFS | Accepted |
+| [0014](0014-linux-driver-domain.md) | Reuse Linux drivers in a userspace driver domain | Accepted |
 
 ## Adding a decision
 

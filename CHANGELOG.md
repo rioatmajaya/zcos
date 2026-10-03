@@ -269,6 +269,13 @@ and ownership in the VFS (F7j).
   then appends `exit`, so the shell always reads a complete, in-order script.
   The kernel's shared input ring (`INPUT_CAP`) rises from 256 to 1024 bytes so
   a body plus the terminator cannot overflow it.
+- The project now commits to reusing Linux drivers in a userspace **driver
+  domain** instead of hand-writing one per device
+  ([ADR 0014](docs/adr/0014-linux-driver-domain.md)): DDE first, then a full
+  Linux kernel as a driver container under virtualization for drivers that need
+  ring 0. A new [`docs/carry-over.md`](docs/carry-over.md) records what from the
+  earlier prototype is worth reusing (host emulator, compositor, GUI toolkit,
+  `.sof` packaging) and what to leave behind (hand-written and ring-0 drivers).
 
 ## [0.1.0] - 2026-10-01
 
