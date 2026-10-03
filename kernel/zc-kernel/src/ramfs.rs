@@ -98,6 +98,9 @@ impl FileSystem for RamFs<'_> {
                 mode: DIR_MODE,
                 size: 0,
                 node,
+                // The archive is a read-only system image owned by root.
+                uid: 0,
+                gid: 0,
             });
         }
         let (_, data) = self.entry(node)?;
@@ -106,6 +109,8 @@ impl FileSystem for RamFs<'_> {
             mode: FILE_MODE,
             size: data.len() as u64,
             node,
+            uid: 0,
+            gid: 0,
         })
     }
 

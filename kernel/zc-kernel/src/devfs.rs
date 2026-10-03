@@ -107,6 +107,9 @@ impl FileSystem for DevFs {
                 mode: DIR_MODE,
                 size: 0,
                 node,
+                // Device nodes are kernel-owned; the mount has no writer.
+                uid: 0,
+                gid: 0,
             });
         }
         Self::service(node).ok_or(VfsError::NotFound)?;
@@ -117,6 +120,8 @@ impl FileSystem for DevFs {
             // is the driver's answer, not a property of the node.
             size: 0,
             node,
+            uid: 0,
+            gid: 0,
         })
     }
 
@@ -185,7 +190,10 @@ mod tests {
         // Writing a device or inventing one is refused: the table of services
         // is the only source of nodes.
         assert_eq!(fs.write(node, 0, b"x"), Err(VfsError::NotSupported));
-        assert_eq!(fs.create(ROOT, b"newdev", 0o644), Err(VfsError::NotSupported));
+        assert_eq!(
+            fs.create(ROOT, b"newdev", 0o644, crate::perms::Identity::ROOT),
+            Err(VfsError::NotSupported)
+        );
         assert_eq!(fs.lookup(ROOT, b"newdev"), Err(VfsError::NotFound));
     }
 

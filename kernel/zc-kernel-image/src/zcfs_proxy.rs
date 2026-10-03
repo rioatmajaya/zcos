@@ -49,6 +49,7 @@ use zc_abi::{
     FS_STATUS_NOT_A_DIRECTORY, FS_STATUS_NOT_FOUND, FS_STATUS_NOT_SUPPORTED, FS_STATUS_NO_SPACE,
     FS_STATUS_OK, FS_STATUS_TABLE_FULL, STAT_LEN, Stat,
 };
+use zc_kernel::perms::Identity;
 use zc_kernel::vfs::{FileSystem, NodeId, VfsError};
 
 /// The zcfs root directory's node id, fixed by the on-disk format.
@@ -276,8 +277,17 @@ impl FileSystem for Proxy {
         Ok(reply.result as usize)
     }
 
-    fn create(&self, dir: NodeId, name: &[u8], mode: u32) -> Result<NodeId, VfsError> {
+    fn create(
+        &self,
+        dir: NodeId,
+        name: &[u8],
+        mode: u32,
+        _owner: Identity,
+    ) -> Result<NodeId, VfsError> {
         let me = FS_CALLER.load(Ordering::Relaxed);
+        // The on-disk record carries the mode but not the owner yet, so the
+        // domain stores no owner and reports root for every zcfs node. The
+        // mode still reaches the disk, so permissions survive a reboot.
         let reply = exchange(
             me,
             FS_OP_CREATE,

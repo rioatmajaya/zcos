@@ -2,22 +2,27 @@
 //!
 //! Reads keystrokes with blocking serial reads, edits a single line with
 //! backspace support, and runs `help`, `echo`, `cat`, `stat`, `write`, `tmp`,
-//! `persist`, `mount`, `umount`, and `exit`. Output goes through the log
-//! syscall, so the transcript appears in the kernel serial log.
+//! `persist`, `chmod`, `mount`, `umount`, and `exit`. Output goes through the
+//! log syscall, so the transcript appears in the kernel serial log.
 //!
 //! `persist` is the durability proof: it writes the zcfs volume through the
 //! VFS, unmounts and remounts it, and reads its own bytes back. The remount
 //! replays the log from the disk with a cold cache, so a matching read cannot
 //! have come from RAM. `tmp` is the same round trip against the `tmpfs` mount,
 //! where nothing can reach a disk at all.
+//!
+//! The shell runs as an unprivileged user (see `zc_kernel::service::OWNERS`),
+//! so `chmod` on a file it owns is a real permission change: the scripted boot
+//! clears `/tmp/scratch`'s read bit, watches the kernel deny the read, and
+//! restores it. `stat` prints the mode and owner that decision is made from.
 
 #![no_std]
 #![no_main]
 #![allow(unsafe_code)]
 
 use zc_user::{
-    FS_ID_ZCFS, FS_OP_STOP, IPC_FS, KIND_CHR, KIND_DIR, Stat, close, create, log, mount, open, read,
-    send_to, serial_read, stat, task_exit, umount, write,
+    FS_ID_ZCFS, FS_OP_STOP, IPC_FS, KIND_CHR, KIND_DIR, Stat, chmod, close, create, log, mount,
+    open, read, send_to, serial_read, stat, task_exit, umount, write,
 };
 
 /// Contents `persist` writes and expects to read back.
@@ -152,6 +157,35 @@ fn out_u64(mut value: u64) {
     out_bytes(&ordered[..len]);
 }
 
+/// Appends a mode as `0` plus three octal digits, e.g. `0644`.
+///
+/// Only the nine permission bits are shown; the type bits a filesystem may
+/// carry above them are not part of what `stat` reports.
+fn out_mode(mode: u32) {
+    let bits = mode & 0o777;
+    out_bytes(b"0");
+    out_bytes(&[
+        b'0' + ((bits >> 6) & 0o7) as u8,
+        b'0' + ((bits >> 3) & 0o7) as u8,
+        b'0' + (bits & 0o7) as u8,
+    ]);
+}
+
+/// Parses up to four octal digits into a mode; `None` on any other byte.
+fn parse_octal(text: &[u8]) -> Option<u32> {
+    if text.is_empty() || text.len() > 4 {
+        return None;
+    }
+    let mut value = 0u32;
+    for &byte in text {
+        if !(b'0'..=b'7').contains(&byte) {
+            return None;
+        }
+        value = value * 8 + u32::from(byte - b'0');
+    }
+    Some(value)
+}
+
 /// Logs a raw byte slice as text.
 fn print_bytes(bytes: &[u8]) {
     let mut chunk = [0u8; 64];
@@ -179,7 +213,7 @@ fn run(line: &[u8]) -> bool {
     }
     match argv[0] {
         b"help" => {
-            log("Commands: help echo cat stat write tmp persist mount umount exit\n");
+            log("Commands: help echo cat stat write tmp persist chmod mount umount exit\n");
         }
         b"echo" => {
             for index in 1..count {
@@ -199,7 +233,10 @@ fn run(line: &[u8]) -> bool {
             let path = core::str::from_utf8(argv[1]).unwrap_or("");
             let fd = open(path);
             if fd == u64::MAX {
-                log("cat: no such file\n");
+                // A missing file and a denied one both surface as `u64::MAX`;
+                // the kernel logs an `audit:` line for the denial, so this
+                // message stays deliberately neutral.
+                log("cat: cannot open\n");
                 return false;
             }
             let mut buffer = [0u8; 64];
@@ -224,6 +261,8 @@ fn run(line: &[u8]) -> bool {
                 mode: 0,
                 size: 0,
                 node: 0,
+                uid: 0,
+                gid: 0,
             };
             if !stat(path, &mut info) {
                 log("stat: no such file\n");
@@ -233,16 +272,24 @@ fn run(line: &[u8]) -> bool {
             if info.kind == KIND_DIR {
                 out_bytes(b": dir, ");
                 out_u64(info.size);
-                out_bytes(b" bytes\n");
+                out_bytes(b" bytes");
             } else if info.kind == KIND_CHR {
                 // A device node holds no bytes, so printing a length for it
                 // would be a lie; the kind is the interesting part.
-                out_bytes(b": char device\n");
+                out_bytes(b": char device");
             } else {
                 out_bytes(b": file, ");
                 out_u64(info.size);
-                out_bytes(b" bytes\n");
+                out_bytes(b" bytes");
             }
+            // The mode and owner are what the kernel's permission checks use.
+            out_bytes(b", mode ");
+            out_mode(info.mode);
+            out_bytes(b", uid ");
+            out_u64(u64::from(info.uid));
+            out_bytes(b" gid ");
+            out_u64(u64::from(info.gid));
+            out_bytes(b"\n");
             out_flush();
         }
         b"write" => {
@@ -271,6 +318,24 @@ fn run(line: &[u8]) -> bool {
                 return false;
             }
             log("write: ok\n");
+        }
+        b"chmod" => {
+            if count < 3 {
+                log("usage: chmod <file> <octal>\n");
+                return false;
+            }
+            let path = core::str::from_utf8(argv[1]).unwrap_or("");
+            let Some(mode) = parse_octal(argv[2]) else {
+                log("chmod: bad mode\n");
+                return false;
+            };
+            if chmod(path, mode) == 0 {
+                log("chmod: ok\n");
+            } else {
+                // The kernel logs the `audit:` line; a denial and an
+                // unsupported filesystem both land here.
+                log("chmod: failed\n");
+            }
         }
         b"mount" => {
             if mount(DATA_MOUNT, FS_ID_ZCFS) == 0 {

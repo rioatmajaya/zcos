@@ -21,6 +21,7 @@
 
 use core::cell::RefCell;
 
+use crate::perms::{self, Identity};
 use crate::vfs::{FileSystem, NodeId, VfsError};
 use zc_abi::{KIND_DIR, KIND_FILE, Stat};
 
@@ -34,7 +35,10 @@ pub const NAME_MAX: usize = 32;
 pub const CONTENT_MAX: usize = 512;
 
 /// Mode reported for the root directory.
-const DIR_MODE: u32 = 0o755;
+///
+/// World-writable so an unprivileged task can create scratch files in it;
+/// scratch space has no secrecy to protect.
+const DIR_MODE: u32 = 0o777;
 
 /// One file or directory: its name, its parent, and its bytes.
 ///
@@ -52,6 +56,10 @@ struct Node {
     kind: u32,
     /// Permission bits, as the creator supplied them.
     mode: u32,
+    /// User that created the node.
+    uid: u32,
+    /// Group the creator belonged to.
+    gid: u32,
     /// Bytes of `data` in use.
     len: u32,
     /// Inline file content.
@@ -67,6 +75,8 @@ impl Node {
             name: [0; NAME_MAX],
             kind: KIND_FILE,
             mode: 0,
+            uid: 0,
+            gid: 0,
             len: 0,
             data: [0; CONTENT_MAX],
         }
@@ -190,6 +200,8 @@ impl<const N: usize> FileSystem for TmpFs<N> {
             // though its children live in the same volume.
             size: if entry.kind == KIND_DIR { 0 } else { u64::from(entry.len) },
             node,
+            uid: entry.uid,
+            gid: entry.gid,
         })
     }
 
@@ -224,7 +236,13 @@ impl<const N: usize> FileSystem for TmpFs<N> {
         Ok(data.len())
     }
 
-    fn create(&self, dir: NodeId, name: &[u8], mode: u32) -> Result<NodeId, VfsError> {
+    fn create(
+        &self,
+        dir: NodeId,
+        name: &[u8],
+        mode: u32,
+        owner: Identity,
+    ) -> Result<NodeId, VfsError> {
         if dir != ROOT {
             return Err(VfsError::NotADirectory);
         }
@@ -235,7 +253,8 @@ impl<const N: usize> FileSystem for TmpFs<N> {
         // Creating a name that already exists is not an error: the shell calls
         // `create` when `open` fails and then re-opens, and a caller that
         // re-creates a file it is about to overwrite should get the node back
-        // rather than an error it cannot act on.
+        // rather than an error it cannot act on. The existing node keeps its
+        // owner and mode.
         if let Some(existing) = inner.find(name) {
             return Ok(existing);
         }
@@ -249,9 +268,25 @@ impl<const N: usize> FileSystem for TmpFs<N> {
         entry.name_len = name.len() as u8;
         entry.kind = KIND_FILE;
         entry.mode = mode;
+        // The creator owns what it creates.
+        entry.uid = owner.uid;
+        entry.gid = owner.gid;
         entry.len = 0;
         inner.used += 1;
         Ok(index as NodeId)
+    }
+
+    fn set_mode(&self, node: NodeId, mode: u32, owner: Identity) -> Result<(), VfsError> {
+        let mut inner = self.inner.borrow_mut();
+        let entry = inner.get_mut(node)?;
+        // The VFS already refused a non-owner, but the filesystem is the last
+        // line of defense: never change a mode on the strength of a caller
+        // that does not own the node.
+        if !perms::may_set_mode(entry.uid, owner) {
+            return Err(VfsError::PermissionDenied);
+        }
+        entry.mode = mode;
+        Ok(())
     }
 }
 
@@ -281,7 +316,7 @@ mod tests {
     #[test]
     fn create_write_and_read_round_trip() {
         let fs = fs();
-        let node = fs.create(ROOT, b"scratch", 0o644).expect("create");
+        let node = fs.create(ROOT, b"scratch", 0o644, Identity::ROOT).expect("create");
         assert_ne!(node, ROOT);
         assert_eq!(fs.used(), 1);
         assert_eq!(fs.write(node, 0, b"ZCTMPFS1"), Ok(8));
@@ -302,7 +337,7 @@ mod tests {
     #[test]
     fn writing_at_an_offset_extends_and_overwrites() {
         let fs = fs();
-        let node = fs.create(ROOT, b"log", 0o644).expect("create");
+        let node = fs.create(ROOT, b"log", 0o644, Identity::ROOT).expect("create");
         assert_eq!(fs.write(node, 2, b"cd"), Ok(2));
         // The gap before the write reads as zeros, and the file spans it.
         assert_eq!(fs.stat(node).expect("stat").size, 4);
@@ -319,7 +354,7 @@ mod tests {
     #[test]
     fn a_write_past_the_content_limit_has_no_space() {
         let fs = fs();
-        let node = fs.create(ROOT, b"big", 0o644).expect("create");
+        let node = fs.create(ROOT, b"big", 0o644, Identity::ROOT).expect("create");
         let chunk = [0xABu8; CONTENT_MAX];
         assert_eq!(fs.write(node, 0, &chunk), Ok(CONTENT_MAX));
         // One more byte past the end does not fit, and the file is unchanged.
@@ -330,11 +365,11 @@ mod tests {
     #[test]
     fn creating_an_existing_name_returns_the_same_node() {
         let fs = fs();
-        let first = fs.create(ROOT, b"same", 0o644).expect("create");
+        let first = fs.create(ROOT, b"same", 0o644, Identity::ROOT).expect("create");
         assert_eq!(fs.write(first, 0, b"keep"), Ok(4));
         // The shell creates then re-opens, so a repeat create must not fail and
         // must not lose the content already there.
-        let again = fs.create(ROOT, b"same", 0o600).expect("recreate");
+        let again = fs.create(ROOT, b"same", 0o600, Identity::ROOT).expect("recreate");
         assert_eq!(again, first);
         assert_eq!(fs.used(), 1);
         let mut buffer = [0u8; 8];
@@ -346,9 +381,12 @@ mod tests {
     #[test]
     fn a_full_volume_refuses_new_names() {
         let fs = TmpFs::<3>::new();
-        fs.create(ROOT, b"one", 0o644).expect("first");
-        fs.create(ROOT, b"two", 0o644).expect("second");
-        assert_eq!(fs.create(ROOT, b"three", 0o644), Err(VfsError::TableFull));
+        fs.create(ROOT, b"one", 0o644, Identity::ROOT).expect("first");
+        fs.create(ROOT, b"two", 0o644, Identity::ROOT).expect("second");
+        assert_eq!(
+            fs.create(ROOT, b"three", 0o644, Identity::ROOT),
+            Err(VfsError::TableFull)
+        );
         // Existing names still resolve, so a full volume stays usable.
         assert!(fs.lookup(ROOT, b"one").is_ok());
         assert_eq!(fs.used(), 2);
@@ -357,11 +395,14 @@ mod tests {
     #[test]
     fn directories_are_not_files() {
         let fs = fs();
-        let node = fs.create(ROOT, b"file", 0o644).expect("create");
+        let node = fs.create(ROOT, b"file", 0o644, Identity::ROOT).expect("create");
         // Lookup inside a file, and reading or writing the root, are all
         // directory errors rather than silent successes.
         assert_eq!(fs.lookup(node, b"x"), Err(VfsError::NotADirectory));
-        assert_eq!(fs.create(node, b"x", 0o644), Err(VfsError::NotADirectory));
+        assert_eq!(
+            fs.create(node, b"x", 0o644, Identity::ROOT),
+            Err(VfsError::NotADirectory)
+        );
         let mut buffer = [0u8; 4];
         assert_eq!(fs.read(ROOT, 0, &mut buffer), Err(VfsError::NotADirectory));
         assert_eq!(fs.write(ROOT, 0, b"x"), Err(VfsError::NotADirectory));
@@ -370,9 +411,15 @@ mod tests {
     #[test]
     fn bad_names_and_nodes_are_rejected() {
         let fs = fs();
-        assert_eq!(fs.create(ROOT, b"", 0o644), Err(VfsError::BadPath));
+        assert_eq!(
+            fs.create(ROOT, b"", 0o644, Identity::ROOT),
+            Err(VfsError::BadPath)
+        );
         let long = [b'a'; NAME_MAX + 1];
-        assert_eq!(fs.create(ROOT, &long, 0o644), Err(VfsError::BadPath));
+        assert_eq!(
+            fs.create(ROOT, &long, 0o644, Identity::ROOT),
+            Err(VfsError::BadPath)
+        );
         assert_eq!(fs.lookup(ROOT, b""), Err(VfsError::BadPath));
         assert_eq!(fs.lookup(ROOT, &long), Err(VfsError::BadPath));
 
@@ -387,7 +434,41 @@ mod tests {
     #[test]
     fn an_overlong_offset_is_rejected() {
         let fs = fs();
-        let node = fs.create(ROOT, b"file", 0o644).expect("create");
+        let node = fs.create(ROOT, b"file", 0o644, Identity::ROOT).expect("create");
         assert_eq!(fs.write(node, u64::MAX, b"x"), Err(VfsError::NoSpace));
+    }
+
+    #[test]
+    fn the_creator_owns_the_node_and_may_change_its_mode() {
+        let fs = fs();
+        let alice = Identity::new(1, 1);
+        let node = fs.create(ROOT, b"mine", 0o644, alice).expect("create");
+        let stat = fs.stat(node).expect("stat");
+        assert_eq!(stat.uid, 1);
+        assert_eq!(stat.gid, 1);
+
+        // The owner may change the mode; a stranger may not; root may.
+        assert_eq!(fs.set_mode(node, 0o600, alice), Ok(()));
+        assert_eq!(fs.stat(node).expect("stat").mode, 0o600);
+        assert_eq!(
+            fs.set_mode(node, 0o644, Identity::new(7, 9)),
+            Err(VfsError::PermissionDenied)
+        );
+        assert_eq!(fs.stat(node).expect("stat").mode, 0o600);
+        assert_eq!(fs.set_mode(node, 0o644, Identity::ROOT), Ok(()));
+        assert_eq!(fs.stat(node).expect("stat").mode, 0o644);
+        // A node that does not exist cannot be changed.
+        assert_eq!(
+            fs.set_mode(99, 0o644, Identity::ROOT),
+            Err(VfsError::NotFound)
+        );
+    }
+
+    #[test]
+    fn the_root_directory_is_world_writable_scratch_space() {
+        let fs = fs();
+        // An unprivileged task must be able to create in `/tmp`; the root's
+        // mode is the only thing that lets it.
+        assert_eq!(fs.stat(ROOT).expect("root").mode, 0o777);
     }
 }

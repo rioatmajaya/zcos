@@ -32,7 +32,11 @@ the clamped head, and stamps clean, so an unclean volume reports
 `fsck: repaired 4 -> 3` and then `fsck: clean`. F7i adds the two filesystems a
 running system expects besides a disk: `tmpfs`, writable RAM that proves the
 VFS write path without a block device, and `devfs`, which publishes a node per
-supervised service so `/dev/blk` resolves through an ordinary path walk. See
+supervised service so `/dev/blk` resolves through an ordinary path walk. F7j
+adds file permissions and ownership: every task carries a uid/gid, every node
+an owner, and the VFS enforces mode bits at the syscall boundary, so the
+unprivileged shell's `chmod` can clear `/tmp/scratch`'s read bit and the kernel
+logs `audit: task 2 denied read /tmp/scratch` until it restores the mode. See
 [the roadmap](docs/roadmap.md) for the phase map and pass
 criteria, and [CHANGELOG.md](CHANGELOG.md) for what changed.
 
@@ -96,7 +100,7 @@ restarts it after a deliberate fault, so a service the kernel did not choose
 to keep alive comes back on a userspace decision. The host formatter plants a
 torn, over-claiming tail so every boot must recover before serving, and both
 `zcfs` implementations clamp the log head to what actually reached the disk.
-Next up is **F7j — file permissions and ownership**.
+Next up is **F8 — Desktop**.
 
 ## Development
 

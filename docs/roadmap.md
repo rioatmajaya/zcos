@@ -41,7 +41,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F4** | Thread + IPC | ✅ done | `task 0: producer sent 2000`, capability gates |
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 5 grants`, `task 6: devmgr: blk published` |
-| **F7** | VFS & penyimpanan | ✅ F7a–F7i done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device` |
+| **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
 | **F8** | Desktop | ⬜ planned | — |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
@@ -368,7 +368,23 @@ VFS → write path → journaling → `fsck`**.
       belong to its driver, not to the namespace. The shell grows a `tmp`
       command that writes and reads `/tmp/scratch`, and `stat /dev/blk` prints
       `char device`.
-- [ ] F7j: file permissions and ownership in the VFS (feeds F9 security).
+- [x] F7j: file permissions and ownership in the VFS (feeds F9 security).
+      Every task carries an `Identity { uid, gid }` and every `Stat` an owner,
+      and the VFS enforces POSIX-style mode bits. The policy lives in a pure
+      `zc-kernel::perms` module — owner/group/other classes, checked without
+      unioning, with root bypassing — so it is host-tested like the rest of the
+      crate, and the check runs at the syscall boundary rather than inside each
+      filesystem, because a `FileSystem` method has no caller to identify. The
+      dispatcher passes the caller's identity in and a descriptor caches the
+      `Stat` taken at open, so a later read or write needs no second filesystem
+      call. `Stat` grows `uid`/`gid` (24 → 32 bytes), `tmpfs` records the
+      creator as owner, and `ramfs`/`devfs`/`zcfs` report root; only `tmpfs`
+      supports `set_mode` today. `initd` is the sole root task, so the shell
+      runs unprivileged and the checks are observable: `chmod` on `/tmp/scratch`
+      clears its read bit, the kernel logs the denial, and restoring the mode
+      lets the read through. Ownership is runtime-only for now — the zcfs
+      on-disk record carries the mode but not the owner (see
+      [ADR 0013](adr/0013-permissions-and-ownership.md)).
 
 **Pass criteria (machine).**
 
@@ -415,6 +431,14 @@ VFS → write path → journaling → `fsck`**.
   uses, with no block device involved — and `task 2: /dev/blk: char device`
   shows the block domain's node resolving through the path walk and reporting
   the new kind. The `devfs` and `tmpfs` host tests pass.
+- F7j: `stat /tmp/scratch` prints the mode and owner the kernel decides from,
+  `task 2: /tmp/scratch: file, 8 bytes, mode 0644, uid 1 gid 1`, and the
+  unprivileged shell's `chmod` round trip is observable: `task 2: chmod: ok`
+  after clearing the read bit, `audit: task 2 denied read /tmp/scratch` and
+  `task 2: cat: cannot open` when the read is refused, and a readable `cat`
+  after restoring the mode. The `perms`, `task`, `service`, `vfs`, and `tmpfs`
+  host tests pass, including the root bypass, the owner/group/other classes,
+  and the cached-mode descriptor check.
 - Boot log contains `vfs: mounted` with the filesystem name and mount point.
 - A CI boot writes a known pattern to `/data/probe`, unmounts, remounts, and
   reads it back with a matching checksum: `vfs: persistence ok`.

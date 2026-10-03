@@ -19,8 +19,11 @@ pub const MAX_TASKS: u32 = 8;
 /// Byte capacity of the ring a driver domain shares with the kernel.
 ///
 /// Fixed so both sides agree on the layout; the type is shared verbatim
-/// across the privilege boundary.
-pub const INPUT_CAP: usize = 256;
+/// across the privilege boundary. Sized to hold a full scripted boot pass
+/// plus a margin: the headless harness feeds a command body while the shell
+/// is still draining the previous one, and a ring that only just fits one
+/// body drops bytes mid-line when the next arrives.
+pub const INPUT_CAP: usize = 1024;
 
 /// A single-producer, single-consumer byte ring.
 ///
@@ -348,7 +351,7 @@ mod tests {
         // stay inside one page and the alignment must be pointer-sized.
         assert!(size_of::<SharedInputRing>() <= 4096);
         assert_eq!(align_of::<SharedInputRing>(), align_of::<usize>());
-        assert_eq!(INPUT_CAP, 256);
+        assert_eq!(INPUT_CAP, 1024);
     }
 
     #[test]

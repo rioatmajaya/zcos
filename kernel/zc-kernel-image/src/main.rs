@@ -12,10 +12,10 @@ use core::arch::asm;
 use core::fmt::Write;
 
 use zc_abi::{
-    BootInfo, MemoryRegion, Message, SYS_CAP_DELEGATE, SYS_CLOSE, SYS_FB_INFO, SYS_LOG_WRITE,
-    SYS_MAP_FRAME, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ, SYS_RECV, SYS_RECV_FROM, SYS_SEND,
-    SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START, SYS_SERVICE_STATUS, SYS_SERVICE_STOP,
-    SYS_TASK_EXIT, SYS_YIELD,
+    BootInfo, MemoryRegion, Message, SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOSE, SYS_FB_INFO,
+    SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ, SYS_RECV, SYS_RECV_FROM,
+    SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START, SYS_SERVICE_STATUS,
+    SYS_SERVICE_STOP, SYS_TASK_EXIT, SYS_YIELD,
 };
 use zc_kernel::{
     addrspace::AddressSpace,
@@ -248,6 +248,7 @@ fn exercise_mechanisms(alloc: &mut FrameAllocator<'_>, usable: u64) {
         (SYS_SERVICE_START, Action::ServiceStart),
         (SYS_SERVICE_STOP, Action::ServiceStop),
         (SYS_SERVICE_STATUS, Action::ServiceStatus),
+        (SYS_CHMOD, Action::Chmod),
     ];
     for (number, expected) in dispatched {
         match syscall::dispatch(number) {

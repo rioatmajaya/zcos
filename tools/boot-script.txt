@@ -7,5 +7,10 @@ write /data/probe ZCPERSIST1
 stat /data/probe
 persist
 tmp
+stat /tmp/scratch
+chmod /tmp/scratch 0000
+cat /tmp/scratch
+chmod /tmp/scratch 0644
+cat /tmp/scratch
 stat /dev/blk
 exit

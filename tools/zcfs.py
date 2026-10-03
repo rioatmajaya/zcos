@@ -272,8 +272,11 @@ def format_volume(path, sectors, pattern=HOST_PATTERN, clean=False):
     root = append(KIND_CREATE, 0, create_payload(0, MODE_DIR | 0o755, b"/"))
     if root != ROOT_NODE:
         raise AssertionError("the root must be node %d" % ROOT_NODE)
+    # World-writable: the shell runs as an unprivileged user (F7j) and
+    # rewrites /probe through the VFS, so the mode must let it. The mode is
+    # the only owner information the on-disk record carries today.
     probe = append(KIND_CREATE, 0,
-                   create_payload(ROOT_NODE, MODE_FILE | 0o644, b"probe"))
+                   create_payload(ROOT_NODE, MODE_FILE | 0o666, b"probe"))
     append(KIND_DATA, probe, data_payload(0, pattern))
     committed = seq
 

@@ -4,6 +4,12 @@
 //! dispatcher reads arguments and writes results through one layout. The
 //! exit magic below is the only value that makes the stub abandon the return
 //! path and resume the kernel instead.
+//!
+//! Each slot also carries its [`Identity`]: the user and group a task runs as,
+//! which the VFS checks against a node's owner. It is set at spawn and kept
+//! across a restart, so reviving a service never changes who it is.
+
+use crate::perms::Identity;
 
 /// Marker returned by the dispatcher to leave userspace for good.
 ///
@@ -152,6 +158,8 @@ pub struct Task {
     blocked: bool,
     /// Page-table root the task runs under; loaded into CR3 on switch.
     cr3: u64,
+    /// User and group the task runs as, for VFS permission checks.
+    owner: Identity,
 }
 
 impl Task {
@@ -183,6 +191,12 @@ impl Task {
     #[must_use]
     pub const fn cr3(self) -> u64 {
         self.cr3
+    }
+
+    /// Returns the identity the task runs as.
+    #[must_use]
+    pub const fn owner(self) -> Identity {
+        self.owner
     }
 }
 
@@ -219,12 +233,14 @@ impl<const N: usize> TaskTable<N> {
         }
     }
 
-    /// Adds a task with its first-run registers, frame, and page-table root.
+    /// Adds a task with its first-run registers, frame, page-table root, and
+    /// identity.
     pub fn spawn(
         &mut self,
         regs: SyscallRegs,
         frame: IrqFrame,
         cr3: u64,
+        owner: Identity,
     ) -> Result<usize, TaskError> {
         let Some(index) = self.tasks.iter().position(|slot| slot.is_none()) else {
             return Err(TaskError::TableFull);
@@ -235,6 +251,7 @@ impl<const N: usize> TaskTable<N> {
             alive: true,
             blocked: false,
             cr3,
+            owner,
         });
         Ok(index)
     }
@@ -260,6 +277,27 @@ impl<const N: usize> TaskTable<N> {
         self.tasks
             .get(index)
             .and_then(|slot| slot.map(|task| task.cr3))
+    }
+
+    /// Returns the identity of the task at `index`, if the slot is live.
+    #[must_use]
+    pub fn owner_of(&self, index: usize) -> Option<Identity> {
+        self.tasks
+            .get(index)
+            .and_then(|slot| slot.map(|task| task.owner))
+    }
+
+    /// Returns the running task's identity.
+    ///
+    /// `current` always names a spawned slot while a syscall runs, so the
+    /// fallback is unreachable; it is a non-root identity so that if it ever
+    /// were reached the VFS would deny rather than grant.
+    #[must_use]
+    pub fn current_owner(&self) -> Identity {
+        match self.tasks[self.current] {
+            Some(task) => task.owner,
+            None => Identity::new(1, 1),
+        }
     }
 
     /// Returns how many context switches happened so far.
@@ -489,8 +527,8 @@ mod task_table_tests {
     #[test]
     fn switch_cycles_alive_tasks() {
         let mut table = TaskTable::<4>::new();
-        let zero = table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000).unwrap();
-        let one = table.spawn(SyscallRegs::EMPTY, frame(0x200), 0x1000).unwrap();
+        let zero = table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000, Identity::ROOT).unwrap();
+        let one = table.spawn(SyscallRegs::EMPTY, frame(0x200), 0x1000, Identity::ROOT).unwrap();
         assert_eq!(table.alive_count(), 2);
 
         let mut regs = SyscallRegs::EMPTY;
@@ -512,10 +550,10 @@ mod task_table_tests {
         let mut table = TaskTable::<4>::new();
         assert_eq!(table.current_cr3(), 0);
         table
-            .spawn(SyscallRegs::EMPTY, frame(0x100), 0xA000)
+            .spawn(SyscallRegs::EMPTY, frame(0x100), 0xA000, Identity::ROOT)
             .unwrap();
         table
-            .spawn(SyscallRegs::EMPTY, frame(0x200), 0xB000)
+            .spawn(SyscallRegs::EMPTY, frame(0x200), 0xB000, Identity::ROOT)
             .unwrap();
         // Fresh spawns do not move `current` until the first switch.
         assert_eq!(table.current(), 0);
@@ -532,8 +570,8 @@ mod task_table_tests {
     #[test]
     fn exit_skips_dead_tasks_and_ends() {
         let mut table = TaskTable::<4>::new();
-        table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000).unwrap();
-        table.spawn(SyscallRegs::EMPTY, frame(0x200), 0x1000).unwrap();
+        table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000, Identity::ROOT).unwrap();
+        table.spawn(SyscallRegs::EMPTY, frame(0x200), 0x1000, Identity::ROOT).unwrap();
 
         let mut regs = SyscallRegs::EMPTY;
         let mut irq = IrqFrame::EMPTY;
@@ -547,8 +585,8 @@ mod task_table_tests {
     #[test]
     fn restart_resets_state_and_keeps_slot_alive() {
         let mut table = TaskTable::<4>::new();
-        table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000).unwrap();
-        table.spawn(SyscallRegs::EMPTY, frame(0x200), 0x1000).unwrap();
+        table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000, Identity::ROOT).unwrap();
+        table.spawn(SyscallRegs::EMPTY, frame(0x200), 0x1000, Identity::ROOT).unwrap();
 
         let mut regs = SyscallRegs::EMPTY;
         let mut irq = IrqFrame::EMPTY;
@@ -573,7 +611,7 @@ mod task_table_tests {
     #[test]
     fn restart_alone_resumes_itself() {
         let mut table = TaskTable::<1>::new();
-        table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000).unwrap();
+        table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000, Identity::ROOT).unwrap();
 
         let mut regs = SyscallRegs::EMPTY;
         let mut irq = IrqFrame::EMPTY;
@@ -586,8 +624,8 @@ mod task_table_tests {
 
     #[test]
     fn blocked_tasks_are_skipped_until_woken() {        let mut table = TaskTable::<4>::new();
-        table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000).unwrap();
-        table.spawn(SyscallRegs::EMPTY, frame(0x200), 0x1000).unwrap();
+        table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000, Identity::ROOT).unwrap();
+        table.spawn(SyscallRegs::EMPTY, frame(0x200), 0x1000, Identity::ROOT).unwrap();
 
         let mut regs = SyscallRegs::EMPTY;
         let mut irq = IrqFrame::EMPTY;
@@ -612,9 +650,9 @@ mod task_table_tests {
         );
 
         let mut table = TaskTable::<1>::new();
-        table.spawn(SyscallRegs::EMPTY, frame(0), 0x1000).unwrap();
+        table.spawn(SyscallRegs::EMPTY, frame(0), 0x1000, Identity::ROOT).unwrap();
         assert_eq!(
-            table.spawn(SyscallRegs::EMPTY, frame(0), 0x1000),
+            table.spawn(SyscallRegs::EMPTY, frame(0), 0x1000, Identity::ROOT),
             Err(TaskError::TableFull)
         );
     }
@@ -628,8 +666,8 @@ mod task_table_tests {
     #[test]
     fn respawn_revives_a_dead_slot_without_moving_current() {
         let mut table = TaskTable::<4>::new();
-        let zero = table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000).unwrap();
-        let one = table.spawn(SyscallRegs::EMPTY, frame(0x200), 0x2000).unwrap();
+        let zero = table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000, Identity::ROOT).unwrap();
+        let one = table.spawn(SyscallRegs::EMPTY, frame(0x200), 0x2000, Identity::ROOT).unwrap();
         assert_eq!(zero, 0);
         // Kill slot 0 as if it faulted; the scheduler moves on.
         let mut regs = SyscallRegs::EMPTY;
@@ -652,8 +690,8 @@ mod task_table_tests {
     #[test]
     fn kill_marks_a_slot_dead() {
         let mut table = TaskTable::<4>::new();
-        table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000).unwrap();
-        table.spawn(SyscallRegs::EMPTY, frame(0x200), 0x2000).unwrap();
+        table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000, Identity::ROOT).unwrap();
+        table.spawn(SyscallRegs::EMPTY, frame(0x200), 0x2000, Identity::ROOT).unwrap();
         assert!(table.is_alive(1));
         table.kill(1).unwrap();
         assert!(!table.is_alive(1));
@@ -664,8 +702,8 @@ mod task_table_tests {
     #[test]
     fn runnable_peer_excludes_self_and_blocked_tasks() {
         let mut table = TaskTable::<4>::new();
-        table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000).unwrap();
-        table.spawn(SyscallRegs::EMPTY, frame(0x200), 0x2000).unwrap();
+        table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000, Identity::ROOT).unwrap();
+        table.spawn(SyscallRegs::EMPTY, frame(0x200), 0x2000, Identity::ROOT).unwrap();
         // Both slots are runnable peers of each other.
         assert!(table.has_runnable_other_than(0));
         assert!(table.has_runnable_other_than(1));
@@ -681,5 +719,33 @@ mod task_table_tests {
         // An empty table has no peers for anyone.
         let empty = TaskTable::<4>::new();
         assert!(!empty.has_runnable_other_than(0));
+    }
+
+    #[test]
+    fn identity_is_set_at_spawn_and_survives_a_restart() {
+        let mut table = TaskTable::<4>::new();
+        let user = Identity::new(1, 2);
+        let zero = table
+            .spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000, user)
+            .unwrap();
+        let one = table
+            .spawn(SyscallRegs::EMPTY, frame(0x200), 0x2000, Identity::ROOT)
+            .unwrap();
+        assert_eq!(table.owner_of(zero), Some(user));
+        assert_eq!(table.owner_of(one), Some(Identity::ROOT));
+        assert_eq!(table.owner_of(9), None);
+        // The running slot is the first spawned one until a switch.
+        assert_eq!(table.current_owner(), user);
+
+        // A restart keeps the slot's identity: reviving a service must not
+        // change who it runs as.
+        let mut regs = SyscallRegs::EMPTY;
+        let mut irq = IrqFrame::EMPTY;
+        assert_eq!(table.block_current(&mut regs, &mut irq), Some(one));
+        assert_eq!(table.current_owner(), Identity::ROOT);
+        table
+            .restart_current(&mut regs, &mut irq, SyscallRegs::EMPTY, frame(0x200))
+            .unwrap();
+        assert_eq!(table.owner_of(one), Some(Identity::ROOT));
     }
 }

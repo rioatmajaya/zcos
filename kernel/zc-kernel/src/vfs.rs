@@ -11,7 +11,14 @@
 //! Paths may be absolute (`/dir/file`) or relative (`dir/file`); with no
 //! working directory yet, a relative path is resolved from the mount table's
 //! root. `.` and `..` are rejected rather than interpreted.
+//!
+//! Permissions are enforced here, not in each filesystem: a [`FileSystem`]
+//! method has no caller, so the syscall layer passes the caller's
+//! [`Identity`] in and the VFS applies [`crate::perms`] against the node's
+//! reported owner and mode. A descriptor caches the [`Stat`] taken at open, so
+//! a later read or write is checked without another filesystem call.
 
+use crate::perms::{self, Access, Identity};
 use zc_abi::Stat;
 
 /// Longest path accepted, in bytes.
@@ -58,6 +65,8 @@ pub enum VfsError {
     BadBuffer,
     /// The backing store has no room for the operation.
     NoSpace,
+    /// The caller's identity does not permit the operation on this node.
+    PermissionDenied,
     /// The operation needs the filesystem to run and must be retried.
     ///
     /// A [`FileSystem`] method cannot block — it has no access to the
@@ -98,8 +107,25 @@ pub trait FileSystem {
 
     /// Creates `name` in directory `dir` and returns the new node.
     ///
-    /// The default is read-only; a writable filesystem overrides it.
-    fn create(&self, _dir: NodeId, _name: &[u8], _mode: u32) -> Result<NodeId, VfsError> {
+    /// `owner` becomes the new node's owner, so a file belongs to whoever
+    /// created it. The default is read-only; a writable filesystem overrides
+    /// it.
+    fn create(
+        &self,
+        _dir: NodeId,
+        _name: &[u8],
+        _mode: u32,
+        _owner: Identity,
+    ) -> Result<NodeId, VfsError> {
+        Err(VfsError::NotSupported)
+    }
+
+    /// Replaces `node`'s permission bits.
+    ///
+    /// The caller has already been checked by the VFS; the filesystem only has
+    /// to store the new mode. The default is a filesystem that cannot change a
+    /// mode in place, such as a read-only mount or one served over IPC.
+    fn set_mode(&self, _node: NodeId, _mode: u32, _owner: Identity) -> Result<(), VfsError> {
         Err(VfsError::NotSupported)
     }
 }
@@ -190,25 +216,51 @@ impl MountTable {
         })
     }
 
-    /// Creates the entry `path` names, returning its node.
+    /// Creates the entry `path` names, returning its node, owned by `owner`.
     ///
     /// The parent directory is resolved through the mount, so `create` on a
     /// path whose parent is missing fails with [`VfsError::NotFound`] rather
-    /// than creating anything.
-    pub fn create(&self, path: &[u8], mode: u32) -> Result<NodeId, VfsError> {
+    /// than creating anything. The caller must hold write and search
+    /// permission on the parent, checked against the parent's own mode.
+    pub fn create(
+        &self,
+        path: &[u8],
+        mode: u32,
+        owner: Identity,
+    ) -> Result<NodeId, VfsError> {
         let (mount, rest) = self.locate(path)?;
-        let Some(at) = rest.iter().rposition(|&byte| byte == b'/') else {
-            if rest.is_empty() {
-                return Err(VfsError::BadPath);
+        let (dir, name) = match rest.iter().rposition(|&byte| byte == b'/') {
+            Some(at) => {
+                let name = &rest[at + 1..];
+                if name.is_empty() {
+                    return Err(VfsError::BadPath);
+                }
+                (walk(mount, &rest[..at])?, name)
             }
-            return mount.fs.create(mount.fs.root(), rest, mode);
+            None => {
+                if rest.is_empty() {
+                    return Err(VfsError::BadPath);
+                }
+                (mount.fs.root(), rest)
+            }
         };
-        let (parent, name) = (&rest[..at], &rest[at + 1..]);
-        if name.is_empty() {
-            return Err(VfsError::BadPath);
+        let stat = mount.fs.stat(dir)?;
+        perms::check(stat.uid, stat.gid, stat.mode, owner, Access::Write)?;
+        perms::check(stat.uid, stat.gid, stat.mode, owner, Access::Search)?;
+        mount.fs.create(dir, name, mode, owner)
+    }
+
+    /// Replaces the permission bits of the node `path` names.
+    ///
+    /// Only the node's owner or root may change its mode; the filesystem then
+    /// decides whether it can store the change.
+    pub fn set_mode(&self, path: &[u8], mode: u32, owner: Identity) -> Result<(), VfsError> {
+        let resolved = self.resolve(path)?;
+        let stat = resolved.fs.stat(resolved.node)?;
+        if !perms::may_set_mode(stat.uid, owner) {
+            return Err(VfsError::PermissionDenied);
         }
-        let parent = walk(mount, parent)?;
-        mount.fs.create(parent, name, mode)
+        resolved.fs.set_mode(resolved.node, mode, owner)
     }
 
     /// Finds the mount with the longest matching prefix and returns it with
@@ -238,13 +290,19 @@ impl Default for MountTable {
     }
 }
 
-/// An open file description: descriptor, filesystem, node, and read offset.
+/// An open file description: descriptor, filesystem, node, offset, and the
+/// metadata taken at open.
+///
+/// The cached [`Stat`] is what makes a read or write checkable without a
+/// second filesystem call — and, for a mount served over IPC, without a second
+/// round trip.
 #[derive(Clone, Copy)]
 struct Descriptor {
     fd: u32,
     fs: &'static dyn FileSystem,
     node: NodeId,
     offset: u64,
+    stat: Stat,
 }
 
 /// Per-task descriptor table mapping small integers to open files.
@@ -266,11 +324,17 @@ impl DescriptorTable {
         }
     }
 
-    /// Opens `node` and returns its descriptor.
+    /// Opens `node` with the metadata `stat` reports and returns its
+    /// descriptor.
+    ///
+    /// The caller passes the `Stat` it already took to make its open-time
+    /// permission decision, so the check and the cached copy can never
+    /// disagree.
     pub fn open(
         &mut self,
         fs: &'static dyn FileSystem,
         node: NodeId,
+        stat: Stat,
     ) -> Result<u32, VfsError> {
         let Some(slot) = self.slots.iter_mut().find(|slot| slot.is_none()) else {
             return Err(VfsError::TableFull);
@@ -282,25 +346,44 @@ impl DescriptorTable {
             fs,
             node,
             offset: 0,
+            stat,
         });
         Ok(fd)
     }
 
     /// Reads up to `out.len()` bytes, advancing the descriptor's offset.
-    pub fn read(&mut self, fd: u32, out: &mut [u8]) -> Result<usize, VfsError> {
+    ///
+    /// The caller must hold read permission on the opened node.
+    pub fn read(&mut self, fd: u32, out: &mut [u8], owner: Identity) -> Result<usize, VfsError> {
         let Some(descriptor) = self.descriptor_mut(fd) else {
             return Err(VfsError::BadFd);
         };
+        perms::check(
+            descriptor.stat.uid,
+            descriptor.stat.gid,
+            descriptor.stat.mode,
+            owner,
+            Access::Read,
+        )?;
         let count = descriptor.fs.read(descriptor.node, descriptor.offset, out)?;
         descriptor.offset += count as u64;
         Ok(count)
     }
 
     /// Writes up to `data.len()` bytes, advancing the descriptor's offset.
-    pub fn write(&mut self, fd: u32, data: &[u8]) -> Result<usize, VfsError> {
+    ///
+    /// The caller must hold write permission on the opened node.
+    pub fn write(&mut self, fd: u32, data: &[u8], owner: Identity) -> Result<usize, VfsError> {
         let Some(descriptor) = self.descriptor_mut(fd) else {
             return Err(VfsError::BadFd);
         };
+        perms::check(
+            descriptor.stat.uid,
+            descriptor.stat.gid,
+            descriptor.stat.mode,
+            owner,
+            Access::Write,
+        )?;
         let count = descriptor.fs.write(descriptor.node, descriptor.offset, data)?;
         descriptor.offset += count as u64;
         Ok(count)
@@ -443,12 +526,16 @@ mod tests {
                     mode: 0o755,
                     size: 0,
                     node,
+                    uid: 0,
+                    gid: 0,
                 }),
                 1 => Ok(Stat {
                     kind: KIND_FILE,
                     mode: 0o644,
                     size: 3,
                     node,
+                    uid: 0,
+                    gid: 0,
                 }),
                 _ => Err(VfsError::NotFound),
             }
@@ -501,15 +588,33 @@ mod tests {
             }
         }
 
-        fn stat(&self, _node: NodeId) -> Result<Stat, VfsError> {
-            Err(VfsError::NotFound)
+        fn stat(&self, node: NodeId) -> Result<Stat, VfsError> {
+            // Both `0` (root) and `2` (`dir`) are directories the test creates
+            // inside; anything else has no metadata.
+            match node {
+                0 | 2 => Ok(Stat {
+                    kind: KIND_DIR,
+                    mode: 0o755,
+                    size: 0,
+                    node,
+                    uid: 0,
+                    gid: 0,
+                }),
+                _ => Err(VfsError::NotFound),
+            }
         }
 
         fn read(&self, _node: NodeId, _offset: u64, _out: &mut [u8]) -> Result<usize, VfsError> {
             Err(VfsError::NotADirectory)
         }
 
-        fn create(&self, dir: NodeId, name: &[u8], _mode: u32) -> Result<NodeId, VfsError> {
+        fn create(
+            &self,
+            dir: NodeId,
+            name: &[u8],
+            _mode: u32,
+            _owner: Identity,
+        ) -> Result<NodeId, VfsError> {
             if name.is_empty() {
                 return Err(VfsError::BadPath);
             }
@@ -548,7 +653,13 @@ mod tests {
             Err(VfsError::WouldBlock)
         }
 
-        fn create(&self, _dir: NodeId, _name: &[u8], _mode: u32) -> Result<NodeId, VfsError> {
+        fn create(
+            &self,
+            _dir: NodeId,
+            _name: &[u8],
+            _mode: u32,
+            _owner: Identity,
+        ) -> Result<NodeId, VfsError> {
             Err(VfsError::WouldBlock)
         }
     }
@@ -560,20 +671,63 @@ mod tests {
         table.mount(b"/data", &WRITABLE_FS).expect("data mount");
 
         // Directly under the mount point: the parent is the mount root.
-        assert!(table.create(b"/data/new", 0o644).is_ok());
+        assert!(table.create(b"/data/new", 0o644, Identity::ROOT).is_ok());
         // Below a directory: the parent is resolved through `lookup` first.
-        assert!(table.create(b"/data/dir/new", 0o644).is_ok());
+        assert!(table.create(b"/data/dir/new", 0o644, Identity::ROOT).is_ok());
         // A missing parent must not create anything.
-        assert_eq!(table.create(b"/data/missing/new", 0o644), Err(VfsError::NotFound));
+        assert_eq!(
+            table.create(b"/data/missing/new", 0o644, Identity::ROOT),
+            Err(VfsError::NotFound)
+        );
         // The mount point itself is a directory, not a creatable name.
-        assert_eq!(table.create(b"/data", 0o644), Err(VfsError::BadPath));
-        assert_eq!(table.create(b"/data/", 0o644), Err(VfsError::BadPath));
+        assert_eq!(table.create(b"/data", 0o644, Identity::ROOT), Err(VfsError::BadPath));
+        assert_eq!(table.create(b"/data/", 0o644, Identity::ROOT), Err(VfsError::BadPath));
     }
 
     #[test]
     fn create_on_a_read_only_mount_is_not_supported() {
         let table = table();
-        assert_eq!(table.create(b"/new", 0o644), Err(VfsError::NotSupported));
+        assert_eq!(
+            table.create(b"/new", 0o644, Identity::ROOT),
+            Err(VfsError::NotSupported)
+        );
+    }
+
+    #[test]
+    fn create_checks_write_and_search_on_the_parent() {
+        let mut table = MountTable::new();
+        table.mount(b"/data", &WRITABLE_FS).expect("mount");
+
+        // The test filesystem's root is `0755` owned by root. A non-owner has
+        // neither write nor search, so the create is refused before the
+        // filesystem is asked.
+        let stranger = Identity::new(7, 9);
+        let before = CREATED.load(Ordering::Relaxed);
+        assert_eq!(
+            table.create(b"/data/new", 0o644, stranger),
+            Err(VfsError::PermissionDenied)
+        );
+        assert_eq!(CREATED.load(Ordering::Relaxed), before);
+        // Root bypasses the parent check and reaches the filesystem.
+        assert!(table.create(b"/data/new", 0o644, Identity::ROOT).is_ok());
+        assert_eq!(CREATED.load(Ordering::Relaxed), before + 1);
+    }
+
+    #[test]
+    fn set_mode_requires_the_owner_or_root() {
+        let mut table = MountTable::new();
+        table.mount(b"/", &ROOT_FS).expect("root mount");
+        // The test filesystem does not implement `set_mode`, so an allowed
+        // caller gets `NotSupported` rather than a permission error.
+        assert_eq!(
+            table.set_mode(b"/a", 0o600, Identity::ROOT),
+            Err(VfsError::NotSupported)
+        );
+        // The file is owned by root, so a stranger is refused earlier.
+        assert_eq!(
+            table.set_mode(b"/a", 0o600, Identity::new(1, 1)),
+            Err(VfsError::PermissionDenied)
+        );
     }
 
     #[test]
@@ -587,16 +741,30 @@ mod tests {
             VfsError::WouldBlock
         );
         assert_eq!(
-            table.create(b"/blocking/a", 0o644),
+            table.create(b"/blocking/a", 0o644, Identity::ROOT),
             Err(VfsError::WouldBlock)
         );
 
         // Through the descriptor table: read and write must not be rewritten.
         let mut descriptors = DescriptorTable::new();
-        let fd = descriptors.open(&BLOCKING_FS, 0).expect("descriptor");
+        let stat = Stat {
+            kind: KIND_FILE,
+            mode: 0o644,
+            size: 0,
+            node: 0,
+            uid: 0,
+            gid: 0,
+        };
+        let fd = descriptors.open(&BLOCKING_FS, 0, stat).expect("descriptor");
         let mut buffer = [0u8; 4];
-        assert_eq!(descriptors.read(fd, &mut buffer), Err(VfsError::WouldBlock));
-        assert_eq!(descriptors.write(fd, b"x"), Err(VfsError::WouldBlock));
+        assert_eq!(
+            descriptors.read(fd, &mut buffer, Identity::ROOT),
+            Err(VfsError::WouldBlock)
+        );
+        assert_eq!(
+            descriptors.write(fd, b"x", Identity::ROOT),
+            Err(VfsError::WouldBlock)
+        );
     }
 
     #[test]
@@ -604,8 +772,8 @@ mod tests {
         let mut table = MountTable::new();
         table.mount(b"/data", &WRITABLE_FS).expect("mount");
         let before = CREATED.load(Ordering::Relaxed);
-        table.create(b"/data/one", 0o644).expect("create");
-        table.create(b"/data/two", 0o644).expect("create");
+        table.create(b"/data/one", 0o644, Identity::ROOT).expect("create");
+        table.create(b"/data/two", 0o644, Identity::ROOT).expect("create");
         assert_eq!(CREATED.load(Ordering::Relaxed), before + 2);
     }
 
@@ -617,7 +785,7 @@ mod tests {
         // leaked deliberately — a test's filesystem must outlive the table.
         let fs: &'static crate::tmpfs::TmpFs<8> =
             std::boxed::Box::leak(std::boxed::Box::new(Default::default()));
-        let node = fs.create(0, b"scratch", 0o644).expect("create");
+        let node = fs.create(0, b"scratch", 0o644, Identity::ROOT).expect("create");
         fs.write(node, 0, b"ZCTMPFS1").expect("write");
         let dev: &'static crate::devfs::DevFs =
             std::boxed::Box::leak(std::boxed::Box::new(Default::default()));
@@ -647,9 +815,9 @@ mod tests {
             VfsError::NotFound
         );
         // Creating a file only works where a filesystem accepts it.
-        assert!(table.create(b"/tmp/fresh", 0o644).is_ok());
+        assert!(table.create(b"/tmp/fresh", 0o644, Identity::ROOT).is_ok());
         assert_eq!(
-            table.create(b"/dev/fresh", 0o644),
+            table.create(b"/dev/fresh", 0o644, Identity::ROOT),
             Err(VfsError::NotSupported)
         );
     }
@@ -724,26 +892,41 @@ mod tests {
         assert_eq!(table.resolve(b"/a").unwrap_err(), VfsError::NotFound);
     }
 
+    /// The `Stat` the root test filesystem reports for its file `a`.
+    fn file_stat() -> Stat {
+        Stat {
+            kind: KIND_FILE,
+            mode: 0o644,
+            size: 3,
+            node: 1,
+            uid: 0,
+            gid: 0,
+        }
+    }
+
     #[test]
     fn descriptors_read_with_offsets() {
         let table = table();
         let resolved = table.resolve(b"/a").expect("file");
         let mut descriptors = DescriptorTable::new();
         let fd = descriptors
-            .open(resolved.fs, resolved.node)
+            .open(resolved.fs, resolved.node, file_stat())
             .expect("descriptor");
         assert!(fd >= FD_BASE);
 
         let mut first = [0u8; 2];
-        assert_eq!(descriptors.read(fd, &mut first), Ok(2));
+        assert_eq!(descriptors.read(fd, &mut first, Identity::ROOT), Ok(2));
         assert_eq!(&first, b"ab");
         let mut rest = [0u8; 8];
-        assert_eq!(descriptors.read(fd, &mut rest[..1]), Ok(1));
+        assert_eq!(descriptors.read(fd, &mut rest[..1], Identity::ROOT), Ok(1));
         assert_eq!(&rest[..1], b"c");
-        assert_eq!(descriptors.read(fd, &mut rest[..1]), Ok(0));
+        assert_eq!(descriptors.read(fd, &mut rest[..1], Identity::ROOT), Ok(0));
 
         descriptors.close(fd).expect("close");
-        assert_eq!(descriptors.read(fd, &mut rest), Err(VfsError::BadFd));
+        assert_eq!(
+            descriptors.read(fd, &mut rest, Identity::ROOT),
+            Err(VfsError::BadFd)
+        );
         assert_eq!(descriptors.close(fd), Err(VfsError::BadFd));
         assert_eq!(descriptors.len(), 0);
     }
@@ -755,15 +938,19 @@ mod tests {
         let mut descriptors = DescriptorTable::new();
         let mut fds = [0u32; MAX_FDS];
         for fd in fds.iter_mut() {
-            *fd = descriptors.open(resolved.fs, resolved.node).expect("open");
+            *fd = descriptors
+                .open(resolved.fs, resolved.node, file_stat())
+                .expect("open");
         }
         assert_eq!(
-            descriptors.open(resolved.fs, resolved.node),
+            descriptors.open(resolved.fs, resolved.node, file_stat()),
             Err(VfsError::TableFull)
         );
         descriptors.close(fds[0]).expect("close");
         assert_eq!(descriptors.len(), MAX_FDS - 1);
-        assert!(descriptors.open(resolved.fs, resolved.node).is_ok());
+        assert!(descriptors
+            .open(resolved.fs, resolved.node, file_stat())
+            .is_ok());
     }
 
     #[test]
@@ -772,9 +959,31 @@ mod tests {
         let resolved = table.resolve(b"/a").expect("file");
         let mut descriptors = DescriptorTable::new();
         let fd = descriptors
-            .open(resolved.fs, resolved.node)
+            .open(resolved.fs, resolved.node, file_stat())
             .expect("descriptor");
-        assert_eq!(descriptors.write(fd, b"x"), Err(VfsError::NotSupported));
+        assert_eq!(
+            descriptors.write(fd, b"x", Identity::ROOT),
+            Err(VfsError::NotSupported)
+        );
+    }
+
+    #[test]
+    fn descriptor_checks_the_cached_mode() {
+        let table = table();
+        let resolved = table.resolve(b"/a").expect("file");
+        let mut descriptors = DescriptorTable::new();
+        // The file is `0644` owned by root; a stranger may read it but not
+        // write it, and the decision comes from the cached stat.
+        let fd = descriptors
+            .open(resolved.fs, resolved.node, file_stat())
+            .expect("descriptor");
+        let stranger = Identity::new(7, 9);
+        let mut buffer = [0u8; 1];
+        assert_eq!(descriptors.read(fd, &mut buffer, stranger), Ok(1));
+        assert_eq!(
+            descriptors.write(fd, b"x", stranger),
+            Err(VfsError::PermissionDenied)
+        );
     }
 
     #[test]

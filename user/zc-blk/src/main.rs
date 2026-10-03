@@ -34,7 +34,7 @@ use zc_abi::{
     FS_OP_READ, FS_OP_STAT, FS_OP_STOP, FS_OP_UNMOUNT, FS_OP_WRITE, FS_STATUS_BAD_BUFFER,
     FS_STATUS_BAD_PATH, FS_STATUS_CORRUPT, FS_STATUS_NOT_A_DIRECTORY, FS_STATUS_NOT_FOUND,
     FS_STATUS_NOT_SUPPORTED, FS_STATUS_NO_SPACE, FS_STATUS_OK, FS_STATUS_TABLE_FULL, INFO_LEN,
-    INFO_QUEUE0, INFO_VIRT, IPC_DISCOVERY, IPC_FS, IPC_FS_REPLY, QUEUE_VIRT,
+    INFO_QUEUE0, INFO_VIRT, IPC_DISCOVERY, IPC_FS, IPC_FS_REPLY, QUEUE_VIRT, STAT_LEN,
 };
 use zc_kernel::block_cache::{CACHE_MAGIC, CACHE_TEST_SECTOR, Cache, cache_pattern_byte};
 use zc_kernel::ext2::{self, Ext2Error};
@@ -984,12 +984,16 @@ fn serve_op(
         }
         FS_OP_STAT => match volume.stat(node) {
             Ok((kind, mode, size)) => {
-                // The ABI `Stat` layout: kind, mode, size, node, little-endian.
-                let mut bytes = [0u8; 24];
+                // The ABI `Stat` layout: kind, mode, size, node, uid, gid,
+                // little-endian. The on-disk record carries the mode but not
+                // the owner yet, so every zcfs node reports root.
+                let mut bytes = [0u8; STAT_LEN];
                 bytes[0..4].copy_from_slice(&kind.to_le_bytes());
                 bytes[4..8].copy_from_slice(&mode.to_le_bytes());
                 bytes[8..16].copy_from_slice(&u64::from(size).to_le_bytes());
                 bytes[16..24].copy_from_slice(&node.to_le_bytes());
+                bytes[24..28].copy_from_slice(&0u32.to_le_bytes());
+                bytes[28..32].copy_from_slice(&0u32.to_le_bytes());
                 ex_write_bytes(&bytes);
                 ex_store32(FS_EXCHANGE_PAYLOAD, bytes.len() as u32);
                 FS_STATUS_OK

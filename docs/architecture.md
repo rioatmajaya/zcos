@@ -155,6 +155,20 @@ end-of-file — because the bytes a device produces belong to its driver; giving
 the mount a data path would mean handing it authority over hardware the
 filesystem has no business touching.
 
+Permissions are a second gate on top of capabilities. A capability says which
+objects a task may reach; a mode bit says what it may do with the bytes once it
+has reached them. Every task carries an `Identity { uid, gid }` set at spawn
+(only `initd` is root), every node reports an owner in its `Stat`, and the
+policy is a pure function in `zc-kernel::perms`: owner, group, and other classes
+are evaluated independently — never unioned — and root bypasses the check. The
+check runs at the syscall boundary rather than inside a `FileSystem`, because a
+`FileSystem` method has no caller to identify; the dispatcher passes the
+caller's identity down, and a descriptor caches the `Stat` taken at open so a
+later read or write is decided from that snapshot with no second filesystem
+call. Ownership is runtime-only for now: the zcfs record carries the mode but
+not the owner, so a reboot resets owners to root
+([ADR 0013](adr/0013-permissions-and-ownership.md)).
+
 ## IPC and authority
 
 ## IPC and authority

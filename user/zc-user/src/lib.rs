@@ -12,11 +12,12 @@ use core::arch::asm;
 
 pub use zc_abi::{
     FS_ID_ZCFS, FS_OP_STOP, IPC_FS, IPC_SUPERVISE, KIND_CHR, KIND_DIR, KIND_FILE,
-    SERVICE_KIND_EXIT, SERVICE_KIND_FAULT, SYS_CAP_DELEGATE, SYS_CLOSE, SYS_CREATE, SYS_FB_INFO,
-    SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_MOUNT, SYS_OPEN,
-    SYS_PORT_CLAIM, SYS_READ, SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ,
-    SYS_SERVICE_START, SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT, SYS_TASK_EXIT, SYS_UMOUNT,
-    SYS_WRITE, SYS_YIELD, Stat, SyscallError, supervise_kind, supervise_service,
+    SERVICE_KIND_EXIT, SERVICE_KIND_FAULT, SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOSE, SYS_CREATE,
+    SYS_FB_INFO, SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME,
+    SYS_MOUNT, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ, SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO,
+    SYS_SERIAL_READ, SYS_SERVICE_START, SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT,
+    SYS_TASK_EXIT, SYS_UMOUNT, SYS_WRITE, SYS_YIELD, Stat, SyscallError, supervise_kind,
+    supervise_service,
 };
 
 /// Issues a syscall with no arguments.
@@ -188,6 +189,20 @@ pub fn umount(path: &str) -> u64 {
 #[inline(always)]
 pub fn create(path: &str) -> u64 {
     syscall2(SYS_CREATE, path.as_ptr() as u64, path.len() as u64)
+}
+
+/// Changes `path`'s permission bits to `mode`, returning 0 or `u64::MAX`.
+///
+/// Only the node's owner (or root) may change its mode, and only a filesystem
+/// that can store the change in place supports it.
+#[inline(always)]
+pub fn chmod(path: &str, mode: u32) -> u64 {
+    syscall3(
+        SYS_CHMOD,
+        path.as_ptr() as u64,
+        path.len() as u64,
+        u64::from(mode),
+    )
 }
 
 /// Copies the framebuffer description into `info`.

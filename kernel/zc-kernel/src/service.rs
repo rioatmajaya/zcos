@@ -10,6 +10,13 @@
 //! The initial spawn stays in the kernel (the boot path must build address
 //! spaces and provision capabilities before any task runs); `initd` takes over
 //! lifecycle policy once the domains are up. See `docs/adr/0010`.
+//!
+//! The table also names the identity each slot runs as ([`OWNERS`]): `initd`
+//! is the only root task, and every other domain — the shell included — runs
+//! as an unprivileged user so the VFS permission checks are exercised rather
+//! than bypassed.
+
+use crate::perms::Identity;
 
 /// Task index of the producer bring-up task.
 pub const PRODUCER_TASK: usize = 0;
@@ -30,6 +37,31 @@ pub const INITD_TASK: usize = 7;
 
 /// Number of ring-3 task slots the bring-up uses.
 pub const TASK_COUNT: usize = 8;
+
+/// The one root task: the `initd` supervisor.
+pub const ROOT_IDENTITY: Identity = Identity::ROOT;
+
+/// The unprivileged identity every other bring-up task runs as.
+///
+/// A single user id is enough while only the shell performs file operations;
+/// the point is that it is not root, so the VFS checks apply.
+pub const USER_IDENTITY: Identity = Identity::new(1, 1);
+
+/// Identity each bring-up task runs as, indexed by task slot.
+///
+/// `initd` is root because it supervises services; every other slot, the
+/// shell included, is [`USER_IDENTITY`]. Set at spawn and kept across a
+/// restart, so reviving a service never changes who it runs as.
+pub const OWNERS: [Identity; TASK_COUNT] = [
+    USER_IDENTITY, // producer
+    USER_IDENTITY, // consumer
+    USER_IDENTITY, // shell
+    USER_IDENTITY, // fb
+    USER_IDENTITY, // blk
+    USER_IDENTITY, // kbd
+    USER_IDENTITY, // devmgr
+    ROOT_IDENTITY, // initd
+];
 
 /// Identifier of the block driver service.
 pub const BLK_SERVICE: u32 = 0;
@@ -110,5 +142,19 @@ mod tests {
         assert_eq!(for_task(SHELL_TASK), None);
         assert_eq!(for_task(KBD_TASK), None);
         assert_eq!(for_task(INITD_TASK), None);
+    }
+
+    #[test]
+    fn only_initd_runs_as_root() {
+        assert_eq!(OWNERS.len(), TASK_COUNT);
+        for (index, owner) in OWNERS.iter().enumerate() {
+            assert_eq!(
+                owner.is_root(),
+                index == INITD_TASK,
+                "slot {index} has the wrong privilege"
+            );
+        }
+        assert_eq!(OWNERS[SHELL_TASK], USER_IDENTITY);
+        assert!(!OWNERS[SHELL_TASK].is_root());
     }
 }

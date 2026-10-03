@@ -27,6 +27,7 @@ pub mod kbd;
 pub mod mbr;
 pub mod memory;
 pub mod pci;
+pub mod perms;
 pub mod ramfs;
 pub mod sched;
 pub mod service;

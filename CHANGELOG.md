@@ -21,10 +21,29 @@ ext2 mount (F7c-2), a read-only VFS core (F7d), a ZC-native log-structured
 filesystem (F7e), the writable volume mounted into the kernel VFS (F7e-2),
 a userspace supervisor that owns service lifecycle (F7f), crash recovery
 that clamps the log head (F7g), an `fsck` repair that makes an unclean
-mount clean again (F7h), and `devfs`/`tmpfs` mounts (F7i).
+mount clean again (F7h), `devfs`/`tmpfs` mounts (F7i), and file permissions
+and ownership in the VFS (F7j).
 
 ### Added
 
+- **File permissions and ownership in the VFS** (F7j): every task now carries
+  an identity and every node an owner, and the VFS enforces POSIX-style mode
+  bits on open, read, write, and create. A new pure `zc-kernel::perms` module
+  holds the policy — owner/group/other classes, checked without unioning, with
+  root bypassing — so it is host-tested like the rest of the crate. The check
+  lives at the syscall boundary rather than in each filesystem, because a
+  `FileSystem` method has no caller; the dispatcher passes the caller's
+  `Identity` in, and a descriptor caches the `Stat` taken at open so a later
+  read or write needs no second filesystem call. `Stat` grows `uid`/`gid`
+  (24 → 32 bytes), `tmpfs` records the creator as owner, and `ramfs`/`devfs`/
+  `zcfs` report root. `initd` is the only root task; the shell runs as an
+  unprivileged user, so the checks are observable: a new `SYS_CHMOD` and shell
+  `chmod` clear `/tmp/scratch`'s read bit, the kernel logs
+  `audit: task 2 denied read /tmp/scratch`, and restoring the mode lets the
+  read through. The shell's `stat` now prints the mode and owner the decision
+  is made from. Ownership is runtime-only for now — the zcfs on-disk record
+  carries the mode but not the owner, so a reboot resets owners to root (see
+  [ADR 0013](docs/adr/0013-permissions-and-ownership.md)).
 - **`tmpfs` and `devfs` mounts** (F7i): the VFS now holds four filesystems at
   once — the initramfs at `/`, the zcfs volume at `/data`, `devfs` at `/dev`,
   and `tmpfs` at `/tmp` — and `MAX_MOUNTS` rises from 4 to 8 so a session can
@@ -240,6 +259,16 @@ mount clean again (F7h), and `devfs`/`tmpfs` mounts (F7i).
   `VIRTIO_BLK_F_FLUSH` instead of writing zero, so the flush request it sends
   is one the device actually offered. Devices without the feature log
   `blk: flush unsupported` and continue.
+- The headless boot harness (`tools/run-qemu.sh --test`) now drives the shell
+  through `tools/boot-feed.py`, which launches QEMU with its serial on stdio,
+  copies the transcript to stdout, and paces the scripted commands. The old
+  whole-copy FIFO drip tore lines once the F7j script outgrew the input ring:
+  QEMU only forwards stdin while the chardev is actively written, and a burst
+  larger than the guest's receive buffers is dropped mid-line. The feeder keeps
+  one command body in flight, watches the transcript for a full pass, and only
+  then appends `exit`, so the shell always reads a complete, in-order script.
+  The kernel's shared input ring (`INPUT_CAP`) rises from 256 to 1024 bytes so
+  a body plus the terminator cannot overflow it.
 
 ## [0.1.0] - 2026-10-01
 

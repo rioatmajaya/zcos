@@ -27,6 +27,10 @@ pub struct Stat {
     pub size: u64,
     /// Filesystem-specific node number, opaque to callers.
     pub node: u64,
+    /// User that owns the node.
+    pub uid: u32,
+    /// Group that owns the node.
+    pub gid: u32,
 }
 
 /// Number of bytes [`Stat`] occupies on the wire.
@@ -44,6 +48,8 @@ impl Stat {
         out[4..8].copy_from_slice(&self.mode.to_le_bytes());
         out[8..16].copy_from_slice(&self.size.to_le_bytes());
         out[16..24].copy_from_slice(&self.node.to_le_bytes());
+        out[24..28].copy_from_slice(&self.uid.to_le_bytes());
+        out[28..32].copy_from_slice(&self.gid.to_le_bytes());
         Some(())
     }
 
@@ -62,6 +68,8 @@ impl Stat {
             mode: u32::from_le_bytes(bytes[4..8].try_into().ok()?),
             size: u64::from_le_bytes(bytes[8..16].try_into().ok()?),
             node: u64::from_le_bytes(bytes[16..24].try_into().ok()?),
+            uid: u32::from_le_bytes(bytes[24..28].try_into().ok()?),
+            gid: u32::from_le_bytes(bytes[28..32].try_into().ok()?),
         })
     }
 }
@@ -85,8 +93,8 @@ mod tests {
     fn stat_layout_is_stable() {
         // The syscall writes these bytes into a user buffer; a layout change
         // is an ABI change.
-        assert_eq!(STAT_LEN, 24);
-        assert_eq!(core::mem::size_of::<Stat>(), 24);
+        assert_eq!(STAT_LEN, 32);
+        assert_eq!(core::mem::size_of::<Stat>(), 32);
     }
 
     #[test]
@@ -96,6 +104,8 @@ mod tests {
             mode: 0o644,
             size: 31,
             node: 7,
+            uid: 1,
+            gid: 2,
         };
         let mut out = [0u8; STAT_LEN];
         assert_eq!(stat.write_into(&mut out), Some(()));
@@ -103,6 +113,8 @@ mod tests {
         assert_eq!(&out[4..8], &0o644u32.to_le_bytes());
         assert_eq!(&out[8..16], &31u64.to_le_bytes());
         assert_eq!(&out[16..24], &7u64.to_le_bytes());
+        assert_eq!(&out[24..28], &1u32.to_le_bytes());
+        assert_eq!(&out[28..32], &2u32.to_le_bytes());
     }
 
     #[test]
@@ -112,6 +124,8 @@ mod tests {
             mode: 0o755,
             size: 4096,
             node: 42,
+            uid: 0,
+            gid: 0,
         };
         let mut out = [0u8; STAT_LEN];
         assert_eq!(stat.write_into(&mut out), Some(()));
@@ -126,6 +140,8 @@ mod tests {
             mode: 0o755,
             size: 0,
             node: 0,
+            uid: 0,
+            gid: 0,
         };
         let mut out = [0u8; STAT_LEN - 1];
         assert_eq!(stat.write_into(&mut out), None);

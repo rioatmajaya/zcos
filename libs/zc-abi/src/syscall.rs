@@ -80,6 +80,11 @@ pub const SYS_SERVICE_STOP: u64 = 24;
 /// Reports whether a supervised service is running: arg is the service id;
 /// returns 1 when up, 0 when down, or `u64::MAX` when refused.
 pub const SYS_SERVICE_STATUS: u64 = 25;
+/// Changes a file's permission bits: args are path pointer, path length, and
+/// the new mode; returns 0 or `u64::MAX`. Only the node's owner (or root) may
+/// change its mode, and only a filesystem that stores modes in place supports
+/// it.
+pub const SYS_CHMOD: u64 = 26;
 
 /// Error codes returned by failed syscalls.
 ///
@@ -161,6 +166,7 @@ mod tests {
         assert_eq!(SYS_SERVICE_START, 23);
         assert_eq!(SYS_SERVICE_STOP, 24);
         assert_eq!(SYS_SERVICE_STATUS, 25);
+        assert_eq!(SYS_CHMOD, 26);
     }
 
     #[test]

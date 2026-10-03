@@ -16,6 +16,7 @@ use zc_kernel::capability::{Capability, CapabilityTable, Rights};
 use zc_kernel::gdt::{USER_CS, USER_RFLAGS, USER_SS};
 use zc_kernel::ipc::Endpoint;
 use zc_kernel::memory::{FrameAllocator, PAGE_SIZE};
+use zc_kernel::perms::{self, Access};
 use zc_kernel::ramfs::RamFs;
 use zc_kernel::service;
 use zc_kernel::syscall::{Action, dispatch};
@@ -583,6 +584,35 @@ pub unsafe extern "C" fn user_exception_entry(
     }
 }
 
+/// Reports a denied VFS operation on `path` and returns the failure code.
+///
+/// A denial is the security-relevant event: a task reaching for a file it may
+/// not touch is exactly what an audit trail exists to record. The kernel logs
+/// it rather than trusting the caller to, and answers `u64::MAX` so the
+/// existing "descriptor or failure" convention is unchanged.
+fn denied(me: usize, access: &str, path: &[u8]) -> u64 {
+    match core::str::from_utf8(path) {
+        Ok(path) => {
+            let _ = crate::serial::print(format_args!("audit: task {me} denied {access} {path}\n"));
+        }
+        Err(_) => {
+            let _ = crate::serial::print(format_args!(
+                "audit: task {me} denied {access} <path>\n"
+            ));
+        }
+    }
+    u64::MAX
+}
+
+/// Reports a denied operation on an open descriptor and returns the failure
+/// code. There is no path to name here, so the descriptor number stands in.
+fn denied_fd(me: usize, access: &str, fd: u32) -> u64 {
+    let _ = crate::serial::print(format_args!(
+        "audit: task {me} denied {access} fd {fd}\n"
+    ));
+    u64::MAX
+}
+
 /// Dispatches one userspace syscall.
 ///
 /// The stub passes both saved areas. The dispatcher writes the result into
@@ -761,9 +791,35 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                     return 0;
                 }
             };
+            // The node's metadata decides whether the caller may read it, and
+            // the same record is cached on the descriptor so a later read does
+            // not have to ask the filesystem again.
+            let stat = match resolved.fs.stat(resolved.node) {
+                Ok(stat) => stat,
+                Err(VfsError::WouldBlock) => {
+                    tasks.unblock_all();
+                    return block_with_retry(tasks, regs, frame, 0);
+                }
+                Err(_) => {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+            };
+            if perms::check(
+                stat.uid,
+                stat.gid,
+                stat.mode,
+                tasks.current_owner(),
+                Access::Read,
+            )
+            .is_err()
+            {
+                regs.set_result(denied(me, "read", path));
+                return 0;
+            }
             // SAFETY: task indexes stay below the table length.
             let table = unsafe { &mut (*core::ptr::addr_of_mut!(FDS))[me] };
-            match table.open(resolved.fs, resolved.node) {
+            match table.open(resolved.fs, resolved.node, stat) {
                 Ok(fd) => {
                     regs.set_result(u64::from(fd));
                     0
@@ -837,7 +893,7 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             };
             // SAFETY: as in `Open`.
             let table = unsafe { &mut (*core::ptr::addr_of_mut!(FDS))[me] };
-            match table.read(fd, out) {
+            match table.read(fd, out, tasks.current_owner()) {
                 Ok(count) => {
                     regs.set_result(count as u64);
                     0
@@ -845,6 +901,10 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 Err(VfsError::WouldBlock) => {
                     tasks.unblock_all();
                     block_with_retry(tasks, regs, frame, 0)
+                }
+                Err(VfsError::PermissionDenied) => {
+                    regs.set_result(denied_fd(me, "read", fd));
+                    0
                 }
                 Err(_) => {
                     regs.set_result(u64::MAX);
@@ -864,7 +924,7 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             };
             // SAFETY: as in `Open`.
             let table = unsafe { &mut (*core::ptr::addr_of_mut!(FDS))[me] };
-            match table.write(fd, data) {
+            match table.write(fd, data, tasks.current_owner()) {
                 Ok(count) => {
                     regs.set_result(count as u64);
                     0
@@ -873,6 +933,10 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                     tasks.unblock_all();
                     block_with_retry(tasks, regs, frame, 0)
                 }
+                Err(VfsError::PermissionDenied) => {
+                    regs.set_result(denied_fd(me, "write", fd));
+                    0
+                }
                 Err(_) => {
                     regs.set_result(u64::MAX);
                     0
@@ -880,6 +944,7 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             }
         }
         Ok(Action::Create) => {
+            let me = tasks.current();
             let path = match validate_user_slice(tasks, regs.rdi, regs.rsi) {
                 Some(path) => path,
                 None => {
@@ -889,7 +954,9 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             };
             // SAFETY: mounted once during setup before any task runs.
             let mounts = unsafe { &*core::ptr::addr_of!(MOUNTS) };
-            match mounts.create(path, crate::zcfs_proxy::CREATE_MODE) {
+            // The caller owns what it creates, and must hold write and search
+            // permission on the parent directory.
+            match mounts.create(path, crate::zcfs_proxy::CREATE_MODE, tasks.current_owner()) {
                 Ok(_) => {
                     regs.set_result(0);
                     0
@@ -897,6 +964,42 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 Err(VfsError::WouldBlock) => {
                     tasks.unblock_all();
                     block_with_retry(tasks, regs, frame, 0)
+                }
+                Err(VfsError::PermissionDenied) => {
+                    regs.set_result(denied(me, "create", path));
+                    0
+                }
+                Err(_) => {
+                    regs.set_result(u64::MAX);
+                    0
+                }
+            }
+        }
+        Ok(Action::Chmod) => {
+            let me = tasks.current();
+            let path = match validate_user_slice(tasks, regs.rdi, regs.rsi) {
+                Some(path) => path,
+                None => {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+            };
+            // SAFETY: mounted once during setup before any task runs.
+            let mounts = unsafe { &*core::ptr::addr_of!(MOUNTS) };
+            // The mode travels in the third argument; only the node's owner or
+            // root may change it.
+            match mounts.set_mode(path, regs.rdx as u32, tasks.current_owner()) {
+                Ok(()) => {
+                    regs.set_result(0);
+                    0
+                }
+                Err(VfsError::WouldBlock) => {
+                    tasks.unblock_all();
+                    block_with_retry(tasks, regs, frame, 0)
+                }
+                Err(VfsError::PermissionDenied) => {
+                    regs.set_result(denied(me, "chmod", path));
+                    0
                 }
                 Err(_) => {
                     regs.set_result(u64::MAX);
@@ -2101,6 +2204,9 @@ pub fn enter(
                     ss: u64::from(USER_SS),
                 },
                 cr3s[index],
+                // `initd` is the only root task; the rest, the shell included,
+                // run as an unprivileged user so the VFS checks apply.
+                service::OWNERS[index],
             )
             .is_err()
         {
