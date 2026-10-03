@@ -29,7 +29,10 @@ the next write past the gap. F7h turns a recovered mount clean again: a clean
 unmount sets `FLAG_CLEAN` through `mark_clean`, and an `fsck` repair — run by
 the block domain at boot and mirrored by a host tool — reads that flag, persists
 the clamped head, and stamps clean, so an unclean volume reports
-`fsck: repaired 4 -> 3` and then `fsck: clean`. See
+`fsck: repaired 4 -> 3` and then `fsck: clean`. F7i adds the two filesystems a
+running system expects besides a disk: `tmpfs`, writable RAM that proves the
+VFS write path without a block device, and `devfs`, which publishes a node per
+supervised service so `/dev/blk` resolves through an ordinary path walk. See
 [the roadmap](docs/roadmap.md) for the phase map and pass
 criteria, and [CHANGELOG.md](CHANGELOG.md) for what changed.
 
@@ -93,7 +96,7 @@ restarts it after a deliberate fault, so a service the kernel did not choose
 to keep alive comes back on a userspace decision. The host formatter plants a
 torn, over-claiming tail so every boot must recover before serving, and both
 `zcfs` implementations clamp the log head to what actually reached the disk.
-Next up is **F7i — `devfs` and `tmpfs`**.
+Next up is **F7j — file permissions and ownership**.
 
 ## Development
 

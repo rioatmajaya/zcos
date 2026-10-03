@@ -1,26 +1,33 @@
 //! Shell task: an interactive command line over the serial port.
 //!
 //! Reads keystrokes with blocking serial reads, edits a single line with
-//! backspace support, and runs `help`, `echo`, `cat`, `stat`, `write`,
+//! backspace support, and runs `help`, `echo`, `cat`, `stat`, `write`, `tmp`,
 //! `persist`, `mount`, `umount`, and `exit`. Output goes through the log
 //! syscall, so the transcript appears in the kernel serial log.
 //!
 //! `persist` is the durability proof: it writes the zcfs volume through the
 //! VFS, unmounts and remounts it, and reads its own bytes back. The remount
 //! replays the log from the disk with a cold cache, so a matching read cannot
-//! have come from RAM.
+//! have come from RAM. `tmp` is the same round trip against the `tmpfs` mount,
+//! where nothing can reach a disk at all.
 
 #![no_std]
 #![no_main]
 #![allow(unsafe_code)]
 
 use zc_user::{
-    FS_ID_ZCFS, FS_OP_STOP, IPC_FS, KIND_DIR, Stat, close, create, log, mount, open, read,
+    FS_ID_ZCFS, FS_OP_STOP, IPC_FS, KIND_CHR, KIND_DIR, Stat, close, create, log, mount, open, read,
     send_to, serial_read, stat, task_exit, umount, write,
 };
 
 /// Contents `persist` writes and expects to read back.
 const PERSIST_PATTERN: &[u8] = b"ZCPERSIST1";
+
+/// Scratch file `tmp` writes and expects to read back from the `tmpfs` mount.
+const TMP_PATTERN: &[u8] = b"ZCTMPFS1";
+
+/// Scratch file on the `tmpfs` mount at `/tmp`.
+const TMP_PATH: &str = "/tmp/scratch";
 
 /// The one mount point the kernel accepts for zcfs.
 const DATA_MOUNT: &str = "/data";
@@ -172,7 +179,7 @@ fn run(line: &[u8]) -> bool {
     }
     match argv[0] {
         b"help" => {
-            log("Commands: help echo cat stat write persist mount umount exit\n");
+            log("Commands: help echo cat stat write tmp persist mount umount exit\n");
         }
         b"echo" => {
             for index in 1..count {
@@ -223,13 +230,19 @@ fn run(line: &[u8]) -> bool {
                 return false;
             }
             out_bytes(argv[1]);
-            out_bytes(if info.kind == KIND_DIR {
-                b": dir, "
+            if info.kind == KIND_DIR {
+                out_bytes(b": dir, ");
+                out_u64(info.size);
+                out_bytes(b" bytes\n");
+            } else if info.kind == KIND_CHR {
+                // A device node holds no bytes, so printing a length for it
+                // would be a lie; the kind is the interesting part.
+                out_bytes(b": char device\n");
             } else {
-                b": file, "
-            });
-            out_u64(info.size);
-            out_bytes(b" bytes\n");
+                out_bytes(b": file, ");
+                out_u64(info.size);
+                out_bytes(b" bytes\n");
+            }
             out_flush();
         }
         b"write" => {
@@ -272,6 +285,44 @@ fn run(line: &[u8]) -> bool {
             } else {
                 log("umount: /data failed\n");
             }
+        }
+        b"tmp" => {
+            // The `tmpfs` proof: a writable mount owned entirely by the kernel,
+            // exercised through the same syscalls as the disk path. Nothing
+            // here touches a block device, so a matching read proves the VFS
+            // write path is not tied to zcfs.
+            let mut fd = open(TMP_PATH);
+            if fd == u64::MAX {
+                if create(TMP_PATH) == u64::MAX {
+                    log("tmp: cannot create\n");
+                    return false;
+                }
+                fd = open(TMP_PATH);
+            }
+            if fd == u64::MAX {
+                log("tmp: no such file\n");
+                return false;
+            }
+            let wrote = write(fd, TMP_PATTERN);
+            close(fd);
+            if wrote != TMP_PATTERN.len() as u64 {
+                log("tmp: write failed\n");
+                return false;
+            }
+            // Re-open and read back: the bytes came out of RAM, not the disk.
+            let fd = open(TMP_PATH);
+            if fd == u64::MAX {
+                log("tmp: reopen failed\n");
+                return false;
+            }
+            let mut buffer = [0u8; 32];
+            let got = read(fd, &mut buffer);
+            close(fd);
+            if got != TMP_PATTERN.len() as u64 || &buffer[..got as usize] != TMP_PATTERN {
+                log("tmp: mismatch\n");
+                return false;
+            }
+            log("tmp: ok\n");
         }
         b"persist" => {
             let fd = open(PERSIST_PATH);

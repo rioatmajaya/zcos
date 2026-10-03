@@ -11,11 +11,15 @@ pub const KIND_FILE: u32 = 0;
 /// Node kind for a directory.
 pub const KIND_DIR: u32 = 1;
 
+/// Node kind for a character device: a node that names a device rather than
+/// holding bytes of its own.
+pub const KIND_CHR: u32 = 2;
+
 /// Metadata for one filesystem node.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Stat {
-    /// [`KIND_FILE`] or [`KIND_DIR`].
+    /// [`KIND_FILE`], [`KIND_DIR`], or [`KIND_CHR`].
     pub kind: u32,
     /// Permission bits, as the filesystem reports them.
     pub mode: u32,
@@ -65,6 +69,17 @@ impl Stat {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_kinds_are_distinct() {
+        // The shell prints a different description per kind, so a new kind
+        // needs its own number and must not collide with the existing two.
+        assert_eq!(KIND_FILE, 0);
+        assert_eq!(KIND_DIR, 1);
+        assert_eq!(KIND_CHR, 2);
+        assert_ne!(KIND_CHR, KIND_FILE);
+        assert_ne!(KIND_CHR, KIND_DIR);
+    }
 
     #[test]
     fn stat_layout_is_stable() {

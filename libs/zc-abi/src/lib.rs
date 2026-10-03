@@ -43,7 +43,7 @@ pub use syscall::{
     SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START, SYS_SERVICE_STATUS,
     SYS_SERVICE_STOP, SYS_STAT, SYS_TASK_EXIT, SYS_UMOUNT, SYS_WRITE, SYS_YIELD, SyscallError,
 };
-pub use vfs::{KIND_DIR, KIND_FILE, STAT_LEN, Stat};
+pub use vfs::{KIND_CHR, KIND_DIR, KIND_FILE, STAT_LEN, Stat};
 
 /// Current version of the loader-to-kernel boot protocol.
 pub const BOOT_PROTOCOL_VERSION: u32 = 2;

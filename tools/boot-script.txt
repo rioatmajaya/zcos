@@ -6,4 +6,6 @@ stat hello.txt
 write /data/probe ZCPERSIST1
 stat /data/probe
 persist
+tmp
+stat /dev/blk
 exit

@@ -332,6 +332,18 @@ static mut TASKS: TaskTable<8> = TaskTable::new();
 /// Mounted initramfs filesystem, shared read-only by all tasks.
 static mut RAMFS: Option<RamFs<'static>> = None;
 
+/// Mounted scratch filesystem, shared writable by all tasks.
+///
+/// `TmpFs` keeps its state behind a `RefCell`, so it is not `Sync` and cannot
+/// live in a plain `static`. Holding it here and lending `&'static` for the
+/// boot is the same trade the initramfs makes, and the kernel is
+/// single-threaded with interrupts masked around syscalls, so the borrow never
+/// overlaps.
+static mut TMPFS: Option<zc_kernel::tmpfs::TmpFs<TMPFS_NODES>> = None;
+
+/// Scratch files the `tmpfs` mount can hold, counting the files it starts with.
+const TMPFS_NODES: usize = 16;
+
 /// Mount table: the root of the VFS namespace.
 static mut MOUNTS: MountTable = MountTable::new();
 
@@ -999,36 +1011,32 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 regs.set_result(u64::from(byte));
                 return 0;
             }
-            if !tasks.has_runnable_other_than(tasks.current()) {
-                // No runnable peer can produce the byte: idle with interrupts
-                // on until a keystroke lands instead of failing a wait nobody
-                // can satisfy. Blocking here would deadlock once the only
-                // other live task is `initd`, which parks on its own channel.
+            // The shell is the idle anchor: it must stay runnable so the
+            // scheduler always has a peer to switch to, even when every other
+            // task is blocked or has exited. Idle with interrupts on until a
+            // keystroke lands instead of blocking: blocking here would strand
+            // the shell once its runnable peers exit without producing input,
+            // and a later block (e.g. `initd` parking on its channel) would
+            // find no runnable peer and misfire as an IPC deadlock. `hlt`
+            // still lets the timer preempt to any runnable task, so peers make
+            // progress while the shell waits.
+            unsafe {
+                core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
+            }
+            while !crate::serial::input_available() {
                 unsafe {
-                    core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
+                    core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
                 }
-                while !crate::serial::input_available() {
-                    unsafe {
-                        core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
-                    }
+            }
+            unsafe {
+                core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
+            }
+            match crate::serial::read_input() {
+                Some(byte) => {
+                    regs.set_result(u64::from(byte));
+                    0
                 }
-                unsafe {
-                    core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
-                }
-                match crate::serial::read_input() {
-                    Some(byte) => {
-                        regs.set_result(u64::from(byte));
-                        0
-                    }
-                    None => crate::fail("serial byte vanished"),
-                }
-            } else {
-                // Serial waits are not endpoint traffic; the depth shown is
-                // the data channel's, matching the pre-channel behavior.
-                // SAFETY: channel 0 is always in range.
-                let depth =
-                    unsafe { endpoint_for(zc_abi::IPC_DATA as u64).map_or(0, |e| e.len()) };
-                block_with_retry(tasks, regs, frame, depth)
+                None => crate::fail("serial byte vanished"),
             }
         }
         Ok(Action::IrqClaim) => {
@@ -1855,6 +1863,42 @@ pub fn enter(
         }
     }
     let _ = crate::serial::print(format_args!("vfs: mounted zcfs at /data\n"));
+
+    // Mount the scratch filesystem at `/tmp` and the device filesystem at
+    // `/dev`. Both are kernel-owned: `tmpfs` is writable RAM with no other task
+    // involved, and `devfs` publishes a node per supervised service. Together
+    // with the root and `/data` this fills the table the VFS resolves against.
+    // SAFETY: `TMPFS` is written once here, before any task runs, so the
+    // reference the mount table keeps stays valid for the boot — the same
+    // reasoning as `RAMFS` above.
+    unsafe {
+        core::ptr::addr_of_mut!(TMPFS).write(Some(zc_kernel::tmpfs::TmpFs::new()));
+        let stored: &'static Option<zc_kernel::tmpfs::TmpFs<TMPFS_NODES>> =
+            &*core::ptr::addr_of!(TMPFS);
+        let Some(fs) = stored else {
+            crate::fail("tmpfs not mounted")
+        };
+        if (*core::ptr::addr_of_mut!(MOUNTS))
+            .mount(b"/tmp", fs)
+            .is_err()
+        {
+            crate::fail("tmpfs mount failed");
+        }
+    }
+    let _ = crate::serial::print(format_args!("vfs: mounted tmpfs at /tmp\n"));
+
+    // `DevFs` is stateless and `Copy`, so a `static` instance needs no lending.
+    static DEVFS: zc_kernel::devfs::DevFs = zc_kernel::devfs::DevFs::new();
+    // SAFETY: as in the tmpfs mount above.
+    unsafe {
+        if (*core::ptr::addr_of_mut!(MOUNTS))
+            .mount(b"/dev", &DEVFS)
+            .is_err()
+        {
+            crate::fail("devfs mount failed");
+        }
+    }
+    let _ = crate::serial::print(format_args!("vfs: mounted devfs at /dev\n"));
 
     // One stack frame per task; each maps into its owner's tables below.
     let mut stack_phys = [0u64; TASK_COUNT];

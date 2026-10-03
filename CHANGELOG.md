@@ -20,11 +20,28 @@ claimed explicitly. Phase **F7 — VFS & storage** has started: a write path
 ext2 mount (F7c-2), a read-only VFS core (F7d), a ZC-native log-structured
 filesystem (F7e), the writable volume mounted into the kernel VFS (F7e-2),
 a userspace supervisor that owns service lifecycle (F7f), crash recovery
-that clamps the log head (F7g), and an `fsck` repair that makes an unclean
-mount clean again (F7h).
+that clamps the log head (F7g), an `fsck` repair that makes an unclean
+mount clean again (F7h), and `devfs`/`tmpfs` mounts (F7i).
 
 ### Added
 
+- **`tmpfs` and `devfs` mounts** (F7i): the VFS now holds four filesystems at
+  once — the initramfs at `/`, the zcfs volume at `/data`, `devfs` at `/dev`,
+  and `tmpfs` at `/tmp` — and `MAX_MOUNTS` rises from 4 to 8 so a session can
+  mount and unmount without exhausting the table. `tmpfs` is a fixed-capacity
+  writable filesystem with inline storage, so it needs no allocator and no
+  other task: it proves the VFS write path without a disk. Since the kernel
+  crate is `no_std` and denies `unsafe` while every `FileSystem` method takes
+  `&self`, its interior mutability comes from `core::cell::RefCell` rather than
+  an `UnsafeCell`, and the kernel image holds the volume in a `static mut` and
+  lends `&'static` — the same trade the initramfs already makes. `create` is
+  idempotent, because the shell creates then re-opens. `devfs` publishes one
+  node per supervised service straight from `service::SERVICES`, so `/dev`
+  cannot drift from the bring-up layout; a new `KIND_CHR` node kind makes a
+  device distinguishable from a file, and its nodes are descriptive — `read`
+  is end-of-file — because a device's bytes belong to its driver, not to the
+  namespace. The shell grows a `tmp` command that writes and reads
+  `/tmp/scratch`, and `stat` prints `char device` for a `KIND_CHR` node.
 - **`fsck` repair in `zcfs`** (F7h): `Volume::repair` is the consumer of
   `FLAG_CLEAN` that F7g left without a caller. `mark_clean` is now wired into
   `FS_OP_UNMOUNT`, so a clean unmount sets the flag; on mount the block domain

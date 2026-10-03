@@ -41,7 +41,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F4** | Thread + IPC | ✅ done | `task 0: producer sent 2000`, capability gates |
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 5 grants`, `task 6: devmgr: blk published` |
-| **F7** | VFS & penyimpanan | ✅ F7a–F7h done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired` |
+| **F7** | VFS & penyimpanan | ✅ F7a–F7i done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device` |
 | **F8** | Desktop | ⬜ planned | — |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
@@ -354,7 +354,20 @@ VFS → write path → journaling → `fsck`**.
       deliberately leaves in place: it persists the clamped head and stamps
       clean, so a repaired image mounts with no recovery and `/probe` intact
       (see [ADR 0012](adr/0012-fsck-repairs-the-durable-prefix.md)).
-- [ ] F7i: `devfs` and `tmpfs` mounts; device nodes for the block domain.
+- [x] F7i: `devfs` and `tmpfs` mounts, with device nodes for the block domain.
+      `tmpfs` is a fixed-capacity writable filesystem whose storage is inline,
+      so it needs no allocator and no other task: the VFS write path is proven
+      without a disk. Because the kernel crate is `no_std` and denies `unsafe`
+      while every `FileSystem` method takes `&self`, its mutability comes from
+      `core::cell::RefCell` rather than an `UnsafeCell`, and the kernel image
+      holds the volume in a `static mut` and lends `&'static` — the same trade
+      the initramfs already makes. `devfs` publishes one node per supervised
+      service straight from `service::SERVICES`, so `/dev` cannot drift from the
+      bring-up layout; its nodes are descriptive (`stat` reports the new
+      `KIND_CHR`, a read is end-of-file) because the bytes a device produces
+      belong to its driver, not to the namespace. The shell grows a `tmp`
+      command that writes and reads `/tmp/scratch`, and `stat /dev/blk` prints
+      `char device`.
 - [ ] F7j: file permissions and ownership in the VFS (feeds F9 security).
 
 **Pass criteria (machine).**
@@ -395,6 +408,13 @@ VFS → write path → journaling → `fsck`**.
   `a_power_loss_mid_write_is_fscked_to_clean` pass, and
   `tools/check-fsck.sh` drives a power-loss volume through `fsck: repaired
   4 -> 3` to `fsck: clean`, idempotent, with `/probe` preserved.
+- F7i: the boot log shows `vfs: mounted tmpfs at /tmp` and
+  `vfs: mounted devfs at /dev`, so all four bring-up mounts share one table.
+  `task 2: tmp: ok` is the writable in-memory proof — the shell writes
+  `/tmp/scratch` and reads it back through the same syscalls the disk path
+  uses, with no block device involved — and `task 2: /dev/blk: char device`
+  shows the block domain's node resolving through the path walk and reporting
+  the new kind. The `devfs` and `tmpfs` host tests pass.
 - Boot log contains `vfs: mounted` with the filesystem name and mount point.
 - A CI boot writes a known pattern to `/data/probe`, unmounts, remounts, and
   reads it back with a matching checksum: `vfs: persistence ok`.

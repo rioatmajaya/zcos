@@ -145,6 +145,16 @@ points past the gap and a later mount needs no recovery. The host tool
 What a crash does *not* yet handle is a bad sector in the middle of the log, which
 truncates the whole suffix after it.
 
+Two filesystems sit beside the disk. **tmpfs** is writable RAM with inline,
+fixed-capacity storage: no allocator, no other task, and nothing to replay,
+which is what makes it the cheapest proof that the VFS write path is not tied
+to zcfs. **devfs** publishes one node per supervised service from the same
+table that names the domains, so `/dev` cannot drift from the bring-up layout.
+Its nodes are descriptive — `stat` reports a character device and a read is
+end-of-file — because the bytes a device produces belong to its driver; giving
+the mount a data path would mean handing it authority over hardware the
+filesystem has no business touching.
+
 ## IPC and authority
 
 ## IPC and authority

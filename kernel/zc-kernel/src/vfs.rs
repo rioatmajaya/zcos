@@ -24,7 +24,11 @@ pub const MAX_FDS: usize = 8;
 pub const FD_BASE: u32 = 100;
 
 /// Most filesystems that can be mounted at once.
-pub const MAX_MOUNTS: usize = 4;
+///
+/// The bring-up mounts four: the initramfs at `/`, the zcfs volume at `/data`,
+/// `devfs` at `/dev`, and `tmpfs` at `/tmp`. The table is sized well above that
+/// so a mount or unmount during a session cannot run the kernel out of slots.
+pub const MAX_MOUNTS: usize = 8;
 
 /// A filesystem-specific node handle.
 ///
@@ -603,6 +607,51 @@ mod tests {
         table.create(b"/data/one", 0o644).expect("create");
         table.create(b"/data/two", 0o644).expect("create");
         assert_eq!(CREATED.load(Ordering::Relaxed), before + 2);
+    }
+
+    #[test]
+    fn the_bring_up_mounts_share_one_table() {
+        // The four mounts a real boot installs: a read-only root, the disk at
+        // /data, device nodes at /dev, and scratch space at /tmp. A mount
+        // borrows its filesystem for `'static`, so the two owned here are
+        // leaked deliberately — a test's filesystem must outlive the table.
+        let fs: &'static crate::tmpfs::TmpFs<8> =
+            std::boxed::Box::leak(std::boxed::Box::new(Default::default()));
+        let node = fs.create(0, b"scratch", 0o644).expect("create");
+        fs.write(node, 0, b"ZCTMPFS1").expect("write");
+        let dev: &'static crate::devfs::DevFs =
+            std::boxed::Box::leak(std::boxed::Box::new(Default::default()));
+
+        let mut table = MountTable::new();
+        table.mount(b"/", &ROOT_FS).expect("root mount");
+        table.mount(b"/data", &DATA_FS).expect("data mount");
+        table.mount(b"/dev", dev).expect("dev mount");
+        table.mount(b"/tmp", fs).expect("tmp mount");
+        assert_eq!(table.len(), 4);
+
+        // Each path reaches its own filesystem, and none of them captures a
+        // path that only shares a byte prefix with its mount point.
+        assert_eq!(table.resolve(b"/a").expect("root file").fs.name(), "root");
+        assert_eq!(table.resolve(b"/data/a").expect("data").fs.name(), "data");
+        assert_eq!(table.resolve(b"/dev/blk").expect("device").fs.name(), "devfs");
+        let scratch = table.resolve(b"/tmp/scratch").expect("scratch");
+        assert_eq!(scratch.fs.name(), "tmpfs");
+        let mut buffer = [0u8; 8];
+        assert_eq!(scratch.fs.read(scratch.node, 0, &mut buffer), Ok(8));
+        assert_eq!(&buffer, b"ZCTMPFS1");
+
+        // `/database` shares a prefix with `/data` but not a component, so the
+        // longest-prefix rule still sends it back to the root mount.
+        assert_eq!(
+            table.resolve(b"/database/a").unwrap_err(),
+            VfsError::NotFound
+        );
+        // Creating a file only works where a filesystem accepts it.
+        assert!(table.create(b"/tmp/fresh", 0o644).is_ok());
+        assert_eq!(
+            table.create(b"/dev/fresh", 0o644),
+            Err(VfsError::NotSupported)
+        );
     }
 
     #[test]
