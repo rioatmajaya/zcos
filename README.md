@@ -107,8 +107,11 @@ surface syscalls (`SYS_SURFACE_CREATE`/`MAP`/`DESTROY`), paints a deterministic
 desktop, moves its window, and flushes only the damaged region to the
 framebuffer. The kernel independently recomputes the expected final frame and
 fails the boot if a repaint was missed, so damage tracking is proven rather
-than assumed. Next up is the window manager and the first client window over a
-delegated surface.
+than assumed. The compositor also acts as the window manager: it hands a window
+surface to a client task (`user/zc-win`) with `SYS_CAP_DELEGATE`, and the client
+paints it over two dedicated IPC channels. The compositor composites and moves
+the client's window, and the same kernel checksum proves the delegated pixels
+reached the screen. See [ADR 0016](docs/adr/0016-window-client-delegation.md).
 
 ## Development
 

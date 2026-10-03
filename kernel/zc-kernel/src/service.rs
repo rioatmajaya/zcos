@@ -34,9 +34,14 @@ pub const KBD_TASK: usize = 5;
 pub const DEVMGR_TASK: usize = 6;
 /// Task index of the `initd` supervisor.
 pub const INITD_TASK: usize = 7;
+/// Task index of the first window client.
+///
+/// A compositor-delegated surface is only meaningful across address spaces, so
+/// the window proof needs a task the compositor can hand a capability to.
+pub const WINDOW_CLIENT_TASK: usize = 8;
 
 /// Number of ring-3 task slots the bring-up uses.
-pub const TASK_COUNT: usize = 8;
+pub const TASK_COUNT: usize = 9;
 
 /// The one root task: the `initd` supervisor.
 pub const ROOT_IDENTITY: Identity = Identity::ROOT;
@@ -61,6 +66,7 @@ pub const OWNERS: [Identity; TASK_COUNT] = [
     USER_IDENTITY, // kbd
     USER_IDENTITY, // devmgr
     ROOT_IDENTITY, // initd
+    USER_IDENTITY, // window client
 ];
 
 /// Identifier of the block driver service.
@@ -119,12 +125,13 @@ mod tests {
             KBD_TASK,
             DEVMGR_TASK,
             INITD_TASK,
+            WINDOW_CLIENT_TASK,
         ];
         for (position, index) in indices.iter().enumerate() {
             assert_eq!(*index, position);
             assert!(*index < TASK_COUNT);
         }
-        assert_eq!(TASK_COUNT, 8);
+        assert_eq!(TASK_COUNT, 9);
     }
 
     #[test]

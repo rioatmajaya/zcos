@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 5 grants`, `task 6: devmgr: blk published` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8a-1 done | `surface: factory granted to task 3`; `compositor: ready`; `compositor: damage ok`; `fb: desktop checksum ok` |
+| **F8** | Desktop | 🔄 F8a-2 done | `surface: factory granted to task 3`; `cap: task 3 delegated 0x20000001 to task 8`; `client: window painted`; `wm: window mapped`; `wm: move ok`; `fb: desktop checksum ok` |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -473,8 +473,12 @@ full browser. Note them as follow-ups, do not build them here.
       deterministic desktop, moves the window, and repaints only the damage;
       the kernel verifies the final frame with an independent checksum. See
       [`adr/0015`](adr/0015-compositor-surface-model.md).
-- [ ] F8a-2: window manager and the first client window over a delegated
-      surface; `wm: window mapped`, `wm: move ok`.
+- [x] F8a-2: window manager and the first client window over a delegated
+      surface. The compositor doubles as the window manager: it creates the
+      window surface, delegates it to `user/zc-win` (task 8) with
+      `SYS_CAP_DELEGATE`, and composites the client's pixels. Assignment and
+      acknowledgement use dedicated IPC channels. `wm: window mapped`,
+      `wm: move ok`. See [`adr/0016`](adr/0016-window-client-delegation.md).
 - [ ] F8b: input service — keyboard (already proven) plus PS/2 mouse, then
       USB HID and I2C-HID touchpad; one event stream to all clients.
 - [ ] F8c: 2D renderer with alpha compositing and TrueType `glyf` text.

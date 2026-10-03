@@ -24,10 +24,23 @@ that clamps the log head (F7g), an `fsck` repair that makes an unclean
 mount clean again (F7h), `devfs`/`tmpfs` mounts (F7i), and file permissions
 and ownership in the VFS (F7j). Phase **F8 — desktop** has started with the
 userspace compositor (F8a-1): a capability-gated surface protocol, a
-full-screen back buffer, and damage tracking the kernel verifies.
+full-screen back buffer, and damage tracking the kernel verifies. F8a-2 adds
+the window manager and the first client window, painted by a second task over a
+delegated surface.
 
 ### Added
 
+- **Window manager and the first delegated client window** (F8a-2): the
+  compositor creates a window surface and hands it to a new client task,
+  `user/zc-win` (slot 8), with `SYS_CAP_DELEGATE`; the client maps it, paints
+  the deterministic window content, and acknowledges. Assignment and
+  acknowledgement travel on two dedicated IPC channels, `IPC_WM` and
+  `IPC_WM_REPLY`, mirroring the filesystem request/reply split. The compositor
+  composites the client's pixels and moves the window, logging
+  `wm: window mapped` and `wm: move ok`; the kernel's existing frame checksum is
+  unchanged, so a client that fails to paint fails the boot. The task table
+  widens from eight slots to nine (see
+  [ADR 0016](docs/adr/0016-window-client-delegation.md)).
 - **Userspace compositor with a surface protocol and damage tracking** (F8a-1):
   `user/zcompositor` takes over the display slot and creates a full-screen back
   buffer through three new capability-gated syscalls — `SYS_SURFACE_CREATE`,

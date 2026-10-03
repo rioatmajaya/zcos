@@ -1,23 +1,34 @@
-//! Userspace compositor: owns the display and composites the desktop.
+//! Userspace compositor and window manager: owns the display and composites
+//! the desktop.
 //!
-//! It creates one full-screen surface as a back buffer through the
-//! capability-gated surface syscall, paints a deterministic desktop into it,
-//! and flushes it to the display framebuffer. The window moves between two
-//! proof frames and only the damaged region is repainted and blitted, so the
-//! kernel's frame checksum proves damage tracking actually works.
+//! It creates a full-screen back buffer through the capability-gated surface
+//! syscall and a separate window surface it delegates to a client task. The
+//! client paints the window; the compositor composites it, moves it between two
+//! proof frames, and flushes only the damaged regions. The kernel's frame
+//! checksum recomputes the expected final frame, so both damage tracking and
+//! the delegated window pixels are proven rather than assumed.
 
 #![no_std]
 #![no_main]
 #![allow(unsafe_code)]
 
 use zc_abi::{
-    DamageList, FRAME_INITIAL, FRAME_MOVED, FramebufferInfo, PixelFormat, Rect, SurfaceInfo,
-    pixel_at, window_rect,
+    DamageList, FRAME_INITIAL, FRAME_MOVED, FramebufferInfo, IPC_WM, IPC_WM_REPLY, PixelFormat,
+    Rect, SurfaceInfo, WM_ACK, pixel_at, window_rect,
 };
-use zc_user::{framebuffer_info, log, surface_create, surface_destroy, surface_map, task_exit};
+use zc_user::{
+    cap_delegate, framebuffer_info, log, recv_from, send_to, surface_create, surface_destroy,
+    surface_map, task_exit,
+};
 
 /// Damage rectangles the compositor tracks before collapsing to a full repaint.
 const DAMAGE_SLOTS: usize = 16;
+
+/// Task index of the window client the compositor delegates the window to.
+///
+/// Userspace cannot see `zc_kernel::service`; this mirrors
+/// `service::WINDOW_CLIENT_TASK`.
+const WINDOW_CLIENT_TASK: u64 = 8;
 
 /// Task entry point; the kernel provides a fresh user stack.
 #[unsafe(no_mangle)]
@@ -53,11 +64,50 @@ pub unsafe extern "C" fn _start() -> ! {
 
     let back = mapped as *mut u32;
     let full = Rect::new(0, 0, width, height);
+    let window = window_rect(FRAME_MOVED, width, height);
 
-    // Frame 0: paint the whole desktop into the back buffer and present it.
+    // The window is a separate surface the compositor hands to a client: it
+    // creates the surface, delegates a read/write capability, and assigns the
+    // object id over the window channel. The client paints into it and
+    // acknowledges, so the compositor composites the client's own pixels.
+    let window_object = surface_create(window.w, window.h, format as u32);
+    if window_object == u64::MAX {
+        log("compositor: window create failed\n");
+        task_exit()
+    }
+    let window_object = window_object as u32;
+    if cap_delegate(window_object, WINDOW_CLIENT_TASK, 0x3) != 0 {
+        log("compositor: window delegate failed\n");
+        task_exit()
+    }
+    let _ = send_to(IPC_WM as u64, u64::from(window_object));
+    if recv_from(IPC_WM_REPLY as u64) != WM_ACK {
+        log("compositor: client did not acknowledge\n");
+        task_exit()
+    }
+    let mut window_surface = SurfaceInfo::UNAVAILABLE;
+    let window_mapped = surface_map(window_object, Some(&mut window_surface));
+    if window_mapped == u64::MAX || !window_surface.is_available() {
+        log("compositor: window map failed\n");
+        task_exit()
+    }
+    let window_pixels = window_mapped as *const u32;
+
+    // Frame 0: paint the whole desktop into the back buffer, overlay the
+    // client's window, and present it.
     paint_rect(back, surface.stride, format, width, height, full, FRAME_INITIAL);
+    blit_window(
+        back,
+        surface.stride,
+        window_pixels,
+        window_surface.stride,
+        window_rect(FRAME_INITIAL, width, height),
+        width,
+        height,
+    );
     blit_rect(back, &fb, surface.stride, full);
     log("compositor: frame 0 painted\n");
+    log("wm: window mapped\n");
 
     // Frame 1: move the window. Only the old and new window rectangles need
     // repainting, and only those rectangles are flushed to the display.
@@ -68,6 +118,21 @@ pub unsafe extern "C" fn _start() -> ! {
     while index < damage.len() {
         let rect = damage.rects()[index];
         paint_rect(back, surface.stride, format, width, height, rect, FRAME_MOVED);
+        index += 1;
+    }
+    // Overlay the client's window at its moved position, then flush the damage.
+    blit_window(
+        back,
+        surface.stride,
+        window_pixels,
+        window_surface.stride,
+        window_rect(FRAME_MOVED, width, height),
+        width,
+        height,
+    );
+    index = 0;
+    while index < damage.len() {
+        let rect = damage.rects()[index];
         blit_rect(back, &fb, surface.stride, rect);
         index += 1;
     }
@@ -76,9 +141,11 @@ pub unsafe extern "C" fn _start() -> ! {
     if drawn < total {
         log_damage(drawn, total);
     }
+    log("wm: move ok\n");
 
-    // The surface is no longer needed once the display holds the final frame;
-    // returning its frames proves destroy works and leaves nothing behind.
+    // Both surfaces are no longer needed once the display holds the final
+    // frame; returning their frames proves destroy works and leaves nothing.
+    let _ = surface_destroy(window_object);
     let _ = surface_destroy(object);
     log("compositor: ready\n");
     task_exit()
@@ -141,6 +208,45 @@ fn blit_rect(back: *const u32, fb: &FramebufferInfo, back_stride: u32, rect: Rec
                 front
                     .add((y * fb.stride + x) as usize)
                     .write_volatile(pixel);
+            }
+            x += 1;
+        }
+        y += 1;
+    }
+}
+
+/// Copies the client's window surface into the back buffer at `rect`.
+///
+/// The client owns the window pixels; the compositor only places them, so a
+/// client that failed to paint leaves its zeroed surface behind and the
+/// kernel's frame checksum fails.
+fn blit_window(
+    back: *mut u32,
+    back_stride: u32,
+    window: *const u32,
+    window_stride: u32,
+    rect: Rect,
+    width: u32,
+    height: u32,
+) {
+    let right = if rect.right() > width { width } else { rect.right() };
+    let bottom = if rect.bottom() > height {
+        height
+    } else {
+        rect.bottom()
+    };
+    let mut y = rect.y;
+    while y < bottom {
+        let mut x = rect.x;
+        while x < right {
+            // SAFETY: the kernel mapped both surfaces with user permissions;
+            // `(x, y)` is on screen and `(x - rect.x, y - rect.y)` stays inside
+            // the window surface.
+            unsafe {
+                let pixel = window
+                    .add(((y - rect.y) * window_stride + (x - rect.x)) as usize)
+                    .read_volatile();
+                back.add((y * back_stride + x) as usize).write_volatile(pixel);
             }
             x += 1;
         }

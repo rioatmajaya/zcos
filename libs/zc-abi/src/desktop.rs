@@ -280,6 +280,27 @@ pub const fn window_rect(frame: u32, width: u32, height: u32) -> Rect {
     Rect::new(x, y, w, h)
 }
 
+/// Returns the `(red, green, blue)` channels of one pixel inside a window.
+///
+/// Coordinates are local to the window's top-left corner. The window content is
+/// independent of where the window sits, so a client can paint its own surface
+/// with these pixels and the compositor can blit that surface anywhere.
+#[must_use]
+pub const fn window_color_at(lx: u32, ly: u32, w: u32, h: u32) -> (u8, u8, u8) {
+    // A window narrower than its border has no interior; every pixel is border.
+    // The guard also keeps `w - 2` from underflowing for degenerate sizes.
+    if w < 2 || h < 2 {
+        return (28, 30, 38);
+    }
+    if lx < 2 || lx >= w - 2 || ly < 2 || ly >= h - 2 {
+        return (28, 30, 38);
+    }
+    if ly < TITLE_HEIGHT {
+        return (70, 110, 180);
+    }
+    (210, 212, 218)
+}
+
 /// Returns the `(red, green, blue)` channels of one desktop pixel.
 ///
 /// The layout is a background gradient, a top panel with a start button, and
@@ -288,17 +309,7 @@ pub const fn window_rect(frame: u32, width: u32, height: u32) -> Rect {
 pub const fn color_at(x: u32, y: u32, width: u32, height: u32, frame: u32) -> (u8, u8, u8) {
     let window = window_rect(frame, width, height);
     if window.contains(x, y) {
-        if x < window.x + 2
-            || x >= window.right() - 2
-            || y < window.y + 2
-            || y >= window.bottom() - 2
-        {
-            return (28, 30, 38);
-        }
-        if y < window.y + TITLE_HEIGHT {
-            return (70, 110, 180);
-        }
-        return (210, 212, 218);
+        return window_color_at(x - window.x, y - window.y, window.w, window.h);
     }
     if y < panel_height(height) {
         if x < width / 8 {
@@ -337,6 +348,23 @@ pub const fn pixel_at(
     frame: u32,
 ) -> Option<u32> {
     let (r, g, b) = color_at(x, y, width, height, frame);
+    encode(format, r, g, b)
+}
+
+/// Encodes one window-local pixel for `format`, or `None` for an unencodable
+/// format.
+///
+/// A client painting its own surface uses this so the compositor can blit the
+/// result anywhere and the kernel's frame checksum still matches.
+#[must_use]
+pub const fn window_pixel_at(
+    format: PixelFormat,
+    lx: u32,
+    ly: u32,
+    w: u32,
+    h: u32,
+) -> Option<u32> {
+    let (r, g, b) = window_color_at(lx, ly, w, h);
     encode(format, r, g, b)
 }
 
@@ -387,6 +415,31 @@ mod tests {
         assert_eq!(panel, color_at(200, 4, 1280, 800, FRAME_INITIAL));
         // Degenerate sizes must not divide by zero.
         let _ = color_at(0, 0, 0, 0, FRAME_INITIAL);
+    }
+
+    #[test]
+    fn window_content_matches_the_desktop_window() {
+        // A client paints its surface with `window_color_at`; the compositor
+        // blits it into `window_rect`. The two must agree pixel for pixel, or
+        // the kernel frame checksum would fail.
+        for frame in [FRAME_INITIAL, FRAME_MOVED] {
+            let window = window_rect(frame, 1280, 800);
+            let mut ly = 0;
+            while ly < window.h {
+                let mut lx = 0;
+                while lx < window.w {
+                    assert_eq!(
+                        color_at(window.x + lx, window.y + ly, 1280, 800, frame),
+                        window_color_at(lx, ly, window.w, window.h),
+                    );
+                    lx += 1;
+                }
+                ly += 1;
+            }
+        }
+        // Degenerate sizes must not underflow the border check.
+        let _ = window_color_at(0, 0, 0, 0);
+        let _ = window_color_at(0, 0, 1, 1);
     }
 
     #[test]

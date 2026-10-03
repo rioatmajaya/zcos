@@ -21,6 +21,7 @@ exclude = [
     "user/zc-producer",
     "user/zc-shell",
     "user/zc-user",
+    "user/zc-win",
     "user/zcompositor",
 ]
 

@@ -14,10 +14,12 @@ pub const MESSAGE_WORDS: usize = 4;
 /// carry the filesystem bridge: the kernel proxy sends requests on channel 2
 /// and the block domain replies on channel 3, so a request can never be
 /// mistaken for a reply. Channel 4 carries supervision events: the kernel
-/// posts a service going down and `initd` consumes them. Queues are fully
-/// separate, so discovery traffic can never corrupt the data sequence — the
-/// property a shared bus scan could never give.
-pub const IPC_CHANNELS: usize = 5;
+/// posts a service going down and `initd` consumes them. Channels 5 and 6
+/// carry the window protocol: the compositor assigns a surface on channel 5
+/// and the client acknowledges on channel 6. Queues are fully separate, so
+/// discovery traffic can never corrupt the data sequence — the property a
+/// shared bus scan could never give.
+pub const IPC_CHANNELS: usize = 7;
 
 /// Data-stream channel: the legacy `SYS_SEND`/`SYS_RECV` path.
 pub const IPC_DATA: usize = 0;
@@ -36,6 +38,25 @@ pub const IPC_FS_REPLY: usize = 3;
 /// One word per event, encoded by [`crate::service::supervise_event`]. The
 /// direction is one-way (kernel to supervisor), so no reply channel is needed.
 pub const IPC_SUPERVISE: usize = 4;
+
+/// Window-assignment channel: the compositor hands a client its surface.
+///
+/// One word per message: the capability object id of the window surface the
+/// client should map and paint.
+pub const IPC_WM: usize = 5;
+
+/// Window-reply channel: the client tells the compositor it has painted.
+///
+/// One word per message, always [`WM_ACK`]. The direction is one-way (client to
+/// compositor); a separate channel from [`IPC_WM`] means the compositor can
+/// never read back its own assignment and mistake it for the acknowledgement.
+pub const IPC_WM_REPLY: usize = 6;
+
+/// The acknowledgement a window client sends once it has painted its surface.
+///
+/// Distinct from every surface object id (`0x2000_0000 | slot`), so a stray
+/// assignment can never be read as an ack.
+pub const WM_ACK: u64 = 0x574D_0000_0000_0001;
 
 /// A copied IPC message.
 ///
@@ -114,17 +135,23 @@ mod tests {
 
     #[test]
     fn channels_are_distinct_and_bounded() {
-        assert_eq!(IPC_CHANNELS, 5);
+        assert_eq!(IPC_CHANNELS, 7);
         assert_ne!(IPC_DATA, IPC_DISCOVERY);
         assert_ne!(IPC_FS, IPC_FS_REPLY);
         assert_ne!(IPC_SUPERVISE, IPC_DATA);
         assert_ne!(IPC_SUPERVISE, IPC_DISCOVERY);
         assert_ne!(IPC_SUPERVISE, IPC_FS);
         assert_ne!(IPC_SUPERVISE, IPC_FS_REPLY);
+        assert_ne!(IPC_WM, IPC_WM_REPLY);
+        assert_ne!(IPC_WM, IPC_DATA);
         assert!(IPC_DATA < IPC_CHANNELS);
         assert!(IPC_DISCOVERY < IPC_CHANNELS);
         assert!(IPC_FS < IPC_CHANNELS);
         assert!(IPC_FS_REPLY < IPC_CHANNELS);
         assert!(IPC_SUPERVISE < IPC_CHANNELS);
+        assert!(IPC_WM < IPC_CHANNELS);
+        assert!(IPC_WM_REPLY < IPC_CHANNELS);
+        // The ack must not collide with any surface object id.
+        assert_ne!(WM_ACK, u64::from(crate::surface::SURFACE_FACTORY));
     }
 }

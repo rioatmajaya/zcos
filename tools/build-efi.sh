@@ -74,6 +74,8 @@ cargo build --manifest-path user/zc-devmgr/Cargo.toml \
     --target "$none_target" --target-dir target --release
 cargo build --manifest-path user/zc-initd/Cargo.toml \
     --target "$none_target" --target-dir target --release
+cargo build --manifest-path user/zc-win/Cargo.toml \
+    --target "$none_target" --target-dir target --release
 ./tools/mkinitramfs.sh \
     "target/$none_target/release/producer:producer.elf" \
     "target/$none_target/release/consumer:consumer.elf" \
@@ -82,7 +84,8 @@ cargo build --manifest-path user/zc-initd/Cargo.toml \
     "target/$none_target/release/blk:blk.elf" \
     "target/$none_target/release/kbd:kbd.elf" \
     "target/$none_target/release/devmgr:devmgr.elf" \
-    "target/$none_target/release/initd:initd.elf"
+    "target/$none_target/release/initd:initd.elf" \
+    "target/$none_target/release/win:win.elf"
 ./tools/mkdisk.sh
 dd if=/dev/zero of="$image" bs=1M count="$esp_size_mib" status=none
 mkfs.vfat "$image" >/dev/null

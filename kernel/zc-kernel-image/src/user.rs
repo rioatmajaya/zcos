@@ -43,7 +43,7 @@ const USER_WINDOW_END: u64 = 0x60_0000;
 const STACK_ZONE_START: u64 = 0x40_4000;
 
 /// End of the reserved user-stack zone.
-const STACK_ZONE_END: u64 = 0x40_C000;
+const STACK_ZONE_END: u64 = 0x40_D000;
 
 /// Each task links at its own base (producer at [`USER_CODE_VIRT`], the
 /// consumer 64 KiB higher), so images never share pages and absolute
@@ -92,12 +92,20 @@ const STACK_G_PAGE: u64 = STACK_G_TOP - PAGE_SIZE;
 
 /// Top of the `initd` supervisor's user stack.
 ///
-/// The last free page in the stack zone: task G occupies `0x40A000`, and the
-/// zone ends at [`STACK_ZONE_END`].
+/// Task G occupies `0x40A000`, so `initd` takes the next page.
 const STACK_H_TOP: u64 = 0x40_C000;
 
 /// `initd` stack page backing that top.
 const STACK_H_PAGE: u64 = STACK_H_TOP - PAGE_SIZE;
+
+/// Top of the window client's user stack.
+///
+/// The last page before the consumer image at `0x410000`; the zone ends at
+/// [`STACK_ZONE_END`].
+const STACK_I_TOP: u64 = 0x40_D000;
+
+/// Window-client stack page backing that top.
+const STACK_I_PAGE: u64 = STACK_I_TOP - PAGE_SIZE;
 
 /// File names of the bring-up tasks inside the initramfs.
 const PRODUCER_NAME: &str = "producer.elf";
@@ -131,6 +139,9 @@ const DEVMGR_NAME: &str = "devmgr.elf";
 
 /// File name of the `initd` supervisor inside the initramfs.
 const INITD_NAME: &str = "initd.elf";
+
+/// File name of the window client inside the initramfs.
+const WINDOW_CLIENT_NAME: &str = "win.elf";
 
 /// User virtual address the display framebuffer is mapped at.
 const FB_VIRT: u64 = 0x10_00000;
@@ -301,7 +312,7 @@ static mut NEXT_CR3: u64 = 0;
 /// CPU reads the bitmap inside the loaded TSS, and there is only one TSS to
 /// load, so the bitmap is rebuilt here instead. Rebuilding on the switch —
 /// rather than trusting a stale bitmap — is what makes a revoke immediate.
-fn publish_next_cr3(tasks: &TaskTable<8>) {
+fn publish_next_cr3(tasks: &TaskTable<TASK_COUNT>) {
     let cr3 = tasks.current_cr3();
     // SAFETY: owned here; traps cannot nest while a handler runs.
     unsafe { addr_of_mut!(NEXT_CR3).write(cr3) };
@@ -353,7 +364,7 @@ pub extern "C" fn irq_post(source: usize) {
 }
 
 /// Round-robin table for the bring-up tasks.
-static mut TASKS: TaskTable<8> = TaskTable::new();
+static mut TASKS: TaskTable<TASK_COUNT> = TaskTable::new();
 
 /// Mounted initramfs filesystem, shared read-only by all tasks.
 static mut RAMFS: Option<RamFs<'static>> = None;
@@ -374,14 +385,14 @@ const TMPFS_NODES: usize = 16;
 static mut MOUNTS: MountTable = MountTable::new();
 
 /// Per-task descriptor tables, indexed by task index.
-static mut FDS: [DescriptorTable; 8] = [DescriptorTable::new(); 8];
+static mut FDS: [DescriptorTable; TASK_COUNT] = [DescriptorTable::new(); TASK_COUNT];
 
 /// Per-task capability tables, indexed by task index.
 ///
 /// The kernel provisions each table at spawn; tasks can only claim the
 /// sources their table allows, so ownership comes from an explicit grant at
 /// setup rather than a first-come syscall.
-static mut CAPS: [CapabilityTable<8>; 8] = [CapabilityTable::<8>::new(); 8];
+static mut CAPS: [CapabilityTable<8>; TASK_COUNT] = [CapabilityTable::<8>::new(); TASK_COUNT];
 
 /// Kernel-owned pixel surfaces, indexed by slot.
 ///
@@ -1308,7 +1319,7 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 regs.set_result(u64::MAX);
                 return 0;
             };
-            if requested == zc_kernel::capability::Rights::NONE || target >= 8 {
+            if requested == zc_kernel::capability::Rights::NONE || target >= TASK_COUNT {
                 regs.set_result(u64::MAX);
                 return 0;
             }
@@ -1709,7 +1720,7 @@ fn dump_trace() {
 /// dump; cross-channel wakeups are spurious but harmless, because the woken
 /// task retries an operation that still cannot complete and blocks again.
 fn block_with_retry(
-    tasks: &mut TaskTable<8>,
+    tasks: &mut TaskTable<TASK_COUNT>,
     regs: &mut SyscallRegs,
     frame: &mut IrqFrame,
     queue_len: usize,
@@ -2086,6 +2097,7 @@ pub fn enter(
     let kbd = find_initramfs_file(boot_info, KBD_NAME);
     let devmgr = find_initramfs_file(boot_info, DEVMGR_NAME);
     let initd = find_initramfs_file(boot_info, INITD_NAME);
+    let window_client = find_initramfs_file(boot_info, WINDOW_CLIENT_NAME);
     let (
         Some(producer),
         Some(consumer),
@@ -2095,7 +2107,18 @@ pub fn enter(
         Some(kbd),
         Some(devmgr),
         Some(initd),
-    ) = (producer, consumer, shell, compositor, blk, kbd, devmgr, initd)
+        Some(window_client),
+    ) = (
+        producer,
+        consumer,
+        shell,
+        compositor,
+        blk,
+        kbd,
+        devmgr,
+        initd,
+        window_client,
+    )
     else {
         crate::fail("user task ELF missing from initramfs");
     };
@@ -2223,7 +2246,17 @@ pub fn enter(
     // domain's ring page is deliberately *not* mapped here: it appears only
     // in the address space of whichever task claims the source. The discovery
     // page is mapped below, into exactly the manager and the block driver.
-    let binaries = [producer, consumer, shell, compositor, blk, kbd, devmgr, initd];
+    let binaries = [
+        producer,
+        consumer,
+        shell,
+        compositor,
+        blk,
+        kbd,
+        devmgr,
+        initd,
+        window_client,
+    ];
     let names = [
         PRODUCER_NAME,
         CONSUMER_NAME,
@@ -2233,6 +2266,7 @@ pub fn enter(
         KBD_NAME,
         DEVMGR_NAME,
         INITD_NAME,
+        WINDOW_CLIENT_NAME,
     ];
     let stack_pages = [
         STACK_A_PAGE,
@@ -2243,6 +2277,7 @@ pub fn enter(
         STACK_F_PAGE,
         STACK_G_PAGE,
         STACK_H_PAGE,
+        STACK_I_PAGE,
     ];
     let stack_tops = [
         STACK_A_TOP,
@@ -2253,6 +2288,7 @@ pub fn enter(
         STACK_F_TOP,
         STACK_G_TOP,
         STACK_H_TOP,
+        STACK_I_TOP,
     ];
     let mut entries = [0u64; TASK_COUNT];
     let mut cr3s = [0u64; TASK_COUNT];
@@ -2332,9 +2368,9 @@ pub fn enter(
     }
 
     let _ = crate::serial::print(format_args!(
-        "user: producer entry {:#x}, consumer entry {:#x}, shell entry {:#x}, fb entry {:#x}, blk entry {:#x}, kbd entry {:#x}, devmgr entry {:#x}, initd entry {:#x}\n",
+        "user: producer entry {:#x}, consumer entry {:#x}, shell entry {:#x}, fb entry {:#x}, blk entry {:#x}, kbd entry {:#x}, devmgr entry {:#x}, initd entry {:#x}, win entry {:#x}\n",
         entries[0], entries[1], entries[2], entries[3], entries[4], entries[5], entries[6],
-        entries[7],
+        entries[7], entries[8],
     ));
     let _ = crate::serial::print(format_args!(
         "user: {TASK_COUNT} address spaces, task0 cr3 {:#x}\n",
@@ -2556,7 +2592,7 @@ fn surface_slot(object: u32) -> Option<u32> {
 /// installs a private page table over the identity map's large pages for that
 /// window, and the entries are marked non-executable so a task can draw pixels
 /// but never run code from a surface.
-fn map_surface_into_task(tasks: &TaskTable<8>, slot: u32, surface: &zc_kernel::surface::Surface) -> Option<u64> {
+fn map_surface_into_task(tasks: &TaskTable<TASK_COUNT>, slot: u32, surface: &zc_kernel::surface::Surface) -> Option<u64> {
     let pd = task_user_pd(tasks.current_cr3())?;
     let base = SURFACE_VIRT + u64::from(slot) * SURFACE_SLOT_STRIDE;
     let pages = u64::from(surface.pages);
@@ -2594,7 +2630,7 @@ fn map_surface_into_task(tasks: &TaskTable<8>, slot: u32, surface: &zc_kernel::s
 }
 
 /// Resolves the running task's user page table.
-fn current_user_pt(tasks: &TaskTable<8>) -> Option<u64> {
+fn current_user_pt(tasks: &TaskTable<TASK_COUNT>) -> Option<u64> {
     task_user_pt(tasks.current_cr3())
 }
 
@@ -2613,7 +2649,7 @@ fn page_present(pt: u64, virt: u64) -> bool {
 /// Returns `None` for empty, over-long, overflowing, out-of-window, or
 /// unmapped ranges.
 fn validate_user_slice(
-    tasks: &TaskTable<8>,
+    tasks: &TaskTable<TASK_COUNT>,
     ptr: u64,
     len: u64,
 ) -> Option<&'static [u8]> {
@@ -2629,7 +2665,7 @@ fn validate_user_slice(
 /// Same checks as [`validate_user_slice`]; the caller must not retain the
 /// slice past the syscall.
 fn validate_user_slice_mut(
-    tasks: &TaskTable<8>,
+    tasks: &TaskTable<TASK_COUNT>,
     ptr: u64,
     len: u64,
 ) -> Option<&'static mut [u8]> {

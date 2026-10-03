@@ -33,11 +33,12 @@ pub use driver::{
 pub use fb::encode;
 pub use desktop::{
     DamageList, FRAME_INITIAL, FRAME_MOVED, HASH_OFFSET, HASH_PRIME, PANEL_HEIGHT, Rect,
-    TITLE_HEIGHT, color_at, hash_step, panel_height, pixel_at, window_rect,
+    TITLE_HEIGHT, color_at, hash_step, panel_height, pixel_at, window_color_at, window_pixel_at,
+    window_rect,
 };
 pub use ipc::{
-    IPC_CHANNELS, IPC_DATA, IPC_DISCOVERY, IPC_FS, IPC_FS_REPLY, IPC_SUPERVISE, MESSAGE_WORDS,
-    Message,
+    IPC_CHANNELS, IPC_DATA, IPC_DISCOVERY, IPC_FS, IPC_FS_REPLY, IPC_SUPERVISE, IPC_WM,
+    IPC_WM_REPLY, MESSAGE_WORDS, Message, WM_ACK,
 };
 pub use service::{
     SERVICE_KIND_EXIT, SERVICE_KIND_FAULT, service_cap, supervise_event, supervise_kind,
@@ -262,6 +263,23 @@ impl PixelFormat {
             _ => None,
         }
     }
+
+    /// Decodes the raw `u32` a surface reports in [`SurfaceInfo::format`].
+    ///
+    /// Unlike [`Self::from_gop`] the variant names are the on-disk encoding, so
+    /// a client that only holds a mapped surface can decode it and paint.
+    ///
+    /// [`SurfaceInfo::format`]: crate::SurfaceInfo::format
+    #[must_use]
+    pub const fn from_raw(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Bgrx8888),
+            1 => Some(Self::Rgbx8888),
+            2 => Some(Self::Bitmask),
+            u32::MAX => Some(Self::Unavailable),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -336,5 +354,17 @@ mod tests {
         // PixelBltOnly has no linear framebuffer.
         assert_eq!(PixelFormat::from_gop(3), None);
         assert_eq!(PixelFormat::from_gop(99), None);
+    }
+
+    #[test]
+    fn surface_formats_decode_from_raw_words() {
+        // The surface syscall stores the raw discriminant; a delegate decodes it.
+        assert_eq!(PixelFormat::from_raw(0), Some(PixelFormat::Bgrx8888));
+        assert_eq!(PixelFormat::from_raw(1), Some(PixelFormat::Rgbx8888));
+        assert_eq!(PixelFormat::from_raw(2), Some(PixelFormat::Bitmask));
+        assert_eq!(PixelFormat::from_raw(u32::MAX), Some(PixelFormat::Unavailable));
+        assert_eq!(PixelFormat::from_raw(7), None);
+        // A round trip through the discriminant is stable.
+        assert_eq!(PixelFormat::from_raw(PixelFormat::Rgbx8888 as u32), Some(PixelFormat::Rgbx8888));
     }
 }

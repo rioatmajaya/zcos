@@ -22,6 +22,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0013](0013-permissions-and-ownership.md) | File permissions and ownership in the VFS | Accepted |
 | [0014](0014-linux-driver-domain.md) | Reuse Linux drivers in a userspace driver domain | Accepted |
 | [0015](0015-compositor-surface-model.md) | Compositor surface model and damage tracking | Accepted |
+| [0016](0016-window-client-delegation.md) | Window clients and delegated surfaces | Accepted |
 
 ## Adding a decision
 

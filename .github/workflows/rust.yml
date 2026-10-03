@@ -111,7 +111,7 @@ jobs:
         grep -q "audit: task 2 denied read /tmp/scratch" build/boot.log
         grep -q "task 2: cat: cannot open" build/boot.log
         grep -q "task 4: blk: zcfs stopped" build/boot.log
-        grep -q "user: 8 address spaces" build/boot.log
+        grep -q "user: 9 address spaces" build/boot.log
         grep -q "device: 3 roles, 5 grants (blk 0, kbd 3, devmgr 2)" build/boot.log
         grep -q "service: 1 role, 1 grant (initd -> blk)" build/boot.log
         grep -q "cap: task 6 delegated" build/boot.log
@@ -133,13 +133,17 @@ jobs:
         grep -q "input: irq self-test ok" build/boot.log
         grep -q "surface: factory granted to task 3" build/boot.log
         grep -q "task 3: compositor: surface 1280x800 stride 1280 at 0x1400000" build/boot.log
+        grep -q "cap: task 3 delegated 0x20000001 to task 8" build/boot.log
+        grep -q "task 8: client: window painted" build/boot.log
         grep -q "task 3: compositor: frame 0 painted" build/boot.log
+        grep -q "task 3: wm: window mapped" build/boot.log
         grep -q "task 3: compositor: damage ok" build/boot.log
+        grep -q "task 3: wm: move ok" build/boot.log
         grep -q "task 3: compositor: ready" build/boot.log
         grep -q "fb: desktop checksum ok" build/boot.log
         grep -q "switches" build/boot.log
         grep -q "acpi: rsdp v2" build/boot.log
-        grep -q "initramfs: 10 files" build/boot.log
+        grep -q "initramfs: 11 files" build/boot.log
         grep -q "task 4: blk: resuming" build/boot.log
         grep -q "task 7: initd: blk down" build/boot.log
         grep -q "task 7: service blk started, task 4 revived" build/boot.log
