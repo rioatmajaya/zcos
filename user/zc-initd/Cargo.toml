@@ -1,0 +1,33 @@
+[package]
+name = "initd"
+description = "initd supervisor for ZC OS: restarts and stops service domains"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "initd"
+path = "src/main.rs"
+
+[dependencies]
+zc-user = { path = "../zc-user" }
+zc-abi = { path = "../../libs/zc-abi" }
+
+[lints]
+workspace = true
+
+# Built standalone outside the host workspace (its freestanding binary
+# would otherwise fail `cargo test`); the `*.workspace = true` references
+# resolve to the concrete values below.
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/zc-os/zcos"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"

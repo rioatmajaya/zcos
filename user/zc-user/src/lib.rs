@@ -11,10 +11,12 @@
 use core::arch::asm;
 
 pub use zc_abi::{
-    FS_ID_ZCFS, FS_OP_STOP, IPC_FS, KIND_DIR, KIND_FILE, SYS_CAP_DELEGATE, SYS_CLOSE, SYS_CREATE,
-    SYS_FB_INFO, SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME,
-    SYS_MOUNT, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ, SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO,
-    SYS_SERIAL_READ, SYS_STAT, SYS_TASK_EXIT, SYS_UMOUNT, SYS_WRITE, SYS_YIELD, Stat, SyscallError,
+    FS_ID_ZCFS, FS_OP_STOP, IPC_FS, IPC_SUPERVISE, KIND_DIR, KIND_FILE, SERVICE_KIND_EXIT,
+    SERVICE_KIND_FAULT, SYS_CAP_DELEGATE, SYS_CLOSE, SYS_CREATE, SYS_FB_INFO, SYS_IRQ_CLAIM,
+    SYS_IRQ_TEST, SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_MOUNT, SYS_OPEN, SYS_PORT_CLAIM,
+    SYS_READ, SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START,
+    SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT, SYS_TASK_EXIT, SYS_UMOUNT, SYS_WRITE, SYS_YIELD,
+    Stat, SyscallError, supervise_kind, supervise_service,
 };
 
 /// Issues a syscall with no arguments.
@@ -249,6 +251,28 @@ pub fn port_claim(start: u16, len: u16) -> u64 {
 #[inline(always)]
 pub fn cap_delegate(object: u32, target: u64, rights: u8) -> u64 {
     syscall3(SYS_CAP_DELEGATE, u64::from(object), target, u64::from(rights))
+}
+
+/// Revives (starts) a supervised service domain, returning 0 or `u64::MAX`.
+///
+/// Only a task holding the service's capability may call it; a service that is
+/// already running is left untouched.
+#[inline(always)]
+pub fn service_start(id: u64) -> u64 {
+    syscall1(SYS_SERVICE_START, id)
+}
+
+/// Stops a supervised service domain, returning 0 or `u64::MAX`.
+#[inline(always)]
+pub fn service_stop(id: u64) -> u64 {
+    syscall1(SYS_SERVICE_STOP, id)
+}
+
+/// Reports whether a supervised service is running: 1 up, 0 down, `u64::MAX`
+/// when the caller holds no authority over it.
+#[inline(always)]
+pub fn service_status(id: u64) -> u64 {
+    syscall1(SYS_SERVICE_STATUS, id)
 }
 
 /// Terminates the calling task; never returns.

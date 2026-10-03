@@ -18,10 +18,35 @@ what a domain may touch is now granted by data, delegated at runtime, and
 claimed explicitly. Phase **F7 — VFS & storage** has started: a write path
 (F7a), a write-back cache (F7b), a read-only FAT32 mount (F7c), a read-only
 ext2 mount (F7c-2), a read-only VFS core (F7d), a ZC-native log-structured
-filesystem (F7e), and the writable volume mounted into the kernel VFS (F7e-2).
+filesystem (F7e), the writable volume mounted into the kernel VFS (F7e-2),
+and a userspace supervisor that owns service lifecycle (F7f).
 
 ### Added
 
+- **Userspace service supervision** (F7f): `initd` becomes the manifest's
+  `init=/sbin/initd`, a ring-3 supervisor that decides whether a service
+  domain is restarted or stopped. The kernel keeps only the mechanisms —
+  reviving a dead slot, killing a live one — behind `SYS_SERVICE_START`,
+  `SYS_SERVICE_STOP`, and `SYS_SERVICE_STATUS` (numbers 23–25), each gated by
+  a capability in its own namespace (bit 30, `service_cap`). A pure
+  `zc-kernel::service` table names which task slot is which service, so the
+  image, the supervisor, and the tests share one source of truth. The kernel
+  posts a tagged `FAULT`/`EXIT` event on a fifth IPC channel (`IPC_SUPERVISE`)
+  before it removes a supervised slot, so the event is already queued when the
+  supervisor wakes. The block domain faults on purpose after its probes
+  (`port_inb` on an ungranted port), `initd` restarts it, and it resumes
+  filesystem serving from `.bss` state — the BAR base, queue depth, and
+  submission counter survive the restart, and it skips the one-shot discovery
+  handshake that the now-exited device manager could never answer again. The
+  boot shows `initd: restarted blk` and `blk: zcfs serving` after the fault
+  (see [ADR 0010](docs/adr/0010-userspace-service-supervision.md)).
+- **`SYS_SERVICE_START`, `SYS_SERVICE_STOP`, `SYS_SERVICE_STATUS`** (F7f):
+  syscalls 23–25. `TaskTable` gains `is_alive`, `has_runnable_other_than`,
+  `respawn`, and `kill`; a supervisor-driven restart reuses the slot's address
+  space and image and clears its descriptor table, exactly as a fault restart
+  does. The serial-idle condition now checks for a runnable peer rather than a
+  live-task count, so a lone shell parks instead of deadlocking once `initd` is
+  the only other live task.
 - **Writable zcfs in the kernel VFS** (F7e-2): the volume the block domain
   serves is mounted at `/data`, so `SYS_WRITE`, `SYS_CREATE`, `SYS_MOUNT`, and
   `SYS_UMOUNT` reach the disk through the ordinary VFS path. The kernel holds

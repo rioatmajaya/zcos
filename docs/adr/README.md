@@ -16,6 +16,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0007](0007-vfs-core.md) | Read-only VFS with a trait-based filesystem | Accepted |
 | [0008](0008-zc-native-log-structured-fs.md) | ZC-native log-structured filesystem | Accepted |
 | [0009](0009-filesystem-rpc-replay.md) | Filesystem RPC with block-and-retry replay | Accepted |
+| [0010](0010-userspace-service-supervision.md) | Userspace service supervision | Accepted |
 
 ## Adding a decision
 

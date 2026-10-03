@@ -28,6 +28,7 @@ pub mod memory;
 pub mod pci;
 pub mod ramfs;
 pub mod sched;
+pub mod service;
 pub mod syscall;
 pub mod task;
 pub mod timer;

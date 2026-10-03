@@ -41,7 +41,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F4** | Thread + IPC | ✅ done | `task 0: producer sent 2000`, capability gates |
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 5 grants`, `task 6: devmgr: blk published` |
-| **F7** | VFS & penyimpanan | 🔨 F7a–F7e-2, F7c-2 done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok` |
+| **F7** | VFS & penyimpanan | 🔨 F7a–F7f done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk` |
 | **F8** | Desktop | ⬜ planned | — |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
@@ -323,8 +323,16 @@ VFS → write path → journaling → `fsck`**.
       replay without re-sending or misattributing the waiting reply. The shell
       gains `write`/`persist`/`mount`/`umount`, and a boot writes
       `/data/probe`, unmounts, remounts, and reads it back.
-- [ ] F7f: `initd` — the manifest's `init=/sbin/initd` becomes real: a
-      supervisor that starts, restarts, and stops service domains.
+- [x] F7f: `initd` — the manifest's `init=/sbin/initd` becomes real: a
+      supervisor that starts, restarts, and stops service domains. The kernel
+      keeps the mechanisms (revive a dead slot, kill a live one) behind
+      `SYS_SERVICE_START`/`STOP`/`STATUS`, gated by a capability in its own
+      namespace; a pure `zc-kernel::service` table names the slots. `initd`
+      blocks on `IPC_SUPERVISE`, and the kernel posts a tagged event before it
+      removes a supervised slot. The block domain faults on purpose after its
+      probes, `initd` restarts it, and it resumes filesystem serving from
+      persisted `.bss` state (see
+      [ADR 0010](adr/0010-userspace-service-supervision.md)).
 - [ ] F7g: journaling / crash-consistency (ordered writes at minimum).
 - [ ] F7h: `fsck` / recovery tooling and a documented on-disk format.
 - [ ] F7i: `devfs` and `tmpfs` mounts; device nodes for the block domain.
@@ -359,8 +367,13 @@ VFS → write path → journaling → `fsck`**.
 - A CI boot writes a known pattern to `/data/probe`, unmounts, remounts, and
   reads it back with a matching checksum: `vfs: persistence ok`.
 - A power-loss simulation (kill QEMU mid-write, reboot) reaches `fsck: clean`.
-- `initd` restarts a service domain after a deliberate fault:
-  `initd: restarted blk`.
+- F7f: the block domain faults deliberately, `initd` restarts it, and it
+  resumes serving: `task 4: faulted; initd notified`, `task 7: initd: blk
+  down`, `task 7: service blk started, task 4 revived`, `task 7: initd:
+  restarted blk`, `task 4: blk: resuming`, `task 4: blk: zcfs serving`, and
+  finally `task 7: initd: blk stopped` when the domain exits. The boot also
+  shows `service: 1 role, 1 grant (initd -> blk)` and `user: 8 address spaces`.
+  `SYS_SERVICE_STOP`/`STATUS` are covered by host tests.
 
 **References.** `14-filesystem.md`, `25-virtio.md`, `30-partisi-dan-installer.md`,
 `15-keamanan.md`.

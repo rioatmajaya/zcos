@@ -107,10 +107,20 @@ re-claim of its device on the next run. The budget bounds the loop, so a
 domain that faults unconditionally restarts a fixed number of times and then
 stays dead.
 
+A supervised service is different: the kernel does not decide its fate. When
+such a domain faults or exits, the kernel posts a tagged event on the
+supervision channel and kills the slot; the ring-3 `initd` supervisor wakes,
+chooses whether to restart, and calls back into the kernel to revive it. The
+policy — restart, give up, stop — lives in userspace, while the mechanisms
+(building the address space, reviving a slot, killing one) stay in the kernel
+(see [ADR 0010](adr/0010-userspace-service-supervision.md)).
+
 ## IPC and authority
 
 ZC OS uses synchronous message passing initially, over independent channels
-with explicit send/receive syscalls per channel. Kernel objects are referenced
+with explicit send/receive syscalls per channel. The bring-up uses five: the
+data stream, device discovery, filesystem requests, filesystem replies, and
+supervision events. Kernel objects are referenced
 through unforgeable capabilities. A capability conveys one explicit right and
 can only be transferred over IPC — since 4m the kernel also enforces that at
 runtime: a domain holding a grant can delegate a non-amplifying subset into

@@ -277,6 +277,64 @@ impl<const N: usize> TaskTable<N> {
             .count()
     }
 
+    /// Returns whether the slot at `index` holds a live task.
+    #[must_use]
+    pub fn is_alive(&self, index: usize) -> bool {
+        matches!(self.tasks.get(index), Some(Some(task)) if task.alive)
+    }
+
+    /// Returns whether any task other than `index` is alive and runnable.
+    ///
+    /// A blocked peer cannot make progress, so a task that would otherwise
+    /// block with no runnable peer must idle instead of deadlocking. The check
+    /// deliberately excludes `index`: a lone runnable task is not a peer.
+    #[must_use]
+    pub fn has_runnable_other_than(&self, index: usize) -> bool {
+        self.tasks
+            .iter()
+            .enumerate()
+            .any(|(position, slot)| {
+                position != index && matches!(slot, Some(task) if task.alive && !task.blocked)
+            })
+    }
+
+    /// Revives a dead slot with fresh register and frame state.
+    ///
+    /// Unlike [`restart_current`](Self::restart_current), this targets a slot
+    /// that is not running (a service the supervisor decided to restart). It
+    /// never touches `current` or `switches`: the revived task runs when the
+    /// scheduler next reaches it. The slot keeps its page-table root, so the
+    /// same address space and image are reused.
+    pub fn respawn(
+        &mut self,
+        index: usize,
+        regs: SyscallRegs,
+        frame: IrqFrame,
+    ) -> Result<(), TaskError> {
+        let Some(task) = self.tasks.get_mut(index).and_then(Option::as_mut) else {
+            return Err(TaskError::UnknownTask);
+        };
+        task.regs = regs;
+        task.frame = frame;
+        task.alive = true;
+        task.blocked = false;
+        Ok(())
+    }
+
+    /// Terminates the slot at `index` without scheduling a successor.
+    ///
+    /// The caller is responsible for revoking the dead task's resources; this
+    /// only flips the slot's state. Returns [`TaskError::UnknownTask`] when the
+    /// index names no slot.
+    pub fn kill(&mut self, index: usize) -> Result<(), TaskError> {
+        let Some(task) = self.tasks.get_mut(index).and_then(Option::as_mut) else {
+            return Err(TaskError::UnknownTask);
+        };
+        task.alive = false;
+        task.blocked = false;
+        Ok(())
+    }
+
     /// Marks the running task blocked and loads the next runnable one.
     ///
     /// Returns the new running index, or `None` when no other task can run
@@ -565,5 +623,63 @@ mod task_table_tests {
     fn exit_magic_is_not_an_error_code() {
         assert!(EXIT_TO_KERNEL > u64::from(u32::MAX));
         assert_eq!(&EXIT_TO_KERNEL.to_be_bytes(), b"ZCOSEXIT");
+    }
+
+    #[test]
+    fn respawn_revives_a_dead_slot_without_moving_current() {
+        let mut table = TaskTable::<4>::new();
+        let zero = table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000).unwrap();
+        let one = table.spawn(SyscallRegs::EMPTY, frame(0x200), 0x2000).unwrap();
+        assert_eq!(zero, 0);
+        // Kill slot 0 as if it faulted; the scheduler moves on.
+        let mut regs = SyscallRegs::EMPTY;
+        let mut irq = IrqFrame::EMPTY;
+        assert_eq!(table.exit_current(&mut regs, &mut irq), Some(one));
+        assert!(!table.is_alive(zero));
+        assert_eq!(table.current(), one);
+        let switches = table.switches();
+
+        // Reviving slot 0 must not disturb the running slot.
+        table
+            .respawn(zero, SyscallRegs::EMPTY, frame(0x500))
+            .unwrap();
+        assert!(table.is_alive(zero));
+        assert_eq!(table.current(), one);
+        assert_eq!(table.switches(), switches);
+        assert_eq!(table.cr3_of(zero), Some(0x1000));
+    }
+
+    #[test]
+    fn kill_marks_a_slot_dead() {
+        let mut table = TaskTable::<4>::new();
+        table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000).unwrap();
+        table.spawn(SyscallRegs::EMPTY, frame(0x200), 0x2000).unwrap();
+        assert!(table.is_alive(1));
+        table.kill(1).unwrap();
+        assert!(!table.is_alive(1));
+        assert_eq!(table.alive_count(), 1);
+        assert_eq!(table.kill(9), Err(TaskError::UnknownTask));
+    }
+
+    #[test]
+    fn runnable_peer_excludes_self_and_blocked_tasks() {
+        let mut table = TaskTable::<4>::new();
+        table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000).unwrap();
+        table.spawn(SyscallRegs::EMPTY, frame(0x200), 0x2000).unwrap();
+        // Both slots are runnable peers of each other.
+        assert!(table.has_runnable_other_than(0));
+        assert!(table.has_runnable_other_than(1));
+
+        // Block the running slot 0; the scheduler loads slot 1.
+        let mut regs = SyscallRegs::EMPTY;
+        let mut irq = IrqFrame::EMPTY;
+        assert_eq!(table.block_current(&mut regs, &mut irq), Some(1));
+        // Slot 1 now has no runnable peer, but slot 0 still has slot 1.
+        assert!(!table.has_runnable_other_than(1));
+        assert!(table.has_runnable_other_than(0));
+
+        // An empty table has no peers for anyone.
+        let empty = TaskTable::<4>::new();
+        assert!(!empty.has_runnable_other_than(0));
     }
 }

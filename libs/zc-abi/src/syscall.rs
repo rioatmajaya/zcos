@@ -70,6 +70,16 @@ pub const SYS_UMOUNT: u64 = 21;
 /// Creates a file at a path: args are path pointer and path length; returns 0
 /// or `u64::MAX`.
 pub const SYS_CREATE: u64 = 22;
+/// Starts (revives) a supervised service domain: arg is the service id;
+/// returns 0 or `u64::MAX`. Only a caller holding the service's capability
+/// may invoke it, and a service that is already up is left running.
+pub const SYS_SERVICE_START: u64 = 23;
+/// Stops a supervised service domain: arg is the service id; returns 0 or
+/// `u64::MAX`. The service is killed and its IRQ/port authority revoked.
+pub const SYS_SERVICE_STOP: u64 = 24;
+/// Reports whether a supervised service is running: arg is the service id;
+/// returns 1 when up, 0 when down, or `u64::MAX` when refused.
+pub const SYS_SERVICE_STATUS: u64 = 25;
 
 /// Error codes returned by failed syscalls.
 ///
@@ -148,6 +158,9 @@ mod tests {
         assert_eq!(SYS_MOUNT, 20);
         assert_eq!(SYS_UMOUNT, 21);
         assert_eq!(SYS_CREATE, 22);
+        assert_eq!(SYS_SERVICE_START, 23);
+        assert_eq!(SYS_SERVICE_STOP, 24);
+        assert_eq!(SYS_SERVICE_STATUS, 25);
     }
 
     #[test]

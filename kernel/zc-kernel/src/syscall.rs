@@ -9,8 +9,8 @@
 use zc_abi::{
     SYS_CAP_DELEGATE, SYS_CLOSE, SYS_CREATE, SYS_FB_INFO, SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT,
     SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_MOUNT, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ, SYS_RECV,
-    SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_STAT, SYS_TASK_EXIT, SYS_UMOUNT,
-    SYS_WRITE, SYS_YIELD, SyscallError,
+    SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START, SYS_SERVICE_STATUS,
+    SYS_SERVICE_STOP, SYS_STAT, SYS_TASK_EXIT, SYS_UMOUNT, SYS_WRITE, SYS_YIELD, SyscallError,
 };
 
 /// The kernel operation a syscall number requests.
@@ -65,6 +65,12 @@ pub enum Action {
     Umount,
     /// Create a file at a path.
     Create,
+    /// Revive (start) a supervised service domain.
+    ServiceStart,
+    /// Kill a supervised service domain.
+    ServiceStop,
+    /// Report whether a supervised service domain is running.
+    ServiceStatus,
 }
 
 /// Maps a raw syscall number to its [`Action`].
@@ -96,6 +102,9 @@ pub const fn dispatch(number: u64) -> Result<Action, SyscallError> {
         SYS_MOUNT => Ok(Action::Mount),
         SYS_UMOUNT => Ok(Action::Umount),
         SYS_CREATE => Ok(Action::Create),
+        SYS_SERVICE_START => Ok(Action::ServiceStart),
+        SYS_SERVICE_STOP => Ok(Action::ServiceStop),
+        SYS_SERVICE_STATUS => Ok(Action::ServiceStatus),
         _ => Err(SyscallError::InvalidNumber),
     }
 }
@@ -129,12 +138,15 @@ mod tests {
         assert_eq!(dispatch(SYS_MOUNT), Ok(Action::Mount));
         assert_eq!(dispatch(SYS_UMOUNT), Ok(Action::Umount));
         assert_eq!(dispatch(SYS_CREATE), Ok(Action::Create));
+        assert_eq!(dispatch(SYS_SERVICE_START), Ok(Action::ServiceStart));
+        assert_eq!(dispatch(SYS_SERVICE_STOP), Ok(Action::ServiceStop));
+        assert_eq!(dispatch(SYS_SERVICE_STATUS), Ok(Action::ServiceStatus));
     }
 
     #[test]
     fn unknown_numbers_are_rejected() {
-        // The last assigned number is SYS_CREATE (22), so probe past it.
-        assert_eq!(dispatch(23), Err(SyscallError::InvalidNumber));
+        // The last assigned number is SYS_SERVICE_STATUS (25), so probe past it.
+        assert_eq!(dispatch(26), Err(SyscallError::InvalidNumber));
         assert_eq!(
             dispatch(u64::MAX),
             Err(SyscallError::InvalidNumber)

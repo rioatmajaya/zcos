@@ -1,4 +1,4 @@
-//! Device grant table: which roles own which hardware, as data.
+//! Spawn grant table: which roles own which hardware and services, as data.
 //!
 //! The kernel still provisions capabilities at spawn — a future userspace
 //! device manager will serve this same table over IPC — but the grants
@@ -10,8 +10,10 @@
 //! [`zc_abi::port_cap`]): IRQ sources are small integers, port ranges are
 //! packed with the high bit set. Interrupt delivery ([`crate::irq`]) and
 //! port authority ([`crate::iomap`]) therefore stay two explicit grants.
+//! Service lifecycle authority lives in a third namespace, bit 30 (see
+//! [`zc_abi::service_cap`]), so it collides with neither.
 
-use zc_abi::port_cap;
+use zc_abi::{port_cap, service_cap};
 
 use crate::capability::{Capability, Rights};
 
@@ -55,6 +57,16 @@ pub const fn bar_range(base: u16) -> (u16, u16) {
     (base, 0x100)
 }
 
+/// Capability object granting lifecycle control of one supervised service.
+///
+/// `READ` authorizes a status query; `WRITE` authorizes start and stop. The
+/// service namespace sets bit 30 (see [`zc_abi::service_cap`]), so this
+/// object cannot be confused with an IRQ source or a port range.
+#[must_use]
+pub const fn service_grant(id: u32) -> Capability {
+    Capability::new(service_cap(id), Rights::READ.union(Rights::WRITE))
+}
+
 /// Port grants the block driver holds at spawn: none.
 ///
 /// Its BAR window arrives at runtime, delegated by the manager over
@@ -63,6 +75,13 @@ pub const fn bar_range(base: u16) -> (u16, u16) {
 /// the boot log proves in the negative only by the claim succeeding after
 /// the delegation lands.
 pub const BLK_SETUP_GRANTS: usize = 0;
+
+/// Service grants the `initd` supervisor holds at spawn.
+///
+/// One: authority over the block service. The supervisor names the service
+/// by id in the lifecycle syscalls, and the kernel checks this grant before
+/// touching the slot, so a task without it cannot start or stop a domain.
+pub const INITD_SETUP_GRANTS: usize = 1;
 
 /// Port grants the device manager holds at spawn: config for scanning plus
 /// the discovered BAR window with [`crate::capability::Rights::GRANT`] so it
@@ -121,5 +140,19 @@ mod tests {
                 .contains(Rights::WRITE)
         );
         assert_eq!(KBD_GRANT_COUNT, 3);
+    }
+
+    #[test]
+    fn service_namespace_stays_disjoint() {
+        let service = service_grant(0);
+        assert_eq!(service.object(), service_cap(0));
+        // Bit 30 keeps a service id apart from both small IRQ sources and
+        // bit-31 port ranges, so one object can never gate another path.
+        assert_ne!(service.object(), irq_grant(zc_abi::IRQ_KEYBOARD).object());
+        assert_ne!(service.object(), port_grant(0x60, 2).object());
+        // The supervisor may query status and start/stop its service.
+        assert!(service.rights().contains(Rights::READ));
+        assert!(service.rights().contains(Rights::WRITE));
+        assert_eq!(INITD_SETUP_GRANTS, 1);
     }
 }

@@ -25,7 +25,7 @@
 #![no_main]
 #![allow(unsafe_code)]
 
-use core::ptr::addr_of_mut;
+use core::ptr::{addr_of, addr_of_mut};
 use core::sync::atomic::{Ordering, compiler_fence};
 
 use zc_abi::{
@@ -43,8 +43,8 @@ use zc_kernel::mbr;
 use zc_kernel::virtio;
 use zc_kernel::zcfs::{self, BlockIo, ZcfsError};
 use zc_user::{
-    abort, log, port_claim, port_inl, port_inw, port_outb, port_outl, port_outw, recv_from, send_to,
-    task_exit,
+    abort, log, port_claim, port_inb, port_inl, port_inw, port_outb, port_outl, port_outw,
+    recv_from, send_to, task_exit,
 };
 
 /// Upper bound on completion-poll spins before giving up.
@@ -73,6 +73,30 @@ static mut ZCFS: zcfs::Volume<ZCFS_SLOTS> = zcfs::Volume::new();
 /// Partition LBA of the zcfs volume, recorded by the probe so `OP_MOUNT` can
 /// replay the same partition again.
 static mut ZCFS_LBA: u32 = 0;
+
+/// Bring-up phase: zero until the device is configured and probed.
+///
+/// A supervisor restart re-enters `_start` with this set, so the domain
+/// resumes serving instead of redoing the discovery handshake — the device
+/// manager exits after its single send and would never answer a second time.
+const PHASE_SERVING: u8 = 1;
+
+/// Current bring-up phase, in `.bss` so it survives a supervisor restart.
+static mut PHASE: u8 = 0;
+
+/// Device register window, persisted for the resume path.
+static mut PORT: u16 = 0;
+
+/// Negotiated queue depth, persisted for the resume path.
+static mut QUEUE_MAX: u16 = 0;
+
+/// Submission counter, persisted so a restarted domain waits on the device's
+/// *next* completion rather than a stale used-ring index (which would hang).
+static mut QUEUE_SEQ: u16 = 0;
+
+/// Whether the device negotiated the flush feature, persisted for the resume
+/// path so a restarted domain still issues flushes.
+static mut FLUSH_OFFERED: bool = false;
 
 /// Forms a device register port from a BAR base plus an offset.
 const fn reg(port: u16, offset: u16) -> u16 {
@@ -1104,6 +1128,40 @@ pub unsafe extern "C" fn _start() -> ! {
         abort();
     }
 
+    // A supervisor restart re-enters here with the device already configured
+    // and the volume already mounted. Redoing the handshake would block
+    // forever — the manager exits after its single send and would never answer
+    // again — so the resume path re-claims the window and goes straight back
+    // to serving. The kill revoked the port authority but not the delegated
+    // capability, so the claim succeeds.
+    if unsafe { addr_of!(PHASE).read() } == PHASE_SERVING {
+        log("blk: resuming\n");
+        // SAFETY: written by the first run before its deliberate fault; this
+        // task is single-threaded across the restart.
+        let (port, max, seq, flush_offered) = unsafe {
+            (
+                addr_of!(PORT).read(),
+                addr_of!(QUEUE_MAX).read(),
+                addr_of!(QUEUE_SEQ).read(),
+                addr_of!(FLUSH_OFFERED).read(),
+            )
+        };
+        if port_claim(port, 0x100) == u64::MAX {
+            log("blk: resume bar window not granted\n");
+            task_exit()
+        }
+        let mut device = Device {
+            port,
+            area,
+            base: phys[0],
+            max,
+            seq,
+        };
+        // SAFETY: single-threaded; the cache is not aliased.
+        let cache = unsafe { &mut *addr_of_mut!(CACHE) };
+        zcfs_serve(&mut device, cache, flush_offered)
+    }
+
     // The manager owns PCI config now: this domain learns its window from
     // the discovery channel instead of scanning the bus. No config grant is
     // provisioned for this task, so a scan would fault — by design. The
@@ -1171,5 +1229,21 @@ pub unsafe extern "C" fn _start() -> ! {
     fs_probe(&mut device, cache);
     ext2_probe(&mut device, cache);
     zcfs_probe(&mut device, cache, flush_offered);
-    zcfs_serve(&mut device, cache, flush_offered);
+
+    // Persist everything the resume path needs, then fault deliberately.
+    // SAFETY: single-threaded; written once, immediately before the fault.
+    unsafe {
+        addr_of_mut!(PORT).write(port);
+        addr_of_mut!(QUEUE_MAX).write(max);
+        addr_of_mut!(QUEUE_SEQ).write(device.seq);
+        addr_of_mut!(FLUSH_OFFERED).write(flush_offered);
+        addr_of_mut!(PHASE).write(PHASE_SERVING);
+    }
+    // Reading a port this domain was never granted raises #GP. The kernel
+    // reports it and `initd` answers with a restart; the proof is the
+    // "resuming" line and the filesystem serving that follow. `abort` is
+    // unreachable on a real fault and only guards the impossible case where
+    // the read somehow succeeds.
+    let _ = port_inb(0);
+    abort();
 }

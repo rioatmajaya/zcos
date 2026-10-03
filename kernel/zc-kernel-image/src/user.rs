@@ -9,12 +9,15 @@
 use core::arch::{asm, naked_asm};
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 
-use zc_abi::BootInfo;
-use zc_kernel::capability::{CapabilityTable, Rights};
+use zc_abi::{
+    BootInfo, IPC_SUPERVISE, SERVICE_KIND_EXIT, SERVICE_KIND_FAULT, service_cap, supervise_event,
+};
+use zc_kernel::capability::{Capability, CapabilityTable, Rights};
 use zc_kernel::gdt::{USER_CS, USER_RFLAGS, USER_SS};
 use zc_kernel::ipc::Endpoint;
 use zc_kernel::memory::{FrameAllocator, PAGE_SIZE};
 use zc_kernel::ramfs::RamFs;
+use zc_kernel::service;
 use zc_kernel::syscall::{Action, dispatch};
 use zc_kernel::task::{EXIT_TO_KERNEL, IrqFrame, SyscallRegs, TaskTable};
 use zc_kernel::trap::has_error_code;
@@ -22,7 +25,10 @@ use zc_kernel::vfs::{DescriptorTable, MountTable, VfsError};
 use zc_kernel::vm::VirtAddr;
 
 /// Tasks the setup brings up, in task-index order.
-const TASK_COUNT: usize = 7;
+///
+/// Kept in step with [`zc_kernel::service::TASK_COUNT`], which is the single
+/// source of truth for the bring-up layout.
+const TASK_COUNT: usize = service::TASK_COUNT;
 
 /// Base virtual address user task images are linked at.
 const USER_CODE_VIRT: u64 = 0x40_0000;
@@ -81,6 +87,15 @@ const STACK_G_TOP: u64 = 0x40_B000;
 /// Device-manager stack page backing that top.
 const STACK_G_PAGE: u64 = STACK_G_TOP - PAGE_SIZE;
 
+/// Top of the `initd` supervisor's user stack.
+///
+/// The last free page in the stack zone: task G occupies `0x40A000`, and the
+/// zone ends at [`STACK_ZONE_END`].
+const STACK_H_TOP: u64 = 0x40_C000;
+
+/// `initd` stack page backing that top.
+const STACK_H_PAGE: u64 = STACK_H_TOP - PAGE_SIZE;
+
 /// File names of the bring-up tasks inside the initramfs.
 const PRODUCER_NAME: &str = "producer.elf";
 /// Consumer binary name.
@@ -96,20 +111,23 @@ const KBD_NAME: &str = "kbd.elf";
 
 /// Task index of the block driver domain, whose I/O ports are granted
 /// during PCI setup before the tasks themselves are spawned.
-///
-/// Fixed by construction: it is the fifth entry of the bring-up task list,
-/// and the setup spawns them in that same order.
-pub const BLK_TASK: usize = 4;
+pub const BLK_TASK: usize = service::BLK_TASK;
 
 /// Task index of the keyboard driver domain.
-const KBD_INDEX: usize = 5;
+const KBD_INDEX: usize = service::KBD_TASK;
 
 /// Task index of the device manager, which owns PCI config and publishes
 /// discovery for the block driver.
-const DEVMGR_INDEX: usize = 6;
+const DEVMGR_INDEX: usize = service::DEVMGR_TASK;
+
+/// Task index of the `initd` supervisor, which owns service lifecycle policy.
+const INITD_INDEX: usize = service::INITD_TASK;
 
 /// File name of the device manager inside the initramfs.
 const DEVMGR_NAME: &str = "devmgr.elf";
+
+/// File name of the `initd` supervisor inside the initramfs.
+const INITD_NAME: &str = "initd.elf";
 
 /// User virtual address the display framebuffer is mapped at.
 const FB_VIRT: u64 = 0x10_00000;
@@ -120,9 +138,10 @@ static mut FB_INFO: zc_abi::FramebufferInfo = zc_abi::FramebufferInfo::UNAVAILAB
 /// IPC queues, one per channel.
 ///
 /// Channel 0 is the legacy data stream; channel 1 is device discovery;
-/// channels 2 and 3 are the filesystem bridge (requests and replies). The
-/// queues are fully separate, so a manager publishing a BAR base can never
-/// disturb the producer/consumer word sequence no matter the interleaving.
+/// channels 2 and 3 are the filesystem bridge (requests and replies); channel
+/// 4 carries supervision events from the kernel to `initd`. The queues are
+/// fully separate, so a manager publishing a BAR base can never disturb the
+/// producer/consumer word sequence no matter the interleaving.
 static mut ENDPOINTS: [Endpoint<4>; zc_abi::IPC_CHANNELS] =
     [const { Endpoint::new() }; zc_abi::IPC_CHANNELS];
 
@@ -168,6 +187,25 @@ pub(crate) fn fs_recv_reply() -> Option<u64> {
     // SAFETY: channel 3 is always in range; see `endpoint_for`.
     let endpoint = unsafe { endpoint_for(zc_abi::IPC_FS_REPLY as u64) }?;
     endpoint.recv().ok().map(|message| message.words[0])
+}
+
+/// Posts a supervision event for `task` when it is a supervised service.
+///
+/// Called from the fault and exit paths with interrupts masked, and always
+/// *before* the task is removed from the scheduler: `exit_current` unblocks
+/// every task, so the supervisor wakes with the event already queued. An
+/// unsupervised task posts nothing.
+fn post_supervise(task: usize, kind: u32) {
+    let Some(entry) = service::for_task(task) else {
+        return;
+    };
+    // SAFETY: channel 4 is always in range; see `endpoint_for`.
+    let Some(endpoint) = (unsafe { endpoint_for(IPC_SUPERVISE as u64) }) else {
+        return;
+    };
+    if let Some(message) = zc_abi::Message::from_words(&[supervise_event(entry.id, kind)]) {
+        let _ = endpoint.send(message);
+    }
 }
 
 /// Minimum timer ticks observed during the tasks to accept the demo.
@@ -454,13 +492,21 @@ pub unsafe extern "C" fn user_exception_entry(
     // SAFETY: the CPU frame sits just past the register save block, and
     // exit/restart overwrites it wholesale when a successor exists.
     let frame_mut = unsafe { &mut *frame };
-    // A budgeted slot is restarted in place instead of killed: the same
-    // address space and image frames are reused, only the register state is
-    // reset to the spawn values. The budget stops a domain that faults
-    // unconditionally from respawning forever.
+    // A supervised service is not restarted by the kernel: the supervisor
+    // decides. Post the fault before the slot is removed, so the waking
+    // supervisor finds the event already queued, then fall through to the kill
+    // path. An unsupervised task keeps the budgeted in-place restart below.
+    let supervised = service::for_task(me).is_some();
+    if supervised {
+        post_supervise(me, SERVICE_KIND_FAULT);
+    }
+    // A budgeted, unsupervised slot is restarted in place instead of killed:
+    // the same address space and image frames are reused, only the register
+    // state is reset to the spawn values. The budget stops a domain that
+    // faults unconditionally from respawning forever.
     // SAFETY: owned here; traps cannot nest.
     let budget = unsafe { (*addr_of!(RESTART_BUDGET))[me] };
-    if budget > 0 {
+    if !supervised && budget > 0 {
         // SAFETY: written at spawn before any task ran; read-only since.
         let (entry, stack) = unsafe {
             (
@@ -504,7 +550,12 @@ pub unsafe extern "C" fn user_exception_entry(
             trace(7, tasks.current(), 0, number as u64);
             publish_next_cr3(tasks);
             let _ = crate::serial::print(format_args!(
-                "task {me}: faulted; kernel survived, scheduling task {}\n",
+                "task {me}: faulted; {} scheduling task {}\n",
+                if supervised {
+                    "initd notified,"
+                } else {
+                    "kernel survived,"
+                },
                 tasks.current(),
             ));
             0
@@ -549,6 +600,11 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             if unsafe { (&mut *addr_of_mut!(IRQS)).release_task(me) > 0 } {
                 revoke_keyboard(me);
             }
+            // Notify the supervisor before the slot is removed: `exit_current`
+            // unblocks every task, so the event must already be queued when
+            // `initd` wakes. A task that is not a supervised service posts
+            // nothing.
+            post_supervise(me as usize, SERVICE_KIND_EXIT);
             // SAFETY: as above; the data-channel depth is diagnostic only.
             let depth = unsafe { endpoint_for(zc_abi::IPC_DATA as u64).map_or(0, |e| e.len()) };
             match tasks.exit_current(regs, frame) {
@@ -943,9 +999,11 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 regs.set_result(u64::from(byte));
                 return 0;
             }
-            if tasks.alive_count() == 1 {
-                // Sole survivor: idle with interrupts on until a keystroke
-                // lands instead of failing a wait nobody can satisfy.
+            if !tasks.has_runnable_other_than(tasks.current()) {
+                // No runnable peer can produce the byte: idle with interrupts
+                // on until a keystroke lands instead of failing a wait nobody
+                // can satisfy. Blocking here would deadlock once the only
+                // other live task is `initd`, which parks on its own channel.
                 unsafe {
                     core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
                 }
@@ -1172,6 +1230,112 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                     0
                 }
             }
+        }
+        Ok(Action::ServiceStart) => {
+            let me = tasks.current();
+            let id = regs.rdi as u32;
+            let Some(entry) = service::by_id(id) else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            // SAFETY: owned here; traps cannot nest inside a handler.
+            let authorized =
+                unsafe { (*addr_of!(CAPS))[me].holds_object(service_cap(id), Rights::WRITE) };
+            if !authorized {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            // An already-running service is left untouched: start is
+            // idempotent, so a duplicate event can never reset live state.
+            if tasks.is_alive(entry.task) {
+                regs.set_result(0);
+                return 0;
+            }
+            // SAFETY: entry and stack were written at spawn, before any task
+            // ran, and are read-only since.
+            let (rip, rsp) = unsafe {
+                (
+                    (*addr_of!(DOMAIN_ENTRY))[entry.task],
+                    (*addr_of!(DOMAIN_STACK))[entry.task],
+                )
+            };
+            let init_frame = IrqFrame {
+                rip,
+                cs: u64::from(USER_CS),
+                rflags: USER_RFLAGS,
+                rsp,
+                ss: u64::from(USER_SS),
+            };
+            // A revived domain must not inherit open files from before the
+            // fault. SAFETY: the slot is not running, so nothing can touch its
+            // table while it is reset here.
+            unsafe { (*addr_of_mut!(FDS))[entry.task] = DescriptorTable::new() };
+            match tasks.respawn(entry.task, SyscallRegs::EMPTY, init_frame) {
+                Ok(()) => {
+                    let _ = crate::serial::print(format_args!(
+                        "task {me}: service {} started, task {} revived\n",
+                        entry.name, entry.task,
+                    ));
+                    regs.set_result(0);
+                    0
+                }
+                Err(_) => {
+                    regs.set_result(u64::MAX);
+                    0
+                }
+            }
+        }
+        Ok(Action::ServiceStop) => {
+            let me = tasks.current();
+            let id = regs.rdi as u32;
+            let Some(entry) = service::by_id(id) else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            // SAFETY: owned here; traps cannot nest inside a handler.
+            let authorized =
+                unsafe { (*addr_of!(CAPS))[me].holds_object(service_cap(id), Rights::WRITE) };
+            if !authorized {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            // A service already down is a no-op, so stop is idempotent too.
+            if tasks.is_alive(entry.task) {
+                // Give up the domain's hardware authority before the slot
+                // dies, exactly as the fault path does: a stale TSS bitmap
+                // entry would otherwise outlive the task.
+                // SAFETY: owned here; traps cannot nest.
+                let released =
+                    unsafe { (&mut *addr_of_mut!(IRQS)).release_task(entry.task as u32) };
+                if released > 0 {
+                    revoke_keyboard(entry.task as u32);
+                }
+                crate::gdt::revoke_task_ports(entry.task);
+                let _ = tasks.kill(entry.task);
+                let _ = crate::serial::print(format_args!(
+                    "task {me}: service {} stopped, task {} killed\n",
+                    entry.name, entry.task,
+                ));
+            }
+            regs.set_result(0);
+            0
+        }
+        Ok(Action::ServiceStatus) => {
+            let me = tasks.current();
+            let id = regs.rdi as u32;
+            let Some(entry) = service::by_id(id) else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            // SAFETY: owned here; traps cannot nest inside a handler.
+            let authorized =
+                unsafe { (*addr_of!(CAPS))[me].holds_object(service_cap(id), Rights::READ) };
+            if !authorized {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            regs.set_result(u64::from(tasks.is_alive(entry.task)));
+            0
         }
         Ok(_) => {
             regs.set_result(u64::MAX);
@@ -1608,8 +1772,17 @@ pub fn enter(
     let blk = find_initramfs_file(boot_info, BLK_NAME);
     let kbd = find_initramfs_file(boot_info, KBD_NAME);
     let devmgr = find_initramfs_file(boot_info, DEVMGR_NAME);
-    let (Some(producer), Some(consumer), Some(shell), Some(fb), Some(blk), Some(kbd), Some(devmgr)) =
-        (producer, consumer, shell, fb, blk, kbd, devmgr)
+    let initd = find_initramfs_file(boot_info, INITD_NAME);
+    let (
+        Some(producer),
+        Some(consumer),
+        Some(shell),
+        Some(fb),
+        Some(blk),
+        Some(kbd),
+        Some(devmgr),
+        Some(initd),
+    ) = (producer, consumer, shell, fb, blk, kbd, devmgr, initd)
     else {
         crate::fail("user task ELF missing from initramfs");
     };
@@ -1701,7 +1874,7 @@ pub fn enter(
     // domain's ring page is deliberately *not* mapped here: it appears only
     // in the address space of whichever task claims the source. The discovery
     // page is mapped below, into exactly the manager and the block driver.
-    let binaries = [producer, consumer, shell, fb, blk, kbd, devmgr];
+    let binaries = [producer, consumer, shell, fb, blk, kbd, devmgr, initd];
     let names = [
         PRODUCER_NAME,
         CONSUMER_NAME,
@@ -1710,6 +1883,7 @@ pub fn enter(
         BLK_NAME,
         KBD_NAME,
         DEVMGR_NAME,
+        INITD_NAME,
     ];
     let stack_pages = [
         STACK_A_PAGE,
@@ -1719,6 +1893,7 @@ pub fn enter(
         STACK_E_PAGE,
         STACK_F_PAGE,
         STACK_G_PAGE,
+        STACK_H_PAGE,
     ];
     let stack_tops = [
         STACK_A_TOP,
@@ -1728,6 +1903,7 @@ pub fn enter(
         STACK_E_TOP,
         STACK_F_TOP,
         STACK_G_TOP,
+        STACK_H_TOP,
     ];
     let mut entries = [0u64; TASK_COUNT];
     let mut cr3s = [0u64; TASK_COUNT];
@@ -1807,8 +1983,9 @@ pub fn enter(
     }
 
     let _ = crate::serial::print(format_args!(
-        "user: producer entry {:#x}, consumer entry {:#x}, shell entry {:#x}, fb entry {:#x}, blk entry {:#x}, kbd entry {:#x}, devmgr entry {:#x}\n",
+        "user: producer entry {:#x}, consumer entry {:#x}, shell entry {:#x}, fb entry {:#x}, blk entry {:#x}, kbd entry {:#x}, devmgr entry {:#x}, initd entry {:#x}\n",
         entries[0], entries[1], entries[2], entries[3], entries[4], entries[5], entries[6],
+        entries[7],
     ));
     let _ = crate::serial::print(format_args!(
         "user: {TASK_COUNT} address spaces, task0 cr3 {:#x}\n",
@@ -1834,7 +2011,7 @@ pub fn enter(
         let _ = caps[DEVMGR_INDEX].insert(device::port_grant(cfg_start, cfg_len));
         if let Some(base) = blk_bar {
             let (bar_start, bar_len) = device::bar_range(base);
-            let _ = caps[DEVMGR_INDEX].insert(zc_kernel::capability::Capability::new(
+            let _ = caps[DEVMGR_INDEX].insert(Capability::new(
                 zc_abi::port_cap(bar_start, bar_len),
                 Rights::WRITE.union(Rights::GRANT),
             ));
@@ -1849,6 +2026,14 @@ pub fn enter(
             "device: 3 roles, {total} grants (blk {}, kbd {}, devmgr {devmgr_grants})\n",
             zc_kernel::device::BLK_SETUP_GRANTS,
             zc_kernel::device::KBD_GRANT_COUNT,
+        ));
+        // The supervisor controls exactly one service: the block driver. Its
+        // authority is provisioned as data, so the lifecycle syscalls check a
+        // grant instead of trusting the service id the caller names.
+        let _ = caps[INITD_INDEX].insert(device::service_grant(service::BLK_SERVICE));
+        let _ = crate::serial::print(format_args!(
+            "service: 1 role, {} grant (initd -> blk)\n",
+            device::INITD_SETUP_GRANTS,
         ));
     }
     let _ = caps;

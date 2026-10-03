@@ -100,8 +100,9 @@ jobs:
         grep -q "task 2: /data/probe: file, 10 bytes" build/boot.log
         grep -q "vfs: persistence ok" build/boot.log
         grep -q "task 4: blk: zcfs stopped" build/boot.log
-        grep -q "user: 7 address spaces" build/boot.log
+        grep -q "user: 8 address spaces" build/boot.log
         grep -q "device: 3 roles, 5 grants (blk 0, kbd 3, devmgr 2)" build/boot.log
+        grep -q "service: 1 role, 1 grant (initd -> blk)" build/boot.log
         grep -q "cap: task 6 delegated" build/boot.log
         grep -q "to task 4" build/boot.log
         grep -q "iomap: task 4 now holds 256 ports" build/boot.log
@@ -124,7 +125,13 @@ jobs:
         grep -q "fb: checksum ok" build/boot.log
         grep -q "switches" build/boot.log
         grep -q "acpi: rsdp v2" build/boot.log
-        grep -q "initramfs: 9 files" build/boot.log
+        grep -q "initramfs: 10 files" build/boot.log
+        grep -q "task 4: blk: resuming" build/boot.log
+        grep -q "task 7: initd: blk down" build/boot.log
+        grep -q "task 7: service blk started, task 4 revived" build/boot.log
+        grep -q "task 7: initd: restarted blk" build/boot.log
+        grep -q "task 4: blk: zcfs serving" build/boot.log
+        grep -q "task 7: initd: blk stopped" build/boot.log
         grep -q "kernel reached idle state" build/boot.log
     - name: Check the block write reached the disk
       run: ./tools/check-disk-write.sh

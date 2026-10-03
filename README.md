@@ -19,7 +19,10 @@ writable path: the block domain mounts the volume, reads a host-planted file,
 writes one of its own, then remounts from the disk to prove the write durable.
 F7e-2 mounts that volume into the kernel VFS at `/data` over a filesystem IPC
 bridge, so `SYS_WRITE` and friends reach the disk: the shell writes
-`/data/probe`, unmounts, remounts, and reads it back. See
+`/data/probe`, unmounts, remounts, and reads it back. F7f adds `initd`, a
+ring-3 supervisor that owns service lifecycle: the block domain faults on
+purpose, the kernel posts the fault on a supervision channel, and `initd`
+restarts the domain, which resumes serving from persisted state. See
 [the roadmap](docs/roadmap.md) for the phase map and pass
 criteria, and [CHANGELOG.md](CHANGELOG.md) for what changed.
 
@@ -77,8 +80,11 @@ log finds `/written` and the `/probe` the shell rewrites. The VFS mounts the
 initramfs as `ramfs` at `/` and the zcfs volume at `/data`, so the serial
 shell's `write`, `stat`, `mount`, `umount`, and `persist` commands reach the
 disk through the same `FileSystem` trait; `persist` proves durability by
-unmounting, remounting from the device, and reading its own write back. Next up
-is **F7f — `initd` supervision**.
+unmounting, remounting from the device, and reading its own write back. The
+supervisor `initd` watches the block domain over the supervision channel and
+restarts it after a deliberate fault, so a service the kernel did not choose
+to keep alive comes back on a userspace decision. Next up is **F7g —
+journaling / crash-consistency**.
 
 ## Development
 
