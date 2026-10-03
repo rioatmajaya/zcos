@@ -7,8 +7,11 @@ byte for byte. That agreement is what makes a custom on-disk format verifiable
 without a third-party `fsck`.
 
 Usage:
-    tools/zcfs.py format <path> <sectors>   build a volume with /probe
-    tools/zcfs.py dump <path>               replay the log and list files
+    tools/zcfs.py format <path> <sectors>     build a volume with /probe
+    tools/zcfs.py format --clean <path> <sectors>
+                                              build a clean volume with /probe
+    tools/zcfs.py dump <path>                 replay the log and list files
+    tools/zcfs.py fsck <path> [--check]       repair (or report) the volume
 
 The checksum is CRC-32/IEEE, which `zlib.crc32` computes, so the host and the
 Rust side produce identical values.
@@ -240,13 +243,16 @@ def find(nodes, parent, name):
     return None, None
 
 
-def format_volume(path, sectors, pattern=HOST_PATTERN):
-    """Writes a volume holding the root directory, /probe, and a torn tail.
+def format_volume(path, sectors, pattern=HOST_PATTERN, clean=False):
+    """Writes a volume holding the root directory, /probe, and, unless
+    `clean`, a torn tail.
 
     The torn tail is deliberate: it is the shape a power loss leaves behind, so
     every boot has to recover before it can serve the volume. The superblock
     claims the record the crash never made durable, which is exactly the
-    over-claim that `Volume::mount_into` must clamp.
+    over-claim that `Volume::mount_into` must clamp. With `clean`, the volume
+    is written as a cleanly unmounted one, with no torn tail and `FLAG_CLEAN`
+    set, which is what `fsck` is supposed to produce.
     """
     image = bytearray(sectors * SECTOR)
 
@@ -269,11 +275,21 @@ def format_volume(path, sectors, pattern=HOST_PATTERN):
     probe = append(KIND_CREATE, 0,
                    create_payload(ROOT_NODE, MODE_FILE | 0o644, b"probe"))
     append(KIND_DATA, probe, data_payload(0, pattern))
+    committed = seq
+
+    if clean:
+        # A clean, consistent volume: heads match, flag is set.
+        superblock = encode_superblock(sectors, committed, flags=FLAG_CLEAN)
+        put(SUPERBLOCK_A, superblock)
+        put(SUPERBLOCK_B, superblock)
+        with open(path, "wb") as handle:
+            handle.write(bytes(image))
+        return committed
 
     # The power-loss tail: a well-formed record for the next sequence, then one
     # flipped byte so its checksum can never pass. The superblock below points
     # at it anyway.
-    torn_seq = seq + 1
+    torn_seq = committed + 1
     torn = bytearray(encode_record(KIND_DATA, torn_seq, probe,
                                     data_payload(0, b"lost")))
     torn[200] ^= 0xFF
@@ -289,12 +305,59 @@ def format_volume(path, sectors, pattern=HOST_PATTERN):
     return torn_seq
 
 
+def fsck_image(data, check=False):
+    """Replay `data` and repair it in a returned copy.
+
+    Mirrors the guest's `Volume::repair`: the durable log decides the head, so
+    an over-claiming or dirty superblock is rewritten with the clamped head and
+    `FLAG_CLEAN`. Returns `(report, repaired, image)`; when `check` is true the
+    report is computed but `image` is unchanged.
+    """
+    superblock = select_superblock(data[0:SECTOR], data[SECTOR:2 * SECTOR])
+    sb, nodes = replay(data)
+    claimed = superblock["head_seq"]
+    clamped = sb["head_seq"]
+    repaired = not (superblock["flags"] & FLAG_CLEAN) or claimed != clamped
+    result = bytes(data)
+    if repaired and not check:
+        newsb = encode_superblock(sb["partition_sectors"], clamped,
+                                  tail_seq=sb["tail_seq"], flags=FLAG_CLEAN,
+                                  generation=sb["generation"])
+        result = bytearray(data)
+        result[SUPERBLOCK_A * SECTOR:SUPERBLOCK_A * SECTOR + SECTOR] = newsb
+        result[SUPERBLOCK_B * SECTOR:SUPERBLOCK_B * SECTOR + SECTOR] = newsb
+        result = bytes(result)
+    if repaired:
+        report = "fsck: repaired %d -> %d" % (claimed, clamped)
+    else:
+        report = "fsck: clean"
+    return report, repaired, result, nodes
+
+
 def main(argv):
+    if argv[1] == "format" and "--clean" in argv:
+        # format --clean <path> <sectors>
+        path, sectors = argv[3], int(argv[4])
+        seq = format_volume(path, sectors, clean=True)
+        print("zcfs: formatted %s (%d sectors, head_seq %d, clean)"
+              % (path, sectors, seq))
+        return 0
     if len(argv) >= 4 and argv[1] == "format":
         sectors = int(argv[3])
         seq = format_volume(argv[2], sectors)
         print("zcfs: formatted %s (%d sectors, head_seq %d, torn tail)"
               % (argv[2], sectors, seq))
+        return 0
+    if len(argv) >= 3 and argv[1] == "fsck":
+        path = argv[2]
+        check = len(argv) >= 4 and argv[3] == "--check"
+        with open(path, "rb") as handle:
+            data = handle.read()
+        report, repaired, image, _ = fsck_image(data, check)
+        if repaired and not check:
+            with open(path, "wb") as handle:
+                handle.write(image)
+        print(report)
         return 0
     if len(argv) == 3 and argv[1] == "dump":
         with open(argv[2], "rb") as handle:

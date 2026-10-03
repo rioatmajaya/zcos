@@ -92,6 +92,8 @@ jobs:
         grep -q "task 4: blk: zcfs mbr ok" build/boot.log
         grep -q "task 4: blk: zcfs mount ok" build/boot.log
         grep -q "task 4: blk: zcfs recovered" build/boot.log
+        grep -q "task 4: blk: zcfs dirty" build/boot.log
+        grep -q "task 4: blk: zcfs fsck repaired" build/boot.log
         grep -q "task 4: blk: zcfs probe ok" build/boot.log
         grep -q "task 4: blk: zcfs write ok" build/boot.log
         grep -q "task 4: blk: zcfs replay ok" build/boot.log
@@ -142,3 +144,5 @@ jobs:
       run: ./tools/check-disk-ext2.sh
     - name: Check the zcfs partition on the disk
       run: ./tools/check-disk-zcfs.sh
+    - name: Check the fsck repair
+      run: ./tools/check-fsck.sh

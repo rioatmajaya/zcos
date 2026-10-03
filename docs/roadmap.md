@@ -41,7 +41,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F4** | Thread + IPC | ✅ done | `task 0: producer sent 2000`, capability gates |
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 5 grants`, `task 6: devmgr: blk published` |
-| **F7** | VFS & penyimpanan | 🔨 F7a–F7g done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered` |
+| **F7** | VFS & penyimpanan | ✅ F7a–F7h done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired` |
 | **F8** | Desktop | ⬜ planned | — |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
@@ -347,10 +347,13 @@ VFS → write path → journaling → `fsck`**.
       consistent, appendable prefix, and a crafted over-claiming superblock
       proves the clamp and that the next append reuses the gap (see
       [ADR 0011](adr/0011-crash-recovery-clamps-log-head.md)).
-- [ ] F7h: `fsck` / recovery tooling and a documented on-disk format. It reads
-      `FLAG_CLEAN` (which `mark_clean` will set from `FS_OP_UNMOUNT`) to decide
-      whether a mount needed recovery, and repairs the mid-log truncation that
-      F7g deliberately leaves in place.
+- [x] F7h: `fsck` / recovery tooling and a documented on-disk format. `mark_clean` is wired into `FS_OP_UNMOUNT`, so a clean unmount
+      sets `FLAG_CLEAN`, and `Volume::repair` — run by the block domain at boot
+      and mirrored by `tools/zcfs.py fsck` — reads that flag to decide whether
+      a mount needed recovery, then repairs the mid-log truncation that F7g
+      deliberately leaves in place: it persists the clamped head and stamps
+      clean, so a repaired image mounts with no recovery and `/probe` intact
+      (see [ADR 0012](adr/0012-fsck-repairs-the-durable-prefix.md)).
 - [ ] F7i: `devfs` and `tmpfs` mounts; device nodes for the block domain.
 - [ ] F7j: file permissions and ownership in the VFS (feeds F9 security).
 
@@ -385,10 +388,16 @@ VFS → write path → journaling → `fsck`**.
   `crash_at_every_step_keeps_the_tree_consistent` pass, and
   `tools/check-disk-zcfs.sh` reports `recovery: head 4 -> 3 ok` for the planted
   image.
+- F7h: the boot log shows the FLAG_CLEAN decision and the repair,
+  `task 4: blk: zcfs dirty` and `task 4: blk: zcfs fsck repaired (4 -> 3)`, so
+  the guest proves it reads the flag and repairs the over-claim it recovered.
+  The host tests `fsck_repairs_a_recovered_volume_then_mounts_clean` and
+  `a_power_loss_mid_write_is_fscked_to_clean` pass, and
+  `tools/check-fsck.sh` drives a power-loss volume through `fsck: repaired
+  4 -> 3` to `fsck: clean`, idempotent, with `/probe` preserved.
 - Boot log contains `vfs: mounted` with the filesystem name and mount point.
 - A CI boot writes a known pattern to `/data/probe`, unmounts, remounts, and
   reads it back with a matching checksum: `vfs: persistence ok`.
-- A power-loss simulation (kill QEMU mid-write, reboot) reaches `fsck: clean`.
 - F7f: the block domain faults deliberately, `initd` restarts it, and it
   resumes serving: `task 4: faulted; initd notified`, `task 7: initd: blk
   down`, `task 7: service blk started, task 4 revived`, `task 7: initd:

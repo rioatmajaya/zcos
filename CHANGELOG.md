@@ -19,11 +19,26 @@ claimed explicitly. Phase **F7 — VFS & storage** has started: a write path
 (F7a), a write-back cache (F7b), a read-only FAT32 mount (F7c), a read-only
 ext2 mount (F7c-2), a read-only VFS core (F7d), a ZC-native log-structured
 filesystem (F7e), the writable volume mounted into the kernel VFS (F7e-2),
-a userspace supervisor that owns service lifecycle (F7f), and crash recovery
-that clamps the log head (F7g).
+a userspace supervisor that owns service lifecycle (F7f), crash recovery
+that clamps the log head (F7g), and an `fsck` repair that makes an unclean
+mount clean again (F7h).
 
 ### Added
 
+- **`fsck` repair in `zcfs`** (F7h): `Volume::repair` is the consumer of
+  `FLAG_CLEAN` that F7g left without a caller. `mark_clean` is now wired into
+  `FS_OP_UNMOUNT`, so a clean unmount sets the flag; on mount the block domain
+  reads it (`blk: zcfs dirty`/`clean`) and, when it recovered an over-claiming
+  superblock, runs `repair` to persist the clamped head and stamp `FLAG_CLEAN`
+  (`blk: zcfs fsck repaired (4 -> 3)`). Repair truncates the over-claim, never
+  the durable prefix: `/probe` survives, a fresh append reuses the gap, and a
+  repaired image mounts with no recovery. `tools/zcfs.py fsck` mirrors the
+  repair byte for byte — a clean volume reports `fsck: clean`, a power-loss
+  volume `fsck: repaired 4 -> 3` and then `fsck: clean` on the next pass —
+  and `tools/check-fsck.sh` drives that cycle. A new host test
+  `a_power_loss_mid_write_is_fscked_to_clean` sweeps every mid-write boundary
+  with a volatile write-back `BlockIo` and asserts each crash reaches clean
+  (see [ADR 0012](docs/adr/0012-fsck-repairs-the-durable-prefix.md)).
 - **Crash recovery in `zcfs` mount** (F7g): `Volume::mount_into` now clamps
   `head_seq` to the last record that actually replayed and reports it through
   `was_recovered()`. A superblock can claim a record a crash never made durable,

@@ -757,12 +757,28 @@ fn zcfs_probe(device: &mut Device, cache: &mut Cache<CACHE_SLOTS>, flush_offered
             log("blk: zcfs mount failed\n");
             abort()
         }
-    }
-    log("blk: zcfs mount ok\n");
-    // The formatter plants a torn tail the superblock over-claims, so a healthy
-    // boot must report that it recovered and clamped the log head back.
-    if volume.was_recovered() {
-        log("blk: zcfs recovered\n");
+        log("blk: zcfs mount ok\n");
+        // `fsck` reads FLAG_CLEAN to decide whether the mount needed recovery.
+        // The formatter plants a dirty volume, so a healthy boot reports dirty
+        // and a recovered, over-claiming head.
+        if volume.is_clean() {
+            log("blk: zcfs clean\n");
+        } else {
+            log("blk: zcfs dirty\n");
+        }
+        // Repair makes the clamped head durable and stamps clean, so the on-disk
+        // superblock no longer points past the F7g gap. The planted volume
+        // always has one record to reclaim, so this always reports repaired.
+        if let Ok(report) = volume.repair(&mut io) {
+            if report.repaired {
+                log_fsck(report);
+            }
+        }
+        // The formatter plants a torn tail the superblock over-claims, so a
+        // healthy boot must report that it recovered and clamped the log head.
+        if volume.was_recovered() {
+            log("blk: zcfs recovered\n");
+        }
     }
 
     // The host planted /probe; reading it proves both implementations agree
@@ -1064,6 +1080,11 @@ fn serve_op(
                 if let Err(error) = io.flush() {
                     return status_of(error);
                 }
+                // A clean unmount persists FLAG_CLEAN, so the next mount knows
+                // no recovery is needed.
+                if let Err(error) = volume.mark_clean(&mut io) {
+                    return status_of(error);
+                }
             }
             *volume = zcfs::Volume::new();
             *cache = Cache::new();
@@ -1082,6 +1103,44 @@ fn serve_op(
         }
         _ => FS_STATUS_NOT_SUPPORTED,
     }
+}
+
+/// Logs an fsck repair report as `blk: zcfs fsck repaired (FROM -> TO)`.
+fn log_fsck(report: zcfs::FsckReport) {
+    let mut out = [0u8; 64];
+    let prefix = b"blk: zcfs fsck repaired (";
+    out[..prefix.len()].copy_from_slice(prefix);
+    let mut at = prefix.len();
+    at = write_dec(&mut out, at, report.from_head);
+    out[at..at + 4].copy_from_slice(b" -> ");
+    at += 4;
+    at = write_dec(&mut out, at, report.to_head);
+    out[at] = b')';
+    out[at + 1] = b'\n';
+    // SAFETY: the buffer holds only ASCII digits, spaces, and `->`, and the
+    // slice ends inside the 64-byte buffer, so it is valid UTF-8.
+    log(unsafe { core::str::from_utf8_unchecked(&out[..at + 2]) });
+}
+
+/// Writes `value` in decimal into `out` at `at`, returning the new offset.
+fn write_dec(out: &mut [u8], mut at: usize, value: u64) -> usize {
+    let mut digits = [0u8; 20];
+    let mut n = 0;
+    let mut v = value;
+    loop {
+        digits[n] = b'0' + (v % 10) as u8;
+        n += 1;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    while n > 0 {
+        n -= 1;
+        out[at] = digits[n];
+        at += 1;
+    }
+    at
 }
 
 /// Serves filesystem requests until the shell sends `OP_STOP`.

@@ -212,7 +212,7 @@ impl Superblock {
 
     /// Returns whether the volume was unmounted cleanly.
     #[must_use]
-    pub fn is_clean(&self) -> bool {
+    pub const fn is_clean(&self) -> bool {
         self.flags & FLAG_CLEAN != 0
     }
 
@@ -571,12 +571,28 @@ pub trait BlockIo {
     fn flush(&mut self) -> Result<(), ZcfsError>;
 }
 
+/// What a mounted volume's `fsck` pass found and fixed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FsckReport {
+    /// The mount had to clamp an over-claiming superblock.
+    pub recovered: bool,
+    /// Repair rewrote the superblocks (clamped head, clean flag).
+    pub repaired: bool,
+    /// The head the disk's superblock claimed before the clamp.
+    pub from_head: u64,
+    /// The clamped head that is now on disk.
+    pub to_head: u64,
+}
+
 /// A mounted volume: the replayed table plus the append-only log writer.
 pub struct Volume<const N: usize> {
     partition_lba: u32,
     sb: Superblock,
     table: Table<N>,
     recovered: bool,
+    /// The head the on-disk superblock claimed, captured before recovery
+    /// clamped it; reportable by [`Self::repair`].
+    from_head: u64,
 }
 
 impl<const N: usize> Volume<N> {
@@ -591,6 +607,7 @@ impl<const N: usize> Volume<N> {
             sb: Superblock::EMPTY,
             table: Table::new(),
             recovered: false,
+            from_head: 0,
         }
     }
 
@@ -624,6 +641,7 @@ impl<const N: usize> Volume<N> {
         self.partition_lba = partition_lba;
         self.sb = sb;
         self.recovered = false;
+        self.from_head = sb.head_seq;
         self.table.reset();
         let mut sector = [0u8; SECTOR_SIZE];
         let mut seq = sb.tail_seq + 1;
@@ -702,6 +720,15 @@ impl<const N: usize> Volume<N> {
         self.recovered
     }
 
+    /// Returns whether the on-disk superblock was marked cleanly unmounted.
+    ///
+    /// After a mount this reflects the flag on the disk, before this mount's
+    /// own writes clear it. A clean volume needs no recovery.
+    #[must_use]
+    pub const fn is_clean(&self) -> bool {
+        self.sb.is_clean()
+    }
+
     /// Looks up `name` inside directory `parent`.
     pub fn lookup(&self, parent: u64, name: &[u8]) -> Result<u64, ZcfsError> {
         self.table.lookup(parent, name)
@@ -775,6 +802,36 @@ impl<const N: usize> Volume<N> {
     pub fn mark_clean(&mut self, io: &mut impl BlockIo) -> Result<(), ZcfsError> {
         self.sb.flags |= FLAG_CLEAN;
         self.write_superblocks(io)
+    }
+
+    /// Repairs the volume and reports what `fsck` had to do.
+    ///
+    /// Mount already clamped an over-claiming head in memory; `repair` makes
+    /// that correction durable and stamps `FLAG_CLEAN`, so the on-disk
+    /// superblock no longer points past the gap that F7g leaves behind. A
+    /// future mount of the repaired image sees a matching head and a clean
+    /// flag, so it needs no recovery. A volume that mounted clean already is
+    /// left untouched.
+    pub fn repair(&mut self, io: &mut impl BlockIo) -> Result<FsckReport, ZcfsError> {
+        let to = self.sb.head_seq;
+        if self.recovered || !self.sb.is_clean() {
+            let from = self.from_head;
+            self.sb.flags |= FLAG_CLEAN;
+            self.write_superblocks(io)?;
+            Ok(FsckReport {
+                recovered: self.recovered,
+                repaired: true,
+                from_head: from,
+                to_head: to,
+            })
+        } else {
+            Ok(FsckReport {
+                recovered: false,
+                repaired: false,
+                from_head: to,
+                to_head: to,
+            })
+        }
     }
 
     /// Appends one record, then advances the superblock.
@@ -1281,6 +1338,136 @@ mod tests {
                     "crash_at {crash_at}: append changed an earlier file"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn fsck_reports_clean_on_a_clean_volume() {
+        let (mut io, _) = seeded();
+        let mut volume = Volume::<8>::mount(0, &mut io).expect("mount");
+        // The seeded volume was cleanly unmounted, so fsck has nothing to do.
+        let report = volume.repair(&mut io).expect("repair");
+        assert_eq!(
+            report,
+            FsckReport {
+                recovered: false,
+                repaired: false,
+                from_head: volume.head_seq(),
+                to_head: volume.head_seq(),
+            }
+        );
+        assert!(volume.is_clean());
+    }
+
+    #[test]
+    fn fsck_repairs_a_recovered_volume_then_mounts_clean() {
+        let (mut io, volume) = seeded();
+        let committed = volume.head_seq();
+        let probe = volume.lookup(ROOT_NODE, b"probe").expect("probe");
+
+        // Plant a torn, over-claiming tail and point the superblock at it, with
+        // no clean flag — the shape F7g documented as needing recovery.
+        let mut payload = [0u8; PAYLOAD_MAX];
+        let len = data_payload(0, b"lost", &mut payload).expect("payload");
+        let mut sector = [0u8; SECTOR_SIZE];
+        let claimed = committed + 1;
+        encode_record(KIND_DATA, claimed, probe, &payload[..len], &mut sector).expect("encode");
+        sector[200] ^= 0xFF;
+        io.write(LOG_START + (claimed - 1), &sector).expect("write");
+        let mut sb = *volume.superblock();
+        sb.head_seq = claimed;
+        sb.flags &= !FLAG_CLEAN;
+        let mut encoded = [0u8; SECTOR_SIZE];
+        sb.encode(&mut encoded);
+        io.write(SUPERBLOCK_A, &encoded).expect("sb a");
+        io.write(SUPERBLOCK_B, &encoded).expect("sb b");
+
+        let mut recovered = Volume::<8>::mount(0, &mut io).expect("mount");
+        assert!(recovered.was_recovered());
+        assert!(!recovered.is_clean());
+
+        // fsck repairs the mid-log truncation: it makes the clamp durable and
+        // stamps clean, so the repaired image needs no recovery any more.
+        let report = recovered.repair(&mut io).expect("repair");
+        assert_eq!(
+            report,
+            FsckReport {
+                recovered: true,
+                repaired: true,
+                from_head: claimed,
+                to_head: committed,
+            }
+        );
+        assert!(recovered.is_clean());
+
+        let mut reader = reader_from(&io.bytes);
+        let reloaded = Volume::<8>::mount(0, &mut reader).expect("remount");
+        assert!(reloaded.is_clean());
+        assert!(!reloaded.was_recovered());
+        assert_eq!(reloaded.head_seq(), committed);
+        let mut buffer = [0u8; 16];
+        let read = reloaded.read(probe, 0, &mut buffer).expect("read");
+        assert_eq!(&buffer[..read], b"ZCHOST1\n");
+    }
+
+    #[test]
+    fn a_power_loss_mid_write_is_fscked_to_clean() {
+        let (seed, _) = seeded();
+        let base = seed.bytes.clone();
+
+        // One uncrashed run bounds the sweep over every write/flush boundary.
+        let mut counting = CrashIo::from_image(&base, usize::MAX);
+        let mut volume = Volume::<8>::mount(0, &mut counting).expect("mount");
+        exercise(&mut counting, &mut volume);
+        let total = counting.steps;
+        assert!(total > 0);
+
+        for crash_at in 0..=total {
+            let mut io = CrashIo::from_image(&base, crash_at);
+            let mut volume = Volume::<8>::mount(0, &mut io).expect("mount");
+            exercise(&mut io, &mut volume);
+
+            // Power came back: mount the durable prefix, then run fsck. Whether
+            // the crash left a dirty over-claim (repaired) or a clean volume
+            // (untouched), the repaired result must mount clean and intact.
+            let mut writer = reader_from(io.durable_bytes());
+            let mut fscked = Volume::<8>::new();
+            fscked.mount_into(0, &mut writer).expect("remount");
+            fscked.repair(&mut writer).expect("repair");
+            assert!(
+                fscked.is_clean(),
+                "crash_at {crash_at}: fsck did not reach clean"
+            );
+
+            // A fresh mount of the repaired image needs no recovery and keeps
+            // the host-planted file.
+            let mut reader = reader_from(&writer.bytes);
+            let mut clean = Volume::<8>::new();
+            clean.mount_into(0, &mut reader).expect("clean remount");
+            assert!(!clean.was_recovered(), "crash_at {crash_at}: still recovering");
+            assert!(clean.is_clean());
+            let probe = clean
+                .lookup(ROOT_NODE, b"probe")
+                .unwrap_or_else(|_| panic!("crash_at {crash_at}: probe vanished"));
+            assert_eq!(
+                content_of(&clean, probe).as_deref(),
+                Some(&b"ZCHOST1\n"[..]),
+                "crash_at {crash_at}: probe content changed"
+            );
+
+            // Whatever survived is still appendable with no gap.
+            let tail = clean
+                .create(&mut reader, ROOT_NODE, b"c", MODE_FILE | 0o644)
+                .expect("append after fsck");
+            clean.mark_clean(&mut reader).expect("clean");
+            let mut reader2 = reader_from(&reader.bytes);
+            let mut grown = Volume::<8>::new();
+            grown.mount_into(0, &mut reader2).expect("final remount");
+            assert_eq!(
+                grown.lookup(ROOT_NODE, b"c"),
+                Ok(tail),
+                "crash_at {crash_at}: appended record unreachable"
+            );
         }
     }
 

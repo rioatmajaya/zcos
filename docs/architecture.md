@@ -133,9 +133,19 @@ gap instead of landing past it. Without that clamp the first write after a crash
 would be unreachable forever.
 
 Recovery is part of mount, so a volume cut short is usable immediately at the
-cost of whatever was not durable. What a crash does *not* yet handle is a bad
-sector in the middle of the log, which truncates the whole suffix after it;
-repair belongs to `fsck` (see [ADR 0011](adr/0011-crash-recovery-clamps-log-head.md)).
+cost of whatever was not durable. `fsck` then makes that recovery durable
+([ADR 0012](adr/0012-fsck-repairs-the-durable-prefix.md)): `mark_clean`, wired
+into `FS_OP_UNMOUNT`, sets `FLAG_CLEAN` on a clean unmount, and
+`Volume::repair` — run by the block domain when a boot reports it recovered —
+persists the clamped head and stamps clean, so the on-disk superblock no longer
+points past the gap and a later mount needs no recovery. The host tool
+`tools/zcfs.py fsck` mirrors the repair byte for byte: an unclean volume runs
+`fsck: repaired 4 -> 3` and then `fsck: clean`.
+
+What a crash does *not* yet handle is a bad sector in the middle of the log, which
+truncates the whole suffix after it.
+
+## IPC and authority
 
 ## IPC and authority
 
