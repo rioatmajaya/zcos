@@ -10,15 +10,17 @@ use core::arch::{asm, naked_asm};
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 
 use zc_abi::{
-    BootInfo, IPC_SUPERVISE, SERVICE_KIND_EXIT, SERVICE_KIND_FAULT, service_cap, supervise_event,
+    BootInfo, IPC_SUPERVISE, SERVICE_KIND_EXIT, SERVICE_KIND_FAULT, SURFACE_SLOT_STRIDE,
+    SURFACE_VIRT, service_cap, supervise_event,
 };
 use zc_kernel::capability::{Capability, CapabilityTable, Rights};
 use zc_kernel::gdt::{USER_CS, USER_RFLAGS, USER_SS};
 use zc_kernel::ipc::Endpoint;
-use zc_kernel::memory::{FrameAllocator, PAGE_SIZE};
+use zc_kernel::memory::{FrameAllocator, PAGE_SIZE, PhysFrame};
 use zc_kernel::perms::{self, Access};
 use zc_kernel::ramfs::RamFs;
 use zc_kernel::service;
+use zc_kernel::surface::SurfaceTable;
 use zc_kernel::syscall::{Action, dispatch};
 use zc_kernel::task::{EXIT_TO_KERNEL, IrqFrame, SyscallRegs, TaskTable};
 use zc_kernel::trap::has_error_code;
@@ -64,10 +66,10 @@ const STACK_C_TOP: u64 = 0x40_7000;
 /// Shell stack page backing that top.
 const STACK_C_PAGE: u64 = STACK_C_TOP - PAGE_SIZE;
 
-/// Top of the framebuffer task's user stack.
+/// Top of the compositor task's user stack.
 const STACK_D_TOP: u64 = 0x40_8000;
 
-/// Framebuffer-task stack page backing that top.
+/// Compositor-task stack page backing that top.
 const STACK_D_PAGE: u64 = STACK_D_TOP - PAGE_SIZE;
 
 /// Top of the block driver domain's user stack.
@@ -103,8 +105,8 @@ const PRODUCER_NAME: &str = "producer.elf";
 const CONSUMER_NAME: &str = "consumer.elf";
 /// Shell binary name.
 const SHELL_NAME: &str = "shell.elf";
-/// Framebuffer task binary name.
-const FB_NAME: &str = "fb.elf";
+/// Compositor binary name.
+const COMPOSITOR_NAME: &str = "compositor.elf";
 /// Block driver domain binary name.
 const BLK_NAME: &str = "blk.elf";
 /// Keyboard driver domain binary name.
@@ -133,8 +135,31 @@ const INITD_NAME: &str = "initd.elf";
 /// User virtual address the display framebuffer is mapped at.
 const FB_VIRT: u64 = 0x10_00000;
 
+/// Size of the framebuffer window reserved in every address space.
+///
+/// Matches the two-page-table ceiling [`build_fb_tables`] enforces, so the
+/// whole window can be reserved without depending on the actual mode.
+const FB_WINDOW_SIZE: u64 = 0x40_0000;
+
 /// Firmware framebuffer description shared with userspace.
 static mut FB_INFO: zc_abi::FramebufferInfo = zc_abi::FramebufferInfo::UNAVAILABLE;
+
+/// Virtual windows the kernel remaps in every task's address space.
+///
+/// The frame allocator must never hand out frames inside these windows. The
+/// kernel writes a freshly allocated frame through the identity map, but while
+/// a task's page tables are loaded those addresses point at user images,
+/// stacks, the display, or a surface instead — so a frame here would be
+/// written into user memory. [`super::kernel_main`] reserves each range before
+/// anything allocates.
+#[must_use]
+pub const fn reserved_windows() -> [(u64, u64); 3] {
+    [
+        (USER_CODE_VIRT, USER_WINDOW_END),
+        (FB_VIRT, FB_VIRT + FB_WINDOW_SIZE),
+        (zc_abi::SURFACE_VIRT, zc_abi::SURFACE_END),
+    ]
+}
 
 /// IPC queues, one per channel.
 ///
@@ -357,6 +382,13 @@ static mut FDS: [DescriptorTable; 8] = [DescriptorTable::new(); 8];
 /// sources their table allows, so ownership comes from an explicit grant at
 /// setup rather than a first-come syscall.
 static mut CAPS: [CapabilityTable<8>; 8] = [CapabilityTable::<8>::new(); 8];
+
+/// Kernel-owned pixel surfaces, indexed by slot.
+///
+/// The kernel allocates and maps the frames; tasks only ever receive a
+/// capability naming one, so a task can map a surface only if it created it
+/// or had a read capability delegated to it.
+static mut SURFACES: SurfaceTable = SurfaceTable::new();
 
 /// Longest single userspace buffer accepted per syscall.
 const MAX_USER_IO_LEN: u64 = 512;
@@ -1448,6 +1480,163 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             regs.set_result(u64::from(tasks.is_alive(entry.task)));
             0
         }
+        Ok(Action::SurfaceCreate) => {
+            let me = tasks.current();
+            // Factory gate: only a task the setup granted the factory may mint
+            // surfaces, so an unprivileged domain cannot drain the frame pool.
+            // SAFETY: owned here; interrupts are masked through this arm.
+            let allowed = unsafe {
+                (*addr_of!(CAPS))[me].holds_object(zc_abi::SURFACE_FACTORY, Rights::WRITE)
+            };
+            if !allowed {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            let width = regs.rdi as u32;
+            let height = regs.rsi as u32;
+            let format = regs.rdx as u32;
+            // SAFETY: owned here. The allocator is captured as a raw pointer
+            // so the allocate and free closures below share it without
+            // aliasing one `&mut`; both run inside `create`, sequentially,
+            // with interrupts masked.
+            let alloc = crate::frames() as *mut FrameAllocator<'static>;
+            let surfaces = unsafe { &mut *addr_of_mut!(SURFACES) };
+            let Some(slot) = surfaces.create(
+                width,
+                height,
+                format,
+                me as u8,
+                || unsafe { (*alloc).allocate().map(|frame| frame.start_address()) },
+                |frame| unsafe {
+                    let _ = (*alloc).free(PhysFrame::from_address(frame));
+                },
+            ) else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            // Mint the creator's capability. A table that cannot hold it tears
+            // the surface down, so a refused create never leaks frames.
+            let object = zc_abi::surface_cap(slot);
+            let rights = Rights::READ.union(Rights::WRITE).union(Rights::GRANT);
+            let inserted = unsafe {
+                (*addr_of_mut!(CAPS))[me].insert(Capability::new(object, rights))
+            };
+            if inserted.is_err() {
+                if let Some(surface) = surfaces.remove(slot) {
+                    let mut index = 0;
+                    while index < usize::from(surface.pages) {
+                        // SAFETY: `alloc` is the global allocator and every
+                        // frame came from it.
+                        unsafe {
+                            let _ = (*alloc).free(PhysFrame::from_address(surface.frames[index]));
+                        }
+                        index += 1;
+                    }
+                }
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            regs.set_result(u64::from(object));
+            0
+        }
+        Ok(Action::SurfaceMap) => {
+            let me = tasks.current();
+            let object = regs.rdi as u32;
+            let info_ptr = regs.rsi;
+            let info_len = regs.rdx;
+            // Read authority over exactly this surface; anything else fails
+            // closed and leaves the tables untouched.
+            // SAFETY: owned here; interrupts are masked through this arm.
+            let allowed = unsafe {
+                (*addr_of!(CAPS))[me].holds_object(object, Rights::READ)
+            };
+            if !allowed {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            let Some(slot) = surface_slot(object) else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            // SAFETY: owned here; mapping only rewrites this task's tables.
+            let surfaces = unsafe { &*addr_of!(SURFACES) };
+            let Some(surface) = surfaces.get(slot) else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            let Some(va) = map_surface_into_task(tasks, slot, surface) else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            if info_len != 0 {
+                const INFO_LEN: u64 = core::mem::size_of::<zc_abi::SurfaceInfo>() as u64;
+                if info_len != INFO_LEN {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+                match validate_user_slice_mut(tasks, info_ptr, info_len) {
+                    Some(out) => {
+                        let info = zc_abi::SurfaceInfo {
+                            address: va,
+                            width: surface.width,
+                            height: surface.height,
+                            stride: surface.width,
+                            format: surface.format,
+                        };
+                        // SAFETY: the buffer was validated writable above.
+                        unsafe {
+                            (out.as_mut_ptr() as *mut zc_abi::SurfaceInfo).write(info);
+                        }
+                    }
+                    None => {
+                        regs.set_result(u64::MAX);
+                        return 0;
+                    }
+                }
+            }
+            regs.set_result(va);
+            0
+        }
+        Ok(Action::SurfaceDestroy) => {
+            let me = tasks.current();
+            let object = regs.rdi as u32;
+            // SAFETY: owned here; interrupts are masked through this arm.
+            let allowed = unsafe {
+                (*addr_of!(CAPS))[me].holds_object(object, Rights::WRITE)
+            };
+            if !allowed {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            let Some(slot) = surface_slot(object) else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            // SAFETY: owned here; interrupts are masked through this arm.
+            let surfaces = unsafe { &mut *addr_of_mut!(SURFACES) };
+            let Some(surface) = surfaces.get(slot) else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            // Only the creator may destroy, even if another task was
+            // delegated a write capability.
+            if surface.owner != me as u8 {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            let Some(surface) = surfaces.remove(slot) else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            let alloc = crate::frames();
+            let mut index = 0;
+            while index < usize::from(surface.pages) {
+                let _ = alloc.free(PhysFrame::from_address(surface.frames[index]));
+                index += 1;
+            }
+            regs.set_result(0);
+            0
+        }
         Ok(_) => {
             regs.set_result(u64::MAX);
             0
@@ -1612,13 +1801,16 @@ pub unsafe extern "C" fn user_finished() -> ! {
     crate::boot_tail(info);
 }
 
-/// Recomputes the painted pattern and compares it against the display.
+/// Recomputes the final desktop frame and compares it against the display.
 ///
-/// Reads every pixel back through the identity map and checks the wrapping
-/// checksum against an independent recomputation from the shared helpers.
-/// A mismatch means the task painted wrong pixels or the mapping is broken.
+/// Reads every pixel back through the identity map and hashes both the pixels
+/// the compositor should have drawn (recomputed from the shared layout) and
+/// the pixels actually on the display. The expected frame is the *moved*
+/// window, so a compositor that forgot to repaint the window's old position
+/// leaves stale pixels and fails the hash — this is the proof that damage
+/// tracking is correct, not just that some colors changed.
 fn verify_framebuffer() {
-    use zc_abi::{bar_at, bar_color, encode};
+    use zc_abi::{FRAME_MOVED, HASH_OFFSET, hash_step, pixel_at};
 
     // SAFETY: published once during setup before any task ran.
     let info = unsafe { core::ptr::addr_of!(FB_INFO).read() };
@@ -1629,32 +1821,39 @@ fn verify_framebuffer() {
     let width = u64::from(info.width);
     let height = u64::from(info.height);
     let stride = u64::from(info.stride);
-    let mut expected = 0u64;
-    let mut actual = 0u64;
+    let mut expected = HASH_OFFSET;
+    let mut actual = HASH_OFFSET;
     let mut y = 0;
     while y < height {
         let mut x = 0;
         while x < width {
-            let (red, green, blue) = bar_color(bar_at(x, width));
-            let Some(pixel) = encode(info.pixel_format, red, green, blue) else {
+            let Some(pixel) = pixel_at(
+                info.pixel_format,
+                x as u32,
+                y as u32,
+                info.width,
+                info.height,
+                FRAME_MOVED,
+            ) else {
                 crate::fail("unsupported fb format");
             };
-            expected = expected.wrapping_add(u64::from(pixel));
+            expected = hash_step(expected, pixel);
             // SAFETY: the setup mapped exactly this range with user
             // permissions; the identity map covers it for the check.
             let seen =
                 unsafe { read_volatile((info.address + (y * stride + x) * 4) as *const u32) };
-            actual = actual.wrapping_add(u64::from(seen));
+            actual = hash_step(actual, seen);
             x += 1;
         }
         y += 1;
     }
     if expected != actual {
-        crate::fail("fb checksum mismatch");
+        crate::fail("desktop checksum mismatch");
     }
     let _ = crate::serial::print(format_args!(
-        "fb: checksum ok ({} pixels)\n",
+        "fb: desktop checksum ok ({} px, {:#x})\n",
         width * height,
+        actual,
     ));
 }
 
@@ -1676,7 +1875,10 @@ fn build_fb_tables(alloc: &mut FrameAllocator<'_>) -> Option<[u64; 2]> {
         PixelFormat::Rgbx8888 | PixelFormat::Bgrx8888 => {}
         _ => crate::fail("unsupported fb format"),
     }
-    let pixels = u64::from(info.width)
+    // Map every scan line, including any padding past the visible width: a
+    // stride larger than the width means the device framebuffer is taller in
+    // bytes than `width * height` suggests.
+    let pixels = u64::from(info.stride)
         .checked_mul(u64::from(info.height))
         .and_then(|count| count.checked_mul(4))
         .and_then(|bytes| bytes.checked_add(PAGE_SIZE - 1))
@@ -1879,7 +2081,7 @@ pub fn enter(
     let producer = find_initramfs_file(boot_info, PRODUCER_NAME);
     let consumer = find_initramfs_file(boot_info, CONSUMER_NAME);
     let shell = find_initramfs_file(boot_info, SHELL_NAME);
-    let fb = find_initramfs_file(boot_info, FB_NAME);
+    let compositor = find_initramfs_file(boot_info, COMPOSITOR_NAME);
     let blk = find_initramfs_file(boot_info, BLK_NAME);
     let kbd = find_initramfs_file(boot_info, KBD_NAME);
     let devmgr = find_initramfs_file(boot_info, DEVMGR_NAME);
@@ -1888,12 +2090,12 @@ pub fn enter(
         Some(producer),
         Some(consumer),
         Some(shell),
-        Some(fb),
+        Some(compositor),
         Some(blk),
         Some(kbd),
         Some(devmgr),
         Some(initd),
-    ) = (producer, consumer, shell, fb, blk, kbd, devmgr, initd)
+    ) = (producer, consumer, shell, compositor, blk, kbd, devmgr, initd)
     else {
         crate::fail("user task ELF missing from initramfs");
     };
@@ -2021,12 +2223,12 @@ pub fn enter(
     // domain's ring page is deliberately *not* mapped here: it appears only
     // in the address space of whichever task claims the source. The discovery
     // page is mapped below, into exactly the manager and the block driver.
-    let binaries = [producer, consumer, shell, fb, blk, kbd, devmgr, initd];
+    let binaries = [producer, consumer, shell, compositor, blk, kbd, devmgr, initd];
     let names = [
         PRODUCER_NAME,
         CONSUMER_NAME,
         SHELL_NAME,
-        FB_NAME,
+        COMPOSITOR_NAME,
         BLK_NAME,
         KBD_NAME,
         DEVMGR_NAME,
@@ -2182,6 +2384,17 @@ pub fn enter(
             "service: 1 role, {} grant (initd -> blk)\n",
             device::INITD_SETUP_GRANTS,
         ));
+        // The display task alone may mint surfaces. The factory is a distinct
+        // object id, so a surface capability can never be mistaken for it, and
+        // it carries only the rights creating needs.
+        let _ = caps[service::COMPOSITOR_TASK].insert(Capability::new(
+            zc_abi::SURFACE_FACTORY,
+            Rights::WRITE.union(Rights::GRANT),
+        ));
+        let _ = crate::serial::print(format_args!(
+            "surface: factory granted to task {}\n",
+            service::COMPOSITOR_TASK,
+        ));
     }
     let _ = caps;
 
@@ -2297,6 +2510,87 @@ fn task_user_pt(cr3: u64) -> Option<u64> {
         }
         Some(pt_entry & TABLE_MASK)
     }
+}
+
+/// Returns the user page directory behind a page-table root.
+///
+/// The surface window sits in the first gigabyte, so it is reached through
+/// PML4[0] → PDPT[0] → PD, the same levels [`new_address_space`] cloned for
+/// the task. Returns `None` when either level is missing or is a large page.
+fn task_user_pd(cr3: u64) -> Option<u64> {
+    // SAFETY: all tables live in identity-mapped RAM for the whole boot.
+    unsafe {
+        let pdpt_entry = table_entry(cr3 & !0xFFF, 0);
+        if pdpt_entry & 1 == 0 {
+            return None;
+        }
+        let pd_entry = table_entry(pdpt_entry & TABLE_MASK, 0);
+        if pd_entry & 1 == 0 || pd_entry & (1 << 7) != 0 {
+            return None;
+        }
+        Some(pd_entry & TABLE_MASK)
+    }
+}
+
+/// Decodes a surface capability object id into its table slot.
+///
+/// Returns `None` for anything that is not exactly a surface cap, so the
+/// factory id and foreign namespaces can never name a slot.
+fn surface_slot(object: u32) -> Option<u32> {
+    if object & !0xFF != zc_abi::SURFACE_CAP_TAG {
+        return None;
+    }
+    let slot = object & 0xFF;
+    if (slot as usize) < zc_abi::SURFACE_SLOTS {
+        Some(slot)
+    } else {
+        None
+    }
+}
+
+/// Maps a surface's frames into the running task and returns its address.
+///
+/// The kernel picks the address from the slot index, so two surfaces can never
+/// collide and a caller cannot choose an address that overlaps another
+/// mapping. Each slot spans two page-directory entries; the first touch
+/// installs a private page table over the identity map's large pages for that
+/// window, and the entries are marked non-executable so a task can draw pixels
+/// but never run code from a surface.
+fn map_surface_into_task(tasks: &TaskTable<8>, slot: u32, surface: &zc_kernel::surface::Surface) -> Option<u64> {
+    let pd = task_user_pd(tasks.current_cr3())?;
+    let base = SURFACE_VIRT + u64::from(slot) * SURFACE_SLOT_STRIDE;
+    let pages = u64::from(surface.pages);
+    let mut page = 0u64;
+    while page < pages {
+        let va = base + page * PAGE_SIZE;
+        let pd_index = ((va >> 21) & 0x1FF) as usize;
+        let pt_index = ((va >> 12) & 0x1FF) as usize;
+        // SAFETY: `pd` is the running task's directory, identity-mapped.
+        let entry = unsafe { table_entry(pd, pd_index) };
+        let pt = if entry & 1 == 0 || entry & (1 << 7) != 0 {
+            // No table yet (or the identity map's large page): install a
+            // fresh, zeroed one. The allocator's reserved windows keep the
+            // new frame out of any address a task remaps.
+            let frame = crate::frames().allocate()?;
+            let pt = frame.start_address();
+            // SAFETY: fresh frame inside the identity map.
+            unsafe {
+                core::slice::from_raw_parts_mut(pt as *mut u8, PAGE_SIZE as usize).fill(0);
+                set_table_entry(pd, pd_index, pt | USER_PAGE_FLAGS);
+            }
+            pt
+        } else {
+            entry & TABLE_MASK
+        };
+        let frame = surface.frame(page as usize)?;
+        // SAFETY: `pt` is identity-mapped and `pt_index` is in range.
+        unsafe {
+            const NO_EXECUTE: u64 = 1 << 63;
+            set_table_entry(pt, pt_index, frame | USER_PAGE_FLAGS | NO_EXECUTE);
+        }
+        page += 1;
+    }
+    Some(base)
 }
 
 /// Resolves the running task's user page table.

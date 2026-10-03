@@ -16,8 +16,8 @@ pub use zc_abi::{
     SYS_FB_INFO, SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME,
     SYS_MOUNT, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ, SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO,
     SYS_SERIAL_READ, SYS_SERVICE_START, SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT,
-    SYS_TASK_EXIT, SYS_UMOUNT, SYS_WRITE, SYS_YIELD, Stat, SyscallError, supervise_kind,
-    supervise_service,
+    SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_UMOUNT, SYS_WRITE,
+    SYS_YIELD, Stat, SurfaceInfo, SyscallError, supervise_kind, supervise_service,
 };
 
 /// Issues a syscall with no arguments.
@@ -203,6 +203,43 @@ pub fn chmod(path: &str, mode: u32) -> u64 {
         path.len() as u64,
         u64::from(mode),
     )
+}
+
+/// Creates a pixel surface, returning its capability object id or `u64::MAX`.
+///
+/// Only a task holding the surface factory capability may create one; the
+/// kernel allocates and zeroes the backing frames.
+#[inline(always)]
+pub fn surface_create(width: u32, height: u32, format: u32) -> u64 {
+    syscall3(
+        SYS_SURFACE_CREATE,
+        u64::from(width),
+        u64::from(height),
+        u64::from(format),
+    )
+}
+
+/// Maps a surface this task holds a read capability for.
+///
+/// Returns the mapped virtual address or `u64::MAX`. When `info` is given the
+/// kernel fills in the geometry, so a delegate that does not know the surface
+/// size can still draw into it.
+#[inline(always)]
+pub fn surface_map(object: u32, info: Option<&mut SurfaceInfo>) -> u64 {
+    let (ptr, len) = match info {
+        Some(info) => (
+            core::ptr::from_mut(info) as u64,
+            core::mem::size_of::<SurfaceInfo>() as u64,
+        ),
+        None => (0, 0),
+    };
+    syscall3(SYS_SURFACE_MAP, u64::from(object), ptr, len)
+}
+
+/// Destroys a surface this task created, returning 0 or `u64::MAX`.
+#[inline(always)]
+pub fn surface_destroy(object: u32) -> u64 {
+    syscall1(SYS_SURFACE_DESTROY, u64::from(object))
 }
 
 /// Copies the framebuffer description into `info`.

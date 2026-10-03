@@ -272,8 +272,9 @@ fn discover_framebuffer(boot_services: &BootServices) -> FramebufferInfo {
         address: mode.frame_buffer_base,
         width: info.horizontal_resolution,
         height: info.vertical_resolution,
-        // GOP reports no separate pitch, so linear modes are tightly packed.
-        stride: info.horizontal_resolution,
+        // GOP's pitch can exceed the visible width when the firmware pads
+        // scan lines; use it directly so a stride-padded mode maps correctly.
+        stride: info.pixels_per_scan_line,
         pixel_format: PixelFormat::from_gop(info.pixel_format).unwrap_or(PixelFormat::Unavailable),
     }
 }

@@ -63,8 +63,8 @@ initramfs with user permissions, log through a syscall, read files from a
 read-only filesystem, and run an interactive serial shell.
 
 **F6 — driver userspace.** Drivers run as their own ring-3 domains:
-`user/zc-blk` (virtio-blk), `user/zc-kbd` (PS/2 keyboard), `user/zc-fb`
-(framebuffer), and `user/zc-devmgr` (PCI config). Authority is explicit and
+`user/zc-blk` (virtio-blk), `user/zc-kbd` (PS/2 keyboard), and `user/zc-devmgr`
+(PCI config). Authority is explicit and
 runtime-granted: an 8 KiB deny-by-default TSS I/O bitmap instead of blanket
 `IOPL`, per-task address spaces with `CR3` reloaded on every switch,
 capability-gated IRQ and port claims, a host-tested device grant table
@@ -100,7 +100,15 @@ restarts it after a deliberate fault, so a service the kernel did not choose
 to keep alive comes back on a userspace decision. The host formatter plants a
 torn, over-claiming tail so every boot must recover before serving, and both
 `zcfs` implementations clamp the log head to what actually reached the disk.
-Next up is **F8 — Desktop**.
+
+**F8 — desktop.** The userspace compositor (`user/zcompositor`) owns the
+display. It creates a full-screen back buffer through new capability-gated
+surface syscalls (`SYS_SURFACE_CREATE`/`MAP`/`DESTROY`), paints a deterministic
+desktop, moves its window, and flushes only the damaged region to the
+framebuffer. The kernel independently recomputes the expected final frame and
+fails the boot if a repaint was missed, so damage tracking is proven rather
+than assumed. Next up is the window manager and the first client window over a
+delegated surface.
 
 ## Development
 

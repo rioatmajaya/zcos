@@ -367,6 +367,32 @@ mod tests {
     }
 
     #[test]
+    fn surface_capability_flows_through_delegation() {
+        use zc_abi::{SURFACE_FACTORY, surface_cap};
+        let mut owner = CapabilityTable::<4>::new();
+        let mut compositor = CapabilityTable::<4>::new();
+
+        // The factory authorizes creating surfaces; it is a distinct object,
+        // so holding it never implies authority over any surface slot.
+        owner.insert(Capability::new(SURFACE_FACTORY, RWG)).unwrap();
+        assert!(owner.holds_object(SURFACE_FACTORY, Rights::WRITE));
+        assert!(!owner.holds_object(surface_cap(0), Rights::READ));
+
+        // A client that created a surface can hand the compositor a
+        // read-only view without giving up its own rights.
+        let handle = owner
+            .insert(Capability::new(surface_cap(0), RWG))
+            .unwrap();
+        assert!(!compositor.holds_object(surface_cap(0), Rights::READ));
+        owner
+            .delegate(handle, &mut compositor, Rights::READ)
+            .unwrap();
+        assert!(compositor.holds_object(surface_cap(0), Rights::READ));
+        // The delegation is non-amplifying: no write authority crossed.
+        assert!(!compositor.holds_object(surface_cap(0), Rights::WRITE));
+    }
+
+    #[test]
     fn delegation_by_found_handle_lands() {
         let mut source = CapabilityTable::<2>::new();
         let mut destination = CapabilityTable::<2>::new();

@@ -64,7 +64,7 @@ cargo build --manifest-path user/zc-consumer/Cargo.toml \
     --target "$none_target" --target-dir target --release
 cargo build --manifest-path user/zc-shell/Cargo.toml \
     --target "$none_target" --target-dir target --release
-cargo build --manifest-path user/zc-fb/Cargo.toml \
+cargo build --manifest-path user/zcompositor/Cargo.toml \
     --target "$none_target" --target-dir target --release
 cargo build --manifest-path user/zc-blk/Cargo.toml \
     --target "$none_target" --target-dir target --release
@@ -78,7 +78,7 @@ cargo build --manifest-path user/zc-initd/Cargo.toml \
     "target/$none_target/release/producer:producer.elf" \
     "target/$none_target/release/consumer:consumer.elf" \
     "target/$none_target/release/shell:shell.elf" \
-    "target/$none_target/release/fb:fb.elf" \
+    "target/$none_target/release/compositor:compositor.elf" \
     "target/$none_target/release/blk:blk.elf" \
     "target/$none_target/release/kbd:kbd.elf" \
     "target/$none_target/release/devmgr:devmgr.elf" \

@@ -15,7 +15,8 @@ use zc_abi::{
     BootInfo, MemoryRegion, Message, SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOSE, SYS_FB_INFO,
     SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ, SYS_RECV, SYS_RECV_FROM,
     SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START, SYS_SERVICE_STATUS,
-    SYS_SERVICE_STOP, SYS_TASK_EXIT, SYS_YIELD,
+    SYS_SERVICE_STOP, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP, SYS_TASK_EXIT,
+    SYS_YIELD,
 };
 use zc_kernel::{
     addrspace::AddressSpace,
@@ -39,6 +40,30 @@ mod idt;
 mod smp;
 mod user;
 mod zcfs_proxy;
+
+/// The one physical-frame allocator, shared by boot setup and the syscall path.
+///
+/// Boot stages used to thread `&mut FrameAllocator` by hand, but the surface
+/// syscalls allocate backing frames while a task is running, so the allocator
+/// has to outlive the boot call chain. Every access happens with interrupts
+/// masked (the dispatcher runs that way), so there is a single borrower.
+static mut FRAMES: Option<FrameAllocator<'static>> = None;
+
+/// Borrows the global frame allocator.
+///
+/// # Panics
+///
+/// Panics when called before [`kernel_main`] installs the allocator, which
+/// cannot happen because that installation precedes every stage that allocates.
+pub(crate) fn frames() -> &'static mut FrameAllocator<'static> {
+    // SAFETY: `FRAMES` is written once during boot before any other borrower
+    // exists, and every later access is serialized by masked interrupts.
+    unsafe {
+        (*core::ptr::addr_of_mut!(FRAMES))
+            .as_mut()
+            .expect("frame allocator initialized")
+    }
+}
 
 /// Kernel entry point.
 ///
@@ -95,8 +120,9 @@ fn kernel_main(boot_info: *const BootInfo) -> ! {
     }
 
     // SAFETY: `memory_map` is the physical array the loader filled, and
-    // `memory_map_len` is its entry count.
-    let regions = unsafe {
+    // `memory_map_len` is its entry count. The array lives in identity-mapped
+    // memory for the whole boot, so the slice may outlive `kernel_main`.
+    let regions: &'static [MemoryRegion] = unsafe {
         core::slice::from_raw_parts(info.memory_map as *const MemoryRegion, info.memory_map_len as usize)
     };
 
@@ -117,10 +143,25 @@ fn kernel_main(boot_info: *const BootInfo) -> ! {
     report_kinds(&counts);
 
     // One allocator feeds every later stage so no frame is handed out twice:
-    // the self-test recycles, SMP keeps its frames, and the user task keeps
-    // its pages.
-    let mut alloc = FrameAllocator::new(regions);
-    exercise_mechanisms(&mut alloc, usable);
+    // the self-test recycles, SMP keeps its frames, the user task keeps its
+    // pages, and the surface syscalls allocate backing stores at runtime.
+    // SAFETY: written once here, before any task or handler can run.
+    unsafe {
+        core::ptr::addr_of_mut!(FRAMES).write(Some(FrameAllocator::new(regions)));
+    }
+    // Frames in the windows user address spaces remap must never be handed
+    // out: the kernel reaches them through the identity map while a task's
+    // page tables are loaded, so a frame there would be written into user
+    // memory. Reserve before anything allocates.
+    {
+        let alloc = frames();
+        for (start, end) in user::reserved_windows() {
+            if !alloc.reserve(start, end) {
+                fail("allocator could not reserve a kernel window");
+            }
+        }
+    }
+    exercise_mechanisms(frames(), usable);
     exercise_traps_and_timer();
     acpi::describe(info.rsdp);
     report_initramfs(info);
@@ -138,8 +179,8 @@ fn kernel_main(boot_info: *const BootInfo) -> ! {
             blk_bar = Some((zc_kernel::pci::bar_base(blk.bar0) & 0xFFFF) as u16);
         }
     }
-    smp::bring_up(&mut alloc);
-    user::enter(&mut alloc, boot_info, blk_bar);
+    smp::bring_up(frames());
+    user::enter(frames(), boot_info, blk_bar);
 }
 
 /// Prints the firmware handoff tail and idles forever.
@@ -249,6 +290,9 @@ fn exercise_mechanisms(alloc: &mut FrameAllocator<'_>, usable: u64) {
         (SYS_SERVICE_STOP, Action::ServiceStop),
         (SYS_SERVICE_STATUS, Action::ServiceStatus),
         (SYS_CHMOD, Action::Chmod),
+        (SYS_SURFACE_CREATE, Action::SurfaceCreate),
+        (SYS_SURFACE_MAP, Action::SurfaceMap),
+        (SYS_SURFACE_DESTROY, Action::SurfaceDestroy),
     ];
     for (number, expected) in dispatched {
         match syscall::dispatch(number) {

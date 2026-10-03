@@ -1,6 +1,6 @@
 [package]
-name = "fb"
-description = "Framebuffer task for ZC OS"
+name = "compositor"
+description = "Userspace compositor for ZC OS"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,7 +9,7 @@ publish = false
 build = "build.rs"
 
 [[bin]]
-name = "fb"
+name = "compositor"
 path = "src/main.rs"
 
 [dependencies]

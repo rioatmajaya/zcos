@@ -1,4 +1,4 @@
-//! Build script for the freestanding framebuffer task.
+//! Build script for the freestanding compositor task.
 
 fn main() {
     println!("cargo:rustc-link-arg=-Tuser.ld");

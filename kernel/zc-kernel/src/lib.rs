@@ -31,6 +31,7 @@ pub mod perms;
 pub mod ramfs;
 pub mod sched;
 pub mod service;
+pub mod surface;
 pub mod syscall;
 pub mod task;
 pub mod timer;

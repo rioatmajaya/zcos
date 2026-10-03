@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 5 grants`, `task 6: devmgr: blk published` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | ⬜ planned | — |
+| **F8** | Desktop | 🔄 F8a-1 done | `surface: factory granted to task 3`; `compositor: ready`; `compositor: damage ok`; `fb: desktop checksum ok` |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -245,7 +245,8 @@ restart without taking the kernel down.
 - [x] F6k: userspace device manager (`user/zc-devmgr`) owning PCI config.
 - [x] F6l: discovery over explicit IPC channels (`IPC_DISCOVERY`).
 - [x] F6m: runtime capability delegation (`SYS_CAP_DELEGATE`).
-- [x] Framebuffer domain (`user/zc-fb`) and keyboard domain (`user/zc-kbd`).
+- [x] Framebuffer domain (now `user/zcompositor`, F8) and keyboard domain
+      (`user/zc-kbd`).
 - [x] Automatic driver restart with a bounded budget.
 
 **Pass criteria.** CI greps `device: 3 roles, 5 grants`, `task 6: devmgr: blk
@@ -466,8 +467,14 @@ full browser. Note them as follow-ups, do not build them here.
 
 **Tasks.**
 
-- [ ] F8a: `zcompositor` — userspace compositor and window manager, with a
-      shared-buffer protocol for clients and damage tracking.
+- [x] F8a-1: `zcompositor` — userspace compositor owning the display, with a
+      capability-gated surface protocol and damage tracking. It creates a
+      full-screen back buffer through the surface syscalls, paints a
+      deterministic desktop, moves the window, and repaints only the damage;
+      the kernel verifies the final frame with an independent checksum. See
+      [`adr/0015`](adr/0015-compositor-surface-model.md).
+- [ ] F8a-2: window manager and the first client window over a delegated
+      surface; `wm: window mapped`, `wm: move ok`.
 - [ ] F8b: input service — keyboard (already proven) plus PS/2 mouse, then
       USB HID and I2C-HID touchpad; one event stream to all clients.
 - [ ] F8c: 2D renderer with alpha compositing and TrueType `glyf` text.

@@ -22,10 +22,26 @@ filesystem (F7e), the writable volume mounted into the kernel VFS (F7e-2),
 a userspace supervisor that owns service lifecycle (F7f), crash recovery
 that clamps the log head (F7g), an `fsck` repair that makes an unclean
 mount clean again (F7h), `devfs`/`tmpfs` mounts (F7i), and file permissions
-and ownership in the VFS (F7j).
+and ownership in the VFS (F7j). Phase **F8 — desktop** has started with the
+userspace compositor (F8a-1): a capability-gated surface protocol, a
+full-screen back buffer, and damage tracking the kernel verifies.
 
 ### Added
 
+- **Userspace compositor with a surface protocol and damage tracking** (F8a-1):
+  `user/zcompositor` takes over the display slot and creates a full-screen back
+  buffer through three new capability-gated syscalls — `SYS_SURFACE_CREATE`,
+  `SYS_SURFACE_MAP`, and `SYS_SURFACE_DESTROY` (27/28/29). A surface is a
+  kernel-owned set of frames handed out by capability (bit 29, beside port and
+  service caps), so a client can give the compositor a read-only view with the
+  existing `SYS_CAP_DELEGATE` and no pixel ever crosses an IPC message. The
+  compositor paints a deterministic desktop, moves its window, and repaints
+  only the damaged rectangles; the kernel recomputes the expected final frame
+  from the same pure `zc_abi::desktop` layout and fails the boot on a mismatch
+  (`fb: desktop checksum ok`), which makes damage tracking a proof rather than
+  an assumption. The boot logs `compositor: damage ok (235008/1024000 px)` —
+  only 23% of the screen was touched. `zc-fb` is replaced by `zcompositor`
+  (see [ADR 0015](docs/adr/0015-compositor-surface-model.md)).
 - **File permissions and ownership in the VFS** (F7j): every task now carries
   an identity and every node an owner, and the VFS enforces POSIX-style mode
   bits on open, read, write, and create. A new pure `zc-kernel::perms` module
@@ -232,6 +248,18 @@ and ownership in the VFS (F7j).
 
 ### Changed
 
+- The frame allocator is now global and reserves the virtual windows user
+  address spaces remap (`FrameAllocator::reserve`). The surface syscalls
+  allocate frames while a task is running, and the kernel reaches a fresh
+  frame through the identity map — but a task's page tables point those
+  addresses at its images, stack, display, or a surface, so a frame in one of
+  those windows would be written into user memory. `PhysFrame::from_address`
+  lets a caller holding only an address (a surface's recorded frames) return a
+  frame to the allocator.
+- The loader reads `PixelsPerScanLine` from the firmware graphics mode instead
+  of assuming the pitch equals the visible width, and the framebuffer mapping
+  covers `stride * height` pixels, so a stride-padded mode maps correctly on
+  real hardware.
 - File syscalls now go through the VFS instead of the flat initramfs module:
   `zc-kernel::fs` is replaced by `zc-kernel::ramfs` (a `FileSystem`) plus
   `zc-kernel::vfs` (mount table and descriptors). `open` resolves against the

@@ -476,6 +476,8 @@ pub struct GraphicsOutputModeInformation {
     pub pixel_format: u32,
     /// Channel masks when `pixel_format` is `PixelBitMask`.
     pub pixel_information: [u32; 4],
+    /// Pixels in one scan line, including any padding past the visible width.
+    pub pixels_per_scan_line: u32,
 }
 
 /// The current graphics mode and its linear framebuffer.
@@ -583,7 +585,7 @@ mod tests {
         assert_eq!(offset_of!(GraphicsOutputProtocolMode, frame_buffer_base), 24);
         assert_eq!(offset_of!(GraphicsOutputProtocolMode, frame_buffer_size), 32);
 
-        assert_eq!(size_of::<GraphicsOutputModeInformation>(), 32);
+        assert_eq!(size_of::<GraphicsOutputModeInformation>(), 36);
         assert_eq!(offset_of!(GraphicsOutputModeInformation, version), 0);
         assert_eq!(
             offset_of!(GraphicsOutputModeInformation, horizontal_resolution),
@@ -591,6 +593,10 @@ mod tests {
         );
         assert_eq!(offset_of!(GraphicsOutputModeInformation, pixel_format), 12);
         assert_eq!(offset_of!(GraphicsOutputModeInformation, pixel_information), 16);
+        assert_eq!(
+            offset_of!(GraphicsOutputModeInformation, pixels_per_scan_line),
+            32
+        );
     }
 
     #[test]

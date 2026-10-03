@@ -1,6 +1,5 @@
-/* Linker layout for the ZC OS framebuffer task, linked above the shell so
- * every image keeps distinct pages without any runtime relocation of
- * absolute addresses. */
+/* Linker layout for the ZC OS compositor task, linked at the base the
+ * framebuffer task used so the user image window stays unchanged. */
 
 OUTPUT_FORMAT("elf64-x86-64")
 ENTRY(_start)

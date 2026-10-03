@@ -24,8 +24,8 @@ pub const PRODUCER_TASK: usize = 0;
 pub const CONSUMER_TASK: usize = 1;
 /// Task index of the interactive shell.
 pub const SHELL_TASK: usize = 2;
-/// Task index of the framebuffer bring-up task.
-pub const FB_TASK: usize = 3;
+/// Task index of the framebuffer-compositor domain.
+pub const COMPOSITOR_TASK: usize = 3;
 /// Task index of the block driver service.
 pub const BLK_TASK: usize = 4;
 /// Task index of the keyboard driver service.
@@ -114,7 +114,7 @@ mod tests {
             PRODUCER_TASK,
             CONSUMER_TASK,
             SHELL_TASK,
-            FB_TASK,
+            COMPOSITOR_TASK,
             BLK_TASK,
             KBD_TASK,
             DEVMGR_TASK,

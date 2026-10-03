@@ -10,8 +10,8 @@ use zc_abi::{
     SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOSE, SYS_CREATE, SYS_FB_INFO, SYS_IRQ_CLAIM, SYS_IRQ_TEST,
     SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_MOUNT, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ,
     SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START,
-    SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT, SYS_TASK_EXIT, SYS_UMOUNT, SYS_WRITE, SYS_YIELD,
-    SyscallError,
+    SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY,
+    SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_UMOUNT, SYS_WRITE, SYS_YIELD, SyscallError,
 };
 
 /// The kernel operation a syscall number requests.
@@ -74,6 +74,12 @@ pub enum Action {
     ServiceStatus,
     /// Change a file's permission bits.
     Chmod,
+    /// Allocate a pixel surface and its backing frames.
+    SurfaceCreate,
+    /// Map a surface the caller holds a capability for.
+    SurfaceMap,
+    /// Destroy a surface the caller owns and free its frames.
+    SurfaceDestroy,
 }
 
 /// Maps a raw syscall number to its [`Action`].
@@ -109,6 +115,9 @@ pub const fn dispatch(number: u64) -> Result<Action, SyscallError> {
         SYS_SERVICE_STOP => Ok(Action::ServiceStop),
         SYS_SERVICE_STATUS => Ok(Action::ServiceStatus),
         SYS_CHMOD => Ok(Action::Chmod),
+        SYS_SURFACE_CREATE => Ok(Action::SurfaceCreate),
+        SYS_SURFACE_MAP => Ok(Action::SurfaceMap),
+        SYS_SURFACE_DESTROY => Ok(Action::SurfaceDestroy),
         _ => Err(SyscallError::InvalidNumber),
     }
 }
@@ -146,12 +155,15 @@ mod tests {
         assert_eq!(dispatch(SYS_SERVICE_STOP), Ok(Action::ServiceStop));
         assert_eq!(dispatch(SYS_SERVICE_STATUS), Ok(Action::ServiceStatus));
         assert_eq!(dispatch(SYS_CHMOD), Ok(Action::Chmod));
+        assert_eq!(dispatch(SYS_SURFACE_CREATE), Ok(Action::SurfaceCreate));
+        assert_eq!(dispatch(SYS_SURFACE_MAP), Ok(Action::SurfaceMap));
+        assert_eq!(dispatch(SYS_SURFACE_DESTROY), Ok(Action::SurfaceDestroy));
     }
 
     #[test]
     fn unknown_numbers_are_rejected() {
-        // The last assigned number is SYS_CHMOD (26), so probe past it.
-        assert_eq!(dispatch(27), Err(SyscallError::InvalidNumber));
+        // The last assigned number is SYS_SURFACE_DESTROY (29), so probe past it.
+        assert_eq!(dispatch(30), Err(SyscallError::InvalidNumber));
         assert_eq!(
             dispatch(u64::MAX),
             Err(SyscallError::InvalidNumber)

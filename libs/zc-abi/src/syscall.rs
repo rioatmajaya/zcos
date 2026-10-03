@@ -85,6 +85,20 @@ pub const SYS_SERVICE_STATUS: u64 = 25;
 /// change its mode, and only a filesystem that stores modes in place supports
 /// it.
 pub const SYS_CHMOD: u64 = 26;
+/// Creates a pixel surface: args are width, height, and a raw pixel-format
+/// value; returns the surface's capability object id or `u64::MAX`. The
+/// caller must hold the factory capability, and the kernel allocates and
+/// zeroes the backing frames.
+pub const SYS_SURFACE_CREATE: u64 = 27;
+/// Maps a surface into the caller: args are the surface object id, a
+/// [`crate::SurfaceInfo`] output pointer, and its length; returns the mapped
+/// virtual address or `u64::MAX`. The caller must hold a read capability for
+/// the surface. Passing a zero length skips the info copy.
+pub const SYS_SURFACE_MAP: u64 = 28;
+/// Destroys a surface: arg is the surface object id; returns 0 or `u64::MAX`.
+/// Only the task that created the surface may destroy it, and its frames are
+/// returned to the allocator.
+pub const SYS_SURFACE_DESTROY: u64 = 29;
 
 /// Error codes returned by failed syscalls.
 ///
@@ -167,6 +181,9 @@ mod tests {
         assert_eq!(SYS_SERVICE_STOP, 24);
         assert_eq!(SYS_SERVICE_STATUS, 25);
         assert_eq!(SYS_CHMOD, 26);
+        assert_eq!(SYS_SURFACE_CREATE, 27);
+        assert_eq!(SYS_SURFACE_MAP, 28);
+        assert_eq!(SYS_SURFACE_DESTROY, 29);
     }
 
     #[test]

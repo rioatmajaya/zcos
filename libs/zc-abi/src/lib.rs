@@ -11,10 +11,12 @@
 
 #![no_std]
 
+pub mod desktop;
 pub mod driver;
 pub mod fb;
 pub mod ipc;
 pub mod service;
+pub mod surface;
 pub mod syscall;
 pub mod vfs;
 
@@ -28,7 +30,11 @@ pub use driver::{
     FS_STATUS_OK, FS_STATUS_TABLE_FULL, INFO_LEN, INFO_QUEUE0, INFO_QUEUE1, INFO_QUEUE2, INFO_VIRT,
     INPUT_RING_VIRT, IRQ_KEYBOARD, IRQ_SOURCES, QUEUE_VIRT, port_cap,
 };
-pub use fb::{BAR_COUNT, bar_at, bar_color, encode};
+pub use fb::encode;
+pub use desktop::{
+    DamageList, FRAME_INITIAL, FRAME_MOVED, HASH_OFFSET, HASH_PRIME, PANEL_HEIGHT, Rect,
+    TITLE_HEIGHT, color_at, hash_step, panel_height, pixel_at, window_rect,
+};
 pub use ipc::{
     IPC_CHANNELS, IPC_DATA, IPC_DISCOVERY, IPC_FS, IPC_FS_REPLY, IPC_SUPERVISE, MESSAGE_WORDS,
     Message,
@@ -37,12 +43,16 @@ pub use service::{
     SERVICE_KIND_EXIT, SERVICE_KIND_FAULT, service_cap, supervise_event, supervise_kind,
     supervise_service,
 };
+pub use surface::{
+    SURFACE_CAP_TAG, SURFACE_END, SURFACE_FACTORY, SURFACE_MAX_PAGES, SURFACE_SLOTS,
+    SURFACE_SLOT_STRIDE, SURFACE_VIRT, SurfaceInfo, surface_cap,
+};
 pub use syscall::{
     SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOSE, SYS_CREATE, SYS_FB_INFO, SYS_IRQ_CLAIM, SYS_IRQ_TEST,
     SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_MOUNT, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ,
     SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START,
-    SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT, SYS_TASK_EXIT, SYS_UMOUNT, SYS_WRITE, SYS_YIELD,
-    SyscallError,
+    SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY,
+    SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_UMOUNT, SYS_WRITE, SYS_YIELD, SyscallError,
 };
 pub use vfs::{KIND_CHR, KIND_DIR, KIND_FILE, STAT_LEN, Stat};
 

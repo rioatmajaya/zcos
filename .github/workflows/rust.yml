@@ -131,9 +131,12 @@ jobs:
         ! grep -q "forbidden port read succeeded" build/boot.log
         grep -q "input: loopback ok" build/boot.log
         grep -q "input: irq self-test ok" build/boot.log
-        grep -q "task 3: fb painted" build/boot.log
-        grep -q "task 3: fb painted" build/boot.log
-        grep -q "fb: checksum ok" build/boot.log
+        grep -q "surface: factory granted to task 3" build/boot.log
+        grep -q "task 3: compositor: surface 1280x800 stride 1280 at 0x1400000" build/boot.log
+        grep -q "task 3: compositor: frame 0 painted" build/boot.log
+        grep -q "task 3: compositor: damage ok" build/boot.log
+        grep -q "task 3: compositor: ready" build/boot.log
+        grep -q "fb: desktop checksum ok" build/boot.log
         grep -q "switches" build/boot.log
         grep -q "acpi: rsdp v2" build/boot.log
         grep -q "initramfs: 10 files" build/boot.log

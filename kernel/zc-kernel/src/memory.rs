@@ -15,6 +15,17 @@ impl PhysFrame {
     pub const fn start_address(self) -> u64 {
         self.0
     }
+
+    /// Wraps a raw physical address as a frame.
+    ///
+    /// Alignment and the null-frame rule are enforced by
+    /// [`FrameAllocator::free`], so this constructor does not validate; it
+    /// exists so a caller holding only an address (for example a surface's
+    /// recorded frames) can return the frame to the allocator.
+    #[must_use]
+    pub const fn from_address(address: u64) -> Self {
+        Self(address)
+    }
 }
 
 /// Maximum frames the allocator can recycle without dynamic allocation.
@@ -22,6 +33,15 @@ impl PhysFrame {
 /// Early boot only needs a small reserve: recycled frames cover the page-table
 /// and IPC setup path before the ownership-aware allocator takes over.
 pub const RECYCLED_FRAMES: usize = 64;
+
+/// Maximum virtual ranges the allocator will refuse to hand out.
+///
+/// The kernel reaches freshly allocated frames through the identity map, but a
+/// user address space remaps the windows its images, stacks, framebuffer, and
+/// surfaces live in. A physical frame in one of those windows would be written
+/// at the same virtual address and land in user memory instead, so those
+/// windows must never be allocated while a task's page tables are loaded.
+pub const RESERVED_RANGES: usize = 6;
 
 /// A monotonic allocator over loader-classified usable memory regions.
 ///
@@ -36,6 +56,8 @@ pub struct FrameAllocator<'a> {
     next_address: u64,
     recycled: [u64; RECYCLED_FRAMES],
     recycled_count: usize,
+    reserved: [(u64, u64); RESERVED_RANGES],
+    reserved_count: usize,
 }
 
 impl<'a> FrameAllocator<'a> {
@@ -48,7 +70,35 @@ impl<'a> FrameAllocator<'a> {
             next_address: 0,
             recycled: [0; RECYCLED_FRAMES],
             recycled_count: 0,
+            reserved: [(0, 0); RESERVED_RANGES],
+            reserved_count: 0,
         }
+    }
+
+    /// Refuses to hand out frames inside `[start, end)`.
+    ///
+    /// Returns `false` when the range is empty, inverted, or the reserve list
+    /// is full; the caller keeps ownership of the frame in that case.
+    pub fn reserve(&mut self, start: u64, end: u64) -> bool {
+        if start >= end || self.reserved_count >= RESERVED_RANGES {
+            return false;
+        }
+        self.reserved[self.reserved_count] = (start, end);
+        self.reserved_count += 1;
+        true
+    }
+
+    /// Returns the end of the reserved range containing `address`, if any.
+    fn reserved_end(&self, address: u64) -> Option<u64> {
+        let mut index = 0;
+        while index < self.reserved_count {
+            let (start, end) = self.reserved[index];
+            if address >= start && address < end {
+                return Some(end);
+            }
+            index += 1;
+        }
+        None
     }
 
     /// Allocates one zero-uninitialized physical page, or returns `None` when
@@ -83,6 +133,18 @@ impl<'a> FrameAllocator<'a> {
             // "absent" sentinel in BootInfo and in capability handles.
             if self.next_address == 0 {
                 self.next_address = PAGE_SIZE;
+            }
+            // Skip every reserved window the cursor falls in. A frame in one
+            // would be written through the identity map while a user address
+            // space has that address pointing somewhere else.
+            while let Some(reserved_end) = self.reserved_end(self.next_address) {
+                let Some(skip) = align_up(reserved_end, PAGE_SIZE) else {
+                    break;
+                };
+                if skip <= self.next_address {
+                    break;
+                }
+                self.next_address = skip;
             }
 
             let Some(frame_end) = self.next_address.checked_add(PAGE_SIZE) else {
@@ -251,6 +313,43 @@ mod tests {
             allocator.allocate().map(PhysFrame::start_address),
             Some(PAGE_SIZE)
         );
+    }
+
+    #[test]
+    fn allocator_skips_reserved_ranges() {
+        // A single usable region with a reserved page in the middle: the
+        // cursor must jump the window instead of handing out a frame there.
+        let regions = [region(0x1000, PAGE_SIZE * 8, MemoryKind::Usable)];
+        let mut allocator = FrameAllocator::new(&regions);
+        assert!(allocator.reserve(0x3000, 0x4000));
+
+        assert_eq!(allocator.allocate(), Some(PhysFrame(0x1000)));
+        assert_eq!(allocator.allocate(), Some(PhysFrame(0x2000)));
+        assert_eq!(allocator.allocate(), Some(PhysFrame(0x4000)));
+    }
+
+    #[test]
+    fn reserved_ranges_can_exhaust_a_region() {
+        // Reserving the whole usable region leaves nothing to hand out, so
+        // the allocator advances past it rather than looping forever.
+        let regions = [region(0x1000, PAGE_SIZE * 2, MemoryKind::Usable)];
+        let mut allocator = FrameAllocator::new(&regions);
+        assert!(allocator.reserve(0x1000, 0x3000));
+        assert_eq!(allocator.allocate(), None);
+    }
+
+    #[test]
+    fn reserve_rejects_empty_and_full_lists() {
+        let regions = [region(0x1000, PAGE_SIZE, MemoryKind::Usable)];
+        let mut allocator = FrameAllocator::new(&regions);
+        assert!(!allocator.reserve(0x2000, 0x2000));
+        assert!(!allocator.reserve(0x3000, 0x2000));
+        let mut index: u64 = 0;
+        while index < RESERVED_RANGES as u64 {
+            assert!(allocator.reserve(0x10_0000 + index * PAGE_SIZE, 0x10_1000 + index * PAGE_SIZE));
+            index += 1;
+        }
+        assert!(!allocator.reserve(0x20_0000, 0x20_1000));
     }
 
     #[test]

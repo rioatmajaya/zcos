@@ -18,10 +18,10 @@ exclude = [
     "user/zc-devmgr",
     "user/zc-initd",
     "user/zc-kbd",
-    "user/zc-fb",
     "user/zc-producer",
     "user/zc-shell",
     "user/zc-user",
+    "user/zcompositor",
 ]
 
 [workspace.package]
