@@ -111,7 +111,11 @@ than assumed. The compositor also acts as the window manager: it hands a window
 surface to a client task (`user/zc-win`) with `SYS_CAP_DELEGATE`, and the client
 paints it over two dedicated IPC channels. The compositor composites and moves
 the client's window, and the same kernel checksum proves the delegated pixels
-reached the screen. See [ADR 0016](docs/adr/0016-window-client-delegation.md).
+reached the screen. F8c adds a 2D renderer: `zc-abi::font` embeds a VGA 8x16
+bitmap font and a pure `text_blend` overlay, so the window title label `ZC OS`
+renders through the same `window_color_at` the kernel's frame verifier calls —
+text is proven by `fb: desktop checksum ok`, not assumed. See
+[ADR 0016](docs/adr/0016-window-client-delegation.md).
 
 ## Development
 

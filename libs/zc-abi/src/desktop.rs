@@ -7,6 +7,7 @@
 
 use crate::PixelFormat;
 use crate::fb::encode;
+use crate::font::GLYPH_H;
 
 /// Height of the top panel, clamped for very short displays.
 pub const PANEL_HEIGHT: u32 = 32;
@@ -296,7 +297,17 @@ pub const fn window_color_at(lx: u32, ly: u32, w: u32, h: u32) -> (u8, u8, u8) {
         return (28, 30, 38);
     }
     if ly < TITLE_HEIGHT {
-        return (70, 110, 180);
+        // Title bar with a centered label. The label is part of the
+        // deterministic layout, so the kernel's frame checksum proves it
+        // renders: the compositor and the verifier both route through here.
+        let bar = (70, 110, 180);
+        let fg = (235, 238, 245);
+        let text = "ZC OS";
+        // Center the label within the title bar: 8px left margin, vertically
+        // centered against the 16px cell when the bar is at least that tall.
+        let tx = 8;
+        let ty = if TITLE_HEIGHT > GLYPH_H { (TITLE_HEIGHT - GLYPH_H) / 2 } else { 0 };
+        return crate::font::text_blend(text, tx, ty, lx, ly, bar, fg);
     }
     (210, 212, 218)
 }
@@ -440,6 +451,35 @@ mod tests {
         // Degenerate sizes must not underflow the border check.
         let _ = window_color_at(0, 0, 0, 0);
         let _ = window_color_at(0, 0, 1, 1);
+    }
+
+    #[test]
+    fn window_title_bar_renders_text() {
+        // The title bar is no longer a flat fill: at least one glyph stroke
+        // pixel must take the foreground color, proving text is drawn, while
+        // the surrounding bar color must survive underneath.
+        let bar = (70, 110, 180);
+        let fg = (235, 238, 245);
+        let (w, h) = (200u32, 120u32);
+        let mut found_fg = false;
+        let mut found_bar = false;
+        let mut ly = 0;
+        while ly < TITLE_HEIGHT {
+            let mut lx = 0;
+            while lx < w {
+                let c = window_color_at(lx, ly, w, h);
+                if c == fg {
+                    found_fg = true;
+                }
+                if c == bar {
+                    found_bar = true;
+                }
+                lx += 1;
+            }
+            ly += 1;
+        }
+        assert!(found_fg, "title text foreground not rendered");
+        assert!(found_bar, "title bar background not preserved under text");
     }
 
     #[test]

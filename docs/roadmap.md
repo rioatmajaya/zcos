@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 5 grants`, `task 6: devmgr: blk published` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8b done | `cap: task 3 delegated 0x20000001 to task 8`; `client: window painted`; `wm: window mapped`; `wm: move ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: desktop checksum ok` |
+| **F8** | Desktop | 🔄 F8c done | `cap: task 3 delegated 0x20000001 to task 8`; `client: window painted`; `wm: window mapped`; `wm: move ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: desktop checksum ok`; `zc-abi` font + `text_blend` host tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -484,7 +484,15 @@ full browser. Note them as follow-ups, do not build them here.
       ring the shell drains, stripped by the kernel before the shell.
       `input: mouse loopback ok`, `input: mouse irq self-test ok`,
       `kbd: irq 34 delivered`. See [`adr/0017`](adr/0017-input-stream-with-mouse.md).
-- [ ] F8c: 2D renderer with alpha compositing and TrueType `glyf` text.
+- [x] F8c: 2D renderer with a bitmap font and text overlay. `zc-abi::font`
+      embeds the VGA 8x16 glyph set and exposes `glyph_row`/`glyph_bit`/
+      `text_blend`/`text_width` as pure `const`-callable helpers; the window
+      title bar renders the label `ZC OS` through `window_color_at`, which both
+      the compositor and the kernel's frame verifier call, so the text is proven
+      by `fb: desktop checksum ok`. Host tests assert the glyph strokes paint
+      and the bar color survives. TrueType `glyf` shaping is deferred to the
+      native UI client library (F8e), which needs font assets from the VFS
+      (F8g); the bitmap font is the proven path the desktop ships first.
 - [ ] F8d: graphical terminal emulator speaking the existing shell protocol.
 - [ ] F8e: native Rust UI client library (widgets, event loop, no X11/Win32).
 - [ ] F8f: window decorations, focus, and an app launcher / taskbar.
@@ -503,6 +511,9 @@ full browser. Note them as follow-ups, do not build them here.
 - CI injects input, opens a terminal, runs a command, and captures the frame:
   `wm: window mapped`, `term: command ok`, `fb: desktop checksum ok`.
 - A window moves and resizes without corruption: `wm: move ok`.
+- Text renders on the desktop and is proven by the frame verifier:
+  `fb: desktop checksum ok` (which recomputes `window_color_at` including the
+  title label), plus `zc-abi` font and `text_blend` host tests passing.
 - Clean shutdown: `power: halt clean`.
 - Audio plays a known tone and the driver reports no XRUN under a stress
   buffer: `snd: playback ok`.

@@ -12,6 +12,7 @@
 #![no_std]
 
 pub mod desktop;
+pub mod font;
 pub mod driver;
 pub mod fb;
 pub mod ipc;
@@ -36,6 +37,7 @@ pub use desktop::{
     TITLE_HEIGHT, color_at, hash_step, panel_height, pixel_at, window_color_at, window_pixel_at,
     window_rect,
 };
+pub use font::{GLYPH_H, GLYPH_W, glyph_bit, glyph_row, text_blend, text_width};
 pub use ipc::{
     IPC_CHANNELS, IPC_DATA, IPC_DISCOVERY, IPC_FS, IPC_FS_REPLY, IPC_SUPERVISE, IPC_WM,
     IPC_WM_REPLY, MESSAGE_WORDS, Message, WM_ACK,

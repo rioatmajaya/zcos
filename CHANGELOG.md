@@ -26,10 +26,27 @@ and ownership in the VFS (F7j). Phase **F8 — desktop** has started with the
 userspace compositor (F8a-1): a capability-gated surface protocol, a
 full-screen back buffer, and damage tracking the kernel verifies. F8a-2 adds
 the window manager and the first client window, painted by a second task over a
-delegated surface.
+delegated surface. F8b adds the PS/2 mouse to the input domain. F8c adds a
+2D renderer: a bitmap font and a pure text overlay the compositor and the
+kernel's frame verifier share, so the window title label renders as part of the
+single-source-of-truth desktop layout and is proven by the same checksum.
 
 ### Added
 
+- **2D renderer with a bitmap font and text overlay** (F8c): `zc-abi::font`
+  embeds the standard VGA 8x16 glyph set (ASCII `0x20`..=`0x7F`, carried over
+  from the earlier prototype's `font8x16.raw`) and exposes `glyph_row`,
+  `glyph_bit`, `text_blend`, and `text_width` as pure, `const`-callable helpers
+  with no allocation. `text_blend` layers a string over any base color with
+  1-bit alpha, so it composites over the title bar or any surface. The window
+  title bar now renders the label `ZC OS` through `window_color_at`, which both
+  the compositor (`window_pixel_at`) and the kernel's frame verifier
+  (`pixel_at` → `color_at` → `window_color_at`) call — one source of truth, so
+  the label is proven by `fb: desktop checksum ok` rather than assumed. A host
+  test asserts a glyph stroke pixel takes the foreground color while the bar
+  color survives underneath, proving text actually renders. The proof holds for
+  both desktop frames, because the moved-window verifier reuses the same
+  function.
 - **Input service with a PS/2 mouse** (F8b): the kbd domain (task 5) now owns
   both 8042 lines — the keyboard on ISA IRQ1 and the mouse on ISA IRQ12 with a
   new `IRQ_MOUSE` source and `MOUSE_VECTOR` (0x22). Mouse reports travel
