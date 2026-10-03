@@ -359,6 +359,7 @@ fn exercise_traps_and_timer() {
     kbd::init();
     idt::enable();
     kbd::self_test();
+    kbd::mouse_self_test();
 
     let mut spins = 0u32;
     while apic::ticks() < apic::TARGET_TICKS {

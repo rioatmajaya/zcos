@@ -21,8 +21,8 @@ use core::arch::{asm, naked_asm};
 use core::ptr::{addr_of, addr_of_mut};
 
 use zc_kernel::trap::{
-    GateType, IdtEntry, KBD_VECTOR, SPURIOUS_VECTOR, SYSCALL_VECTOR, TIMER_VECTOR, has_error_code,
-    name,
+    GateType, IdtEntry, KBD_VECTOR, MOUSE_VECTOR, SPURIOUS_VECTOR, SYSCALL_VECTOR, TIMER_VECTOR,
+    has_error_code, name,
 };
 
 /// Kernel code-segment selector installed by the loader's GDT.
@@ -295,6 +295,51 @@ unsafe extern "C" fn keyboard_irq() {
     );
 }
 
+/// Handles one mouse interrupt: saves state, defers to the domain, restores
+/// state, and resumes with no observable change.
+#[unsafe(naked)]
+unsafe extern "C" fn mouse_irq() {
+    naked_asm!(
+        "sub rsp, 128",
+        "push rax",
+        "push rcx",
+        "push rdx",
+        "push rbx",
+        "push rbp",
+        "push rsi",
+        "push rdi",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+        "push r12",
+        "push r13",
+        "push r14",
+        "push r15",
+        "mov rbx, rsp",
+        "and rsp, -16",
+        "call mouse_irq",
+        "mov rsp, rbx",
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rdi",
+        "pop rsi",
+        "pop rbp",
+        "pop rbx",
+        "pop rdx",
+        "pop rcx",
+        "pop rax",
+        "add rsp, 128",
+        "iretq",
+    );
+}
+
 /// Stops the machine when an interrupt vector fires with no driver.
 #[unsafe(naked)]
 unsafe extern "C" fn unexpected() -> ! {
@@ -342,6 +387,7 @@ fn handler_for(vector: u8) -> u64 {
         31 => trap31 as *const () as u64,
         TIMER_VECTOR => timer_tick as *const () as u64,
         KBD_VECTOR => keyboard_irq as *const () as u64,
+        MOUSE_VECTOR => mouse_irq as *const () as u64,
         SPURIOUS_VECTOR => spurious as *const () as u64,
         SYSCALL_VECTOR => crate::user::handler_address(),
         _ => unexpected as *const () as u64,

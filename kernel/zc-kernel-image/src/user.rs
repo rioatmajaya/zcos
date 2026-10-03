@@ -1203,12 +1203,16 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             }
             match irqs.claim(source, me) {
                 Ok(()) => {
-                    // Claiming the keyboard source also publishes its shared
-                    // ring page; the controller ports come separately through
+                    // Claiming an input source publishes the shared ring
+                    // page; the controller ports come separately through
                     // SYS_PORT_CLAIM, so interrupt delivery and port authority
                     // stay two explicit grants instead of one bundled side
-                    // effect.
-                    if source == zc_abi::IRQ_KEYBOARD && grant_keyboard(me) {
+                    // effect. Both input lines share one ring page: the mouse
+                    // claim finds it already mapped and succeeds on the same
+                    // page, so the domain sees one stream.
+                    if (source == zc_abi::IRQ_KEYBOARD || source == zc_abi::IRQ_MOUSE)
+                        && grant_input_ring(me)
+                    {
                         regs.set_result(0);
                         0
                     } else {
@@ -1253,6 +1257,7 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             }
             match source {
                 zc_abi::IRQ_KEYBOARD => crate::kbd::raise(),
+                zc_abi::IRQ_MOUSE => crate::kbd::mouse_raise(),
                 _ => {
                     regs.set_result(u64::MAX);
                     return 0;
@@ -2385,6 +2390,7 @@ pub fn enter(
     {
         use zc_kernel::device;
         let _ = caps[KBD_INDEX].insert(device::irq_grant(zc_abi::IRQ_KEYBOARD));
+        let _ = caps[KBD_INDEX].insert(device::irq_grant(zc_abi::IRQ_MOUSE));
         for (start, len) in device::kbd_port_ranges() {
             let _ = caps[KBD_INDEX].insert(device::port_grant(start, len));
         }
@@ -2863,13 +2869,15 @@ fn map_elf(
     entry
 }
 
-/// Publishes the keyboard domain's ring page.
+/// Publishes the input domain's ring page.
 ///
 /// The ring page is allocated once and mapped only into the claiming task's
 /// address space. Controller ports are deliberately *not* granted here: they
 /// come through `SYS_PORT_CLAIM`, so a domain holds exactly what its
-/// capability table allows and nothing arrives as a side effect.
-fn grant_keyboard(task: u32) -> bool {
+/// capability table allows and nothing arrives as a side effect. Mapping is
+/// idempotent per task: the keyboard and the mouse lines share one ring, so
+/// the second claim finds the page already present and succeeds on it.
+fn grant_input_ring(task: u32) -> bool {
     // SAFETY: written once with interrupts disabled before any task runs.
     let phys = unsafe { addr_of!(INPUT_RING_PHYS).read() };
     if phys == 0 || phys % PAGE_SIZE != 0 {
@@ -2883,14 +2891,13 @@ fn grant_keyboard(task: u32) -> bool {
     };
     // SAFETY: the table belongs to the claimed task and is identity-mapped.
     unsafe {
-        if table_entry(pt, page_index(zc_abi::INPUT_RING_VIRT)) & 1 != 0 {
-            return false;
+        if table_entry(pt, page_index(zc_abi::INPUT_RING_VIRT)) & 1 == 0 {
+            set_table_entry(
+                pt,
+                page_index(zc_abi::INPUT_RING_VIRT),
+                phys | USER_PAGE_FLAGS,
+            );
         }
-        set_table_entry(
-            pt,
-            page_index(zc_abi::INPUT_RING_VIRT),
-            phys | USER_PAGE_FLAGS,
-        );
     }
     true
 }
@@ -2923,12 +2930,26 @@ fn revoke_keyboard(task: u32) {
     }
 }
 
-/// Copies bytes the keyboard domain produced into the shared input stream.
+/// Latest mouse report stashed from the input stream.
+///
+/// Written by [`drain_domain_input`] when it strips a mouse frame; the shell
+/// never sees frame bytes. A future pointer consumer (F8d/F8f) reads this
+/// instead of parsing the stream itself.
+static mut MOUSE_LAST: [u8; 3] = [0; 3];
+
+/// How many mouse frames the drain has stashed since boot.
+static mut MOUSE_FRAME_COUNT: u64 = 0;
+
+/// Copies bytes the input domain produced into the shared input stream.
 ///
 /// Runs with interrupts masked, so the domain cannot push while the kernel
 /// pops. The domain only appends and the kernel only removes, which keeps the
-/// ring single-producer on each side.
+/// ring single-producer on each side. Mouse frames (`FF 4D b dx dy`) are
+/// stripped and stashed; only keyboard bytes reach the serial stream, so the
+/// shell transcript can never see a frame.
 fn drain_domain_input() {
+    use zc_kernel::mouse::{FRAME_KIND_MOUSE, FRAME_LEN, FRAME_TAG};
+
     // SAFETY: written once with interrupts disabled before any task runs.
     let phys = unsafe { addr_of!(INPUT_RING_PHYS).read() };
     if phys == 0 {
@@ -2945,7 +2966,23 @@ fn drain_domain_input() {
         scratch[count] = byte;
         count += 1;
     }
-    crate::serial::push_input(&scratch[..count]);
+    let mut at = 0;
+    while at < count {
+        if scratch[at] == FRAME_TAG
+            && at + FRAME_LEN <= count
+            && scratch[at + 1] == FRAME_KIND_MOUSE
+        {
+            // SAFETY: mouse state owned here; interrupts are masked.
+            unsafe {
+                MOUSE_LAST = [scratch[at + 2], scratch[at + 3], scratch[at + 4]];
+                MOUSE_FRAME_COUNT += 1;
+            }
+            at += FRAME_LEN;
+        } else {
+            crate::serial::push_input(&scratch[at..at + 1]);
+            at += 1;
+        }
+    }
 }
 
 /// Returns the page-table root of a task slot.

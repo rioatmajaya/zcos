@@ -24,6 +24,7 @@ pub mod ipc;
 pub mod iomap;
 pub mod irq;
 pub mod kbd;
+pub mod mouse;
 pub mod mbr;
 pub mod memory;
 pub mod pci;

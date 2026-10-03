@@ -30,6 +30,19 @@ delegated surface.
 
 ### Added
 
+- **Input service with a PS/2 mouse** (F8b): the kbd domain (task 5) now owns
+  both 8042 lines — the keyboard on ISA IRQ1 and the mouse on ISA IRQ12 with a
+  new `IRQ_MOUSE` source and `MOUSE_VECTOR` (0x22). Mouse reports travel
+  tag-framed in the same input ring (`0xFF 'M' buttons dx dy`), which the
+  kernel drain strips before the shell, so the shell transcript is untouched
+  and one stream serves every client. The 8042 aux enable runs best-effort
+  (QEMU's CI config guarantees no device); the loopback and self-IPI IRQ tests
+  prove the assembler and delivery without hardware
+  (`input: mouse loopback ok`, `input: mouse irq self-test ok`,
+  `kbd: irq 34 delivered`). `TASK_COUNT`-sized IRQ ownership also widens
+  (`MAX_TASKS` 8 → 16), and the kernel stashes the latest mouse state for the
+  future pointer consumer (see
+  [ADR 0017](docs/adr/0017-input-stream-with-mouse.md)).
 - **Window manager and the first delegated client window** (F8a-2): the
   compositor creates a window surface and hands it to a new client task,
   `user/zc-win` (slot 8), with `SYS_CAP_DELEGATE`; the client maps it, paints

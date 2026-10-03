@@ -14,6 +14,9 @@ pub const SPURIOUS_VECTOR: u8 = 0xFF;
 /// Keyboard interrupt vector for ISA IRQ1 through the I/O APIC.
 pub const KBD_VECTOR: u8 = 0x21;
 
+/// Mouse interrupt vector for ISA IRQ12 through the I/O APIC.
+pub const MOUSE_VECTOR: u8 = 0x22;
+
 /// Software-interrupt vector userspace raises for syscalls.
 ///
 /// Its gate uses DPL 3 so ring-3 code may invoke it; every other gate stays
@@ -223,6 +226,7 @@ mod tests {
     fn well_known_vectors_are_stable() {
         assert_eq!(TIMER_VECTOR, 32);
         assert_eq!(KBD_VECTOR, 0x21);
+        assert_eq!(MOUSE_VECTOR, 0x22);
         assert_eq!(SPURIOUS_VECTOR, 0xFF);
         assert_eq!(SYSCALL_VECTOR, 0x80);
         assert!(!has_error_code(SYSCALL_VECTOR));

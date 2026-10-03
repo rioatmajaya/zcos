@@ -23,6 +23,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0014](0014-linux-driver-domain.md) | Reuse Linux drivers in a userspace driver domain | Accepted |
 | [0015](0015-compositor-surface-model.md) | Compositor surface model and damage tracking | Accepted |
 | [0016](0016-window-client-delegation.md) | Window clients and delegated surfaces | Accepted |
+| [0017](0017-input-stream-with-mouse.md) | Input stream with a PS/2 mouse | Accepted |
 
 ## Adding a decision
 

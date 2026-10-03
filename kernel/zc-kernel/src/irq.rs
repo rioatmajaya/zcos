@@ -13,8 +13,9 @@
 
 /// Number of task slots a single source may be claimed by.
 ///
-/// Matches the bring-up task table; wider tables need a wider bitmask.
-pub const MAX_TASKS: u32 = 8;
+/// Sized above the bring-up task table with headroom for growth; the owners
+/// bitmask is a `u32`, so this must stay at most 32.
+pub const MAX_TASKS: u32 = 16;
 
 /// Byte capacity of the ring a driver domain shares with the kernel.
 ///

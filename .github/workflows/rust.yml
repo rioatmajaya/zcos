@@ -112,7 +112,7 @@ jobs:
         grep -q "task 2: cat: cannot open" build/boot.log
         grep -q "task 4: blk: zcfs stopped" build/boot.log
         grep -q "user: 9 address spaces" build/boot.log
-        grep -q "device: 3 roles, 5 grants (blk 0, kbd 3, devmgr 2)" build/boot.log
+        grep -q "device: 3 roles, 6 grants (blk 0, kbd 4, devmgr 2)" build/boot.log
         grep -q "service: 1 role, 1 grant (initd -> blk)" build/boot.log
         grep -q "cap: task 6 delegated" build/boot.log
         grep -q "to task 4" build/boot.log
@@ -124,13 +124,16 @@ jobs:
         grep -q "kbd: unprovided source correctly refused" build/boot.log
         grep -q "kbd: unprovided ports correctly refused" build/boot.log
         grep -q "task 5: kbd: irq 33 delivered" build/boot.log
+        grep -q "kbd: irq 34 delivered, mouse queue ready" build/boot.log
         grep -q "kbd: task 5 released 3 ports" build/boot.log
         grep -q "fault vector 13 (general protection)" build/boot.log
         grep -q "restarting (budget 0 left)" build/boot.log
         grep -q "kernel survived" build/boot.log
         ! grep -q "forbidden port read succeeded" build/boot.log
         grep -q "input: loopback ok" build/boot.log
+        grep -q "input: mouse loopback ok" build/boot.log
         grep -q "input: irq self-test ok" build/boot.log
+        grep -q "input: mouse irq self-test ok" build/boot.log
         grep -q "surface: factory granted to task 3" build/boot.log
         grep -q "task 3: compositor: surface 1280x800 stride 1280 at 0x1400000" build/boot.log
         grep -q "cap: task 3 delegated 0x20000001 to task 8" build/boot.log

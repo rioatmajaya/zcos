@@ -95,15 +95,22 @@ pub const FS_STATUS_IO: u32 = 10;
 /// vector that carries the interrupt is a kernel implementation detail.
 pub const IRQ_KEYBOARD: usize = 0;
 
-/// Total number of interrupt sources the kernel routes.
-pub const IRQ_SOURCES: usize = 4;
+/// Interrupt source index of the PS/2 mouse line.
+///
+/// The mouse shares the 8042 controller with the keyboard, so the same input
+/// domain claims both sources; bytes are tagged by the controller's aux bit.
+pub const IRQ_MOUSE: usize = 1;
 
-/// User address of the keyboard driver domain's input ring.
+/// Total number of interrupt sources the kernel routes.
+pub const IRQ_SOURCES: usize = 5;
+
+/// User address of the input driver domain's ring.
 ///
 /// One page mapped into that domain only, past the last task image so the
 /// two can never share a page. The driver appends translated ASCII here; the
 /// kernel's serial-read path drains it, so the shell sees one input stream
-/// regardless of which device the keystroke arrived on.
+/// regardless of which device the keystroke arrived on. Mouse reports travel
+/// in the same ring as tag-framed bytes the drain strips before the shell.
 pub const INPUT_RING_VIRT: u64 = 0x47_0000;
 
 /// Packs an I/O port range into a capability object id.
@@ -197,6 +204,8 @@ mod tests {
     #[test]
     fn keyboard_source_is_inside_the_table() {
         assert!(IRQ_KEYBOARD < IRQ_SOURCES);
+        assert!(IRQ_MOUSE < IRQ_SOURCES);
+        assert_ne!(IRQ_KEYBOARD, IRQ_MOUSE);
     }
 
     #[test]

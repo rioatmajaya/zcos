@@ -88,8 +88,8 @@ pub const INITD_SETUP_GRANTS: usize = 1;
 /// can hand the window — and only the window — to the driver.
 pub const DEVMGR_SETUP_GRANTS: usize = 2;
 
-/// How many grants the keyboard domain always holds: one IRQ plus two ports.
-pub const KBD_GRANT_COUNT: usize = 3;
+/// How many grants the keyboard domain always holds: two IRQs plus two ports.
+pub const KBD_GRANT_COUNT: usize = 4;
 
 #[cfg(test)]
 mod tests {
@@ -134,12 +134,13 @@ mod tests {
         // The IRQ claim path checks READ, the port claim path checks WRITE;
         // the table must agree with both or every claim fails.
         assert!(irq_grant(zc_abi::IRQ_KEYBOARD).rights().contains(Rights::READ));
+        assert!(irq_grant(zc_abi::IRQ_MOUSE).rights().contains(Rights::READ));
         assert!(
             port_grant(0x60, 2)
                 .rights()
                 .contains(Rights::WRITE)
         );
-        assert_eq!(KBD_GRANT_COUNT, 3);
+        assert_eq!(KBD_GRANT_COUNT, 4);
     }
 
     #[test]
