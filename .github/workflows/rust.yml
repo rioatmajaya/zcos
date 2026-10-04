@@ -113,7 +113,7 @@ jobs:
         grep -q "task 4: blk: zcfs stopped" build/boot.log
         grep -q "user: 9 address spaces" build/boot.log
         grep -q "device: 3 roles, 6 grants (blk 0, kbd 4, devmgr 2)" build/boot.log
-        grep -q "service: 1 role, 1 grant (initd -> blk)" build/boot.log
+        grep -q "service: 2 roles, 2 grants (initd -> blk, kbd)" build/boot.log
         grep -q "cap: task 6 delegated" build/boot.log
         grep -q "to task 4" build/boot.log
         grep -q "iomap: task 4 now holds 256 ports" build/boot.log
@@ -127,8 +127,11 @@ jobs:
         grep -q "kbd: irq 34 delivered, mouse queue ready" build/boot.log
         grep -q "kbd: task 5 released 3 ports" build/boot.log
         grep -q "fault vector 13 (general protection)" build/boot.log
-        grep -q "restarting (budget 0 left)" build/boot.log
-        grep -q "kernel survived" build/boot.log
+        grep -q "task 7: initd: kbd down" build/boot.log
+        grep -q "task 7: initd: restarted kbd" build/boot.log
+        grep -q "task 7: service kbd started, task 5 revived" build/boot.log
+        grep -q "task 5: kbd: serving" build/boot.log
+        grep -q "task 7: initd: kbd stopped" build/boot.log
         ! grep -q "forbidden port read succeeded" build/boot.log
         grep -q "input: loopback ok" build/boot.log
         grep -q "input: mouse loopback ok" build/boot.log

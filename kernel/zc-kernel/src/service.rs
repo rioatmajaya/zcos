@@ -72,6 +72,9 @@ pub const OWNERS: [Identity; TASK_COUNT] = [
 /// Identifier of the block driver service.
 pub const BLK_SERVICE: u32 = 0;
 
+/// Identifier of the keyboard driver service.
+pub const KBD_SERVICE: u32 = 1;
+
 /// One supervised service domain.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Service {
@@ -85,15 +88,24 @@ pub struct Service {
 
 /// Services `initd` supervises.
 ///
-/// Only the block driver is supervised today: it is the domain the roadmap
-/// names for the restart proof, and the one whose fault the supervisor revives.
-/// The keyboard domain keeps its kernel-side budgeted restart (the F6
-/// fault-isolation proof), so it is deliberately not listed here.
-pub const SERVICES: [Service; 1] = [Service {
-    id: BLK_SERVICE,
-    task: BLK_TASK,
-    name: "blk",
-}];
+/// The block driver is the domain the roadmap names for the restart proof, and
+/// the one whose fault the supervisor revives. The keyboard driver is listed
+/// too: its boot proof still faults deliberately, but from F8d-3a it is a
+/// persistent driver — the supervisor revives it after that fault and stops it
+/// at the end of the boot, so a domain that stays alive no longer keeps the
+/// boot from finishing.
+pub const SERVICES: [Service; 2] = [
+    Service {
+        id: BLK_SERVICE,
+        task: BLK_TASK,
+        name: "blk",
+    },
+    Service {
+        id: KBD_SERVICE,
+        task: KBD_TASK,
+        name: "kbd",
+    },
+];
 
 /// Returns the service occupying `task`, if that slot is supervised.
 ///
@@ -135,19 +147,24 @@ mod tests {
     }
 
     #[test]
-    fn the_table_names_the_block_service() {
-        assert_eq!(SERVICES.len(), 1);
+    fn the_table_names_the_block_and_keyboard_services() {
+        assert_eq!(SERVICES.len(), 2);
         let blk = by_id(BLK_SERVICE).expect("block service");
         assert_eq!(blk.task, BLK_TASK);
         assert_eq!(blk.name, "blk");
         assert_eq!(for_task(BLK_TASK), Some(blk));
+
+        let kbd = by_id(KBD_SERVICE).expect("keyboard service");
+        assert_eq!(kbd.task, KBD_TASK);
+        assert_eq!(kbd.name, "kbd");
+        assert_eq!(for_task(KBD_TASK), Some(kbd));
     }
 
     #[test]
     fn non_services_name_nothing() {
         assert_eq!(by_id(99), None);
         assert_eq!(for_task(SHELL_TASK), None);
-        assert_eq!(for_task(KBD_TASK), None);
+        assert_eq!(for_task(COMPOSITOR_TASK), None);
         assert_eq!(for_task(INITD_TASK), None);
     }
 

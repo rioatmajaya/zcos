@@ -259,21 +259,14 @@ static mut IRQS: Irqs = Irqs::new();
 
 /// Domain entry points, saved at spawn so a fault can respawn a slot.
 ///
-/// Restart reuses the same address space and image frames: only the register
-/// and frame state is reset to these values. The image itself is untouched,
-/// which is why a restart is cheap and why a domain that faults
-/// unconditionally will fault again unless its budget stops it.
+/// A supervised service is revived here (same address space, same image
+/// frames, only the register and frame state reset), so `initd` can restart a
+/// domain without the kernel choosing for it. The image itself is untouched,
+/// which is why a restart is cheap.
 static mut DOMAIN_ENTRY: [u64; TASK_COUNT] = [0; TASK_COUNT];
 
 /// User stack tops, saved at spawn for the same reason.
 static mut DOMAIN_STACK: [u64; TASK_COUNT] = [0; TASK_COUNT];
-
-/// How many more times each slot may be restarted after a fault.
-///
-/// One-shot per role: the keyboard domain proves restart with a single
-/// respawn, and a second fault is final. Without a budget a domain that
-/// faults unconditionally would respawn forever.
-static mut RESTART_BUDGET: [u8; TASK_COUNT] = [0; TASK_COUNT];
 
 /// Physical address of the keyboard domain's shared input ring.
 ///
@@ -502,11 +495,11 @@ fn syscall_handler() -> u64 {
 /// whose presence caused it, never the kernel.
 ///
 /// The stub passes both saved areas exactly like a syscall, plus the vector
-/// number. A fault from ring 3 kills that task unless it still holds restart
-/// budget, in which case the slot is respawned in place (same address space,
-/// fresh registers, files dropped, device re-claimed on its next run) and the
-/// next runnable task is scheduled. A fault from ring 0 is a kernel bug and
-/// stops the machine.
+/// number. A fault from ring 3 kills that task and revokes its authority; a
+/// supervised service also has its fault posted to `initd`, which decides
+/// whether to revive the slot (same address space, fresh registers, files
+/// dropped, device re-claimed on its next run). A fault from ring 0 is a
+/// kernel bug and stops the machine.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn user_exception_entry(
     regs: *mut SyscallRegs,
@@ -557,56 +550,11 @@ pub unsafe extern "C" fn user_exception_entry(
     let frame_mut = unsafe { &mut *frame };
     // A supervised service is not restarted by the kernel: the supervisor
     // decides. Post the fault before the slot is removed, so the waking
-    // supervisor finds the event already queued, then fall through to the kill
-    // path. An unsupervised task keeps the budgeted in-place restart below.
+    // supervisor finds the event already queued, then kill the slot so the
+    // supervisor can revive it.
     let supervised = service::for_task(me).is_some();
     if supervised {
         post_supervise(me, SERVICE_KIND_FAULT);
-    }
-    // A budgeted, unsupervised slot is restarted in place instead of killed:
-    // the same address space and image frames are reused, only the register
-    // state is reset to the spawn values. The budget stops a domain that
-    // faults unconditionally from respawning forever.
-    // SAFETY: owned here; traps cannot nest.
-    let budget = unsafe { (*addr_of!(RESTART_BUDGET))[me] };
-    if !supervised && budget > 0 {
-        // SAFETY: written at spawn before any task ran; read-only since.
-        let (entry, stack) = unsafe {
-            (
-                (*addr_of!(DOMAIN_ENTRY))[me],
-                (*addr_of!(DOMAIN_STACK))[me],
-            )
-        };
-        unsafe { (*addr_of_mut!(RESTART_BUDGET))[me] = budget - 1 };
-        // The restarted domain must not inherit open files across the fault.
-        // SAFETY: owned here; the faulting task cannot touch its table while
-        // the handler runs.
-        unsafe { (*addr_of_mut!(FDS))[me] = DescriptorTable::new() };
-        let init_frame = IrqFrame {
-            rip: entry,
-            cs: u64::from(USER_CS),
-            rflags: USER_RFLAGS,
-            rsp: stack,
-            ss: u64::from(USER_SS),
-        };
-        match tasks.restart_current(regs, frame_mut, SyscallRegs::EMPTY, init_frame) {
-            Some(_next) => {
-                trace(8, tasks.current(), 0, number as u64);
-                publish_next_cr3(tasks);
-                let _ = crate::serial::print(format_args!(
-                    "task {me}: faulted; restarting (budget {} left), scheduling task {}\n",
-                    budget - 1,
-                    tasks.current(),
-                ));
-                return 0;
-            }
-            None => {
-                let _ = crate::serial::print(format_args!(
-                    "task {me}: faulted and no task remained\n",
-                ));
-                return EXIT_TO_KERNEL;
-            }
-        }
     }
     match tasks.exit_current(regs, frame_mut) {
         Some(_next) => {
@@ -2474,12 +2422,14 @@ pub fn enter(
             zc_kernel::device::BLK_SETUP_GRANTS,
             zc_kernel::device::KBD_GRANT_COUNT,
         ));
-        // The supervisor controls exactly one service: the block driver. Its
-        // authority is provisioned as data, so the lifecycle syscalls check a
-        // grant instead of trusting the service id the caller names.
+        // The supervisor controls both services: the block driver and the
+        // keyboard driver. Their authority is provisioned as data, so the
+        // lifecycle syscalls check a grant instead of trusting the service id
+        // the caller names.
         let _ = caps[INITD_INDEX].insert(device::service_grant(service::BLK_SERVICE));
+        let _ = caps[INITD_INDEX].insert(device::service_grant(service::KBD_SERVICE));
         let _ = crate::serial::print(format_args!(
-            "service: 1 role, {} grant (initd -> blk)\n",
+            "service: 2 roles, {} grants (initd -> blk, kbd)\n",
             device::INITD_SETUP_GRANTS,
         ));
         // The display task alone may mint surfaces. The factory is a distinct
@@ -2530,11 +2480,6 @@ pub fn enter(
         }
         index += 1;
     }
-    // Only the keyboard domain may be restarted, exactly once: it faults
-    // deliberately to prove the path, and a second fault must stay fatal or
-    // the supervisor would loop forever.
-    // SAFETY: written once here before any task runs.
-    unsafe { (*addr_of_mut!(RESTART_BUDGET))[KBD_INDEX] = 1 };
     publish_next_cr3(tasks);
 
     let rsp: u64;

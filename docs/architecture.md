@@ -100,20 +100,18 @@ Ring-3 faults are kills, not machine stops. A CPU exception in user mode ends
 that domain: its IRQ claims, port grants, and shared ring page are revoked,
 and the scheduler iretq's into the next task with its own CR3 and port
 bitmap. A fault in ring 0 is still fatal — there is no broader scope to
-protect, and swallowing a kernel bug would corrupt everything below it. A
-slot with restart budget is respawned instead of killed: same address space
-and image, fresh registers from the saved spawn values, files dropped, and a
-re-claim of its device on the next run. The budget bounds the loop, so a
-domain that faults unconditionally restarts a fixed number of times and then
-stays dead.
+protect, and swallowing a kernel bug would corrupt everything below it.
 
-A supervised service is different: the kernel does not decide its fate. When
-such a domain faults or exits, the kernel posts a tagged event on the
-supervision channel and kills the slot; the ring-3 `initd` supervisor wakes,
-chooses whether to restart, and calls back into the kernel to revive it. The
+A supervised service is restarted by policy, not by the kernel. When such a
+domain faults or exits, the kernel posts a tagged event on the supervision
+channel and kills the slot; the ring-3 `initd` supervisor wakes, chooses
+whether to restart, and calls back into the kernel to revive it. A revived
+service reuses its address space and image with fresh registers from the saved
+spawn values, files dropped, and a re-claim of its device on the next run. The
 policy — restart, give up, stop — lives in userspace, while the mechanisms
 (building the address space, reviving a slot, killing one) stay in the kernel
-(see [ADR 0010](adr/0010-userspace-service-supervision.md)).
+(see [ADR 0010](adr/0010-userspace-service-supervision.md)). Both the block and
+keyboard domains are supervised today.
 
 ## Storage and crash consistency
 

@@ -217,7 +217,9 @@ mod tests {
             assert_eq!(node, index as NodeId + 1);
             assert_eq!(DevFs::service(node), Some(*service));
         }
-        assert_eq!(fs.entry_count(), 1);
+        assert_eq!(fs.entry_count(), 2);
         assert_eq!(SERVICES[0].id, BLK_SERVICE);
+        // The keyboard domain publishes a node too, so `cat /dev/kbd` opens.
+        assert_eq!(fs.lookup(ROOT, b"kbd"), Ok(2));
     }
 }

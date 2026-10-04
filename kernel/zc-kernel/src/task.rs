@@ -449,7 +449,7 @@ impl<const N: usize> TaskTable<N> {
     /// register and frame state is reset to `init_regs`/`init_frame`, and the
     /// task stays alive and runnable. Returns the newly scheduled index, or
     /// `None` when no task (including the restarted one) can run. The caller
-    /// decides the budget; this only performs the reset.
+    /// decides when to restart; this only performs the reset.
     pub fn restart_current(
         &mut self,
         regs: &mut SyscallRegs,

@@ -122,7 +122,12 @@ the kernel replays the same script through the same state machine to verify the
 window — so dynamic client content stays a proof rather than a trusted claim.
 F8f adds the desktop chrome: a taskbar (launcher, focused task button, clock)
 and window decorations (minimize and close), deterministic and proven by the
-same checksum. See [ADR 0016](docs/adr/0016-window-client-delegation.md).
+same checksum. F8d-3a makes the keyboard domain a persistent, supervised
+service: after its deliberate F6 fault `initd` revives it, and the revived run
+re-claims the sources and ports the fault revoked and serves input in an
+`irq_wait → drain → push` loop until `initd` stops it at shutdown, so a live
+driver no longer keeps the boot from finishing. See
+[ADR 0016](docs/adr/0016-window-client-delegation.md).
 
 ## Development
 

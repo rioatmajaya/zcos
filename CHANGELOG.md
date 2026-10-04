@@ -37,10 +37,25 @@ kernel replays the same script through the same state machine to verify the
 window — so dynamic content stays a proof, not a trusted claim. F8f adds the
 desktop chrome: a taskbar (launcher, focused task button, clock) and window
 decorations (minimize and close), all deterministic and proven by the same
-checksum.
+checksum. F8d-3a makes the keyboard domain persistent: a supervised service
+`initd` revives after its boot fault, which then serves input for the rest of
+the boot until the supervisor stops it at shutdown.
 
 ### Added
 
+- **Persistent keyboard driver, supervised by `initd`** (F8d-3a): the kbd
+  domain is no longer a one-shot proof that faults and dies. It still runs its
+  boot proofs and faults deliberately once (the F6 fault-isolation proof), but
+  it is now a supervised service: `initd` revives it after that fault, and the
+  revived run re-claims the IRQ sources and controller ports the fault revoked
+  and enters an `irq_wait → drain → push` loop (`kbd: serving`) that keeps
+  draining the 8042 for the rest of the boot. Because a live driver would
+  otherwise keep the boot from ever finishing, `initd` stops the kbd service
+  when the block driver stops, so the boot still ends at `fb: desktop checksum
+  ok`. The keyboard domain joins the block driver in `zc_kernel::service`
+  (`KBD_SERVICE`), so it also publishes `/dev/kbd` through `devfs`. The
+  now-unused kernel-side restart budget was removed; a faulted supervised
+  service is revived by its supervisor, exactly like the block driver.
 - **Taskbar and window decorations** (F8f): the top panel is now a taskbar —
   a launcher button (`ZC`), a task button for the focused window (`Terminal`),
   and a clock — drawn with the F8c bitmap font in `zc_abi::desktop::panel_color_at`.

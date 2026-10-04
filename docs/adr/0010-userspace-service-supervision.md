@@ -41,11 +41,13 @@ and skips the one-shot discovery handshake on resume).
 
 - Restart policy lives in ring 3 and can grow (backoff, dependency order,
   "give up after N") without a kernel change; the kernel stays a mechanism.
-- The keyboard domain keeps its budgeted in-place restart: it is deliberately
-  not in the service table, so the F6 fault-isolation proof is unchanged.
+- The keyboard domain joins the service table too (F8d-3a): after its
+  deliberate F6 fault, `initd` revives it and it serves input persistently.
+  The earlier kernel-side budgeted in-place restart was removed, so a faulted
+  supervised service is always revived by its supervisor.
 - A revived service reuses its address space and image, so restart is cheap,
   but it must be written to resume rather than assume a fresh world — the
   discovery handshake is a one-shot and cannot be replayed.
-- `SYS_SERVICE_STOP`/`STATUS` are not on the boot path today (the boot proves
-  `START` end to end); they are host-tested, and the stop path revokes the
-  domain's ports and IRQs before killing the slot.
+- `SYS_SERVICE_STOP` is on the boot path now: `initd` stops the persistent
+  keyboard service when the block driver stops, so a live driver does not keep
+  the boot from finishing. `SYS_SERVICE_STATUS` remains host-tested.

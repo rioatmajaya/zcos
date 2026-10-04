@@ -40,9 +40,9 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F3** | Interrupt + Timer + SMP | ⚠️ partial | `traps: idt installed`, `timer: calibrated bus`; SMP parked |
 | **F4** | Thread + IPC | ✅ done | `task 0: producer sent 2000`, capability gates |
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
-| **F6** | Driver userspace | ✅ done | `device: 3 roles, 5 grants`, `task 6: devmgr: blk published` |
+| **F6** | Driver userspace | ✅ done | `device: 3 roles, 6 grants`, `task 6: devmgr: blk published` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8f done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `wm: window mapped`; `wm: move ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: desktop checksum ok`; `zc-abi` font/terminal/taskbar host tests pass |
+| **F8** | Desktop | 🔄 F8f, F8d-3a done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `wm: window mapped`; `wm: move ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar host tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -247,12 +247,14 @@ restart without taking the kernel down.
 - [x] F6m: runtime capability delegation (`SYS_CAP_DELEGATE`).
 - [x] Framebuffer domain (now `user/zcompositor`, F8) and keyboard domain
       (`user/zc-kbd`).
-- [x] Automatic driver restart with a bounded budget.
+- [x] Automatic driver restart — first a kernel-side bounded budget (F6), later
+      moved to the userspace `initd` supervisor (F7f) as services joined its
+      table.
 
-**Pass criteria.** CI greps `device: 3 roles, 5 grants`, `task 6: devmgr: blk
+**Pass criteria.** CI greps `device: 3 roles, 6 grants`, `task 6: devmgr: blk
 published`, `task 4: blk: disk magic ok`, `fault vector 13 (general
-protection)`, `kernel survived`, and asserts `forbidden port read succeeded`
-is **absent**.
+protection)`, and `faulted; initd notified` (a ring-3 fault kills only its
+domain), and asserts `forbidden port read succeeded` is **absent**.
 
 **References.** `25-virtio.md`, `09-usb-drivers.md`, `12-driver-lainnya.md`,
 `28-fuzzing-dan-sanitizer.md`, `29-debugging-perangkat-keras.md`.
@@ -512,16 +514,23 @@ full browser. Note them as follow-ups, do not build them here.
       client's surface. Host tests cover editing, `echo`, unknown commands,
       scrolling, and rendering.
 - [ ] F8d-3: interactive keyboard input. **Root cause found 2026-10-04:** the
-      kbd domain (task 5) is a *one-shot proof*, not a driver — it runs its
-      boot proofs, deliberately reads an unowned port to prove fault isolation
-      (`fault vector 13`), is restarted once, faults again, and dies. Nothing
-      drains the 8042 after boot, and even while it ran its bytes went to the
+      kbd domain (task 5) was a *one-shot proof*, not a driver — it ran its
+      boot proofs, deliberately read an unowned port to prove fault isolation
+      (`fault vector 13`), was restarted once, faulted again, and died. Nothing
+      drained the 8042 after boot, and even while it ran its bytes went to the
       serial shell, not the window. So typing in the graphical terminal does
       nothing today. Split into:
-      - [ ] F8d-3a: make the kbd domain persistent — a `.bss` "proofs done"
-        flag (which survives a restart, like `zc-blk`) so the first run keeps
-        the F6 fault proof and the restarted run enters an
-        `irq_wait → drain → push` loop, supervised by `initd`.
+      - [x] F8d-3a: make the kbd domain persistent. The keyboard domain is now
+        a supervised service (`zc_kernel::service::KBD_SERVICE`, revived by
+        `initd` after its deliberate boot fault). A `.bss` phase flag (which
+        survives the in-place revival, like `zc-blk`) makes the first run keep
+        the F6 fault proof and the revived run re-claim the sources and ports
+        the fault revoked, then enter an `irq_wait → drain → push` loop
+        (`kbd: serving`). Because a live driver would keep the boot from ever
+        finishing, `initd` stops the kbd service when the block driver stops,
+        so `fb: desktop checksum ok` still runs. The kernel-side restart budget
+        was removed (a supervised fault is revived by its supervisor); the
+        keyboard domain also publishes `/dev/kbd` through `devfs`.
       - [ ] F8d-3b: route the PS/2 stream to the focused window's terminal
         client (COM1 serial stays with the shell), and turn the client and
         compositor into an event loop that re-renders and re-composites on
@@ -572,6 +581,10 @@ full browser. Note them as follow-ups, do not build them here.
   `fb: desktop checksum ok` recomputes the taskbar (launcher, task button,
   clock) from `zc_abi::desktop::panel_color_at` and the window decorations
   from `Term::render`, and the taskbar and decoration host tests pass.
+- The keyboard domain is persistent and supervised (F8d-3a): the boot logs
+  `kbd: serving` after `initd: restarted kbd`, and `initd: kbd stopped` before
+  `fb: desktop checksum ok`, so a live driver is stopped at shutdown instead of
+  keeping the boot alive.
 - Clean shutdown: `power: halt clean`.
 - Audio plays a known tone and the driver reports no XRUN under a stress
   buffer: `snd: playback ok`.

@@ -7,18 +7,20 @@
 //! [`Modifiers`] machine, assembling mouse packets with the shared
 //! [`MouseAssembler`], and appending both to the ring page the kernel
 //! published. Keyboard bytes reach the shell; mouse frames are stripped by
-//! the kernel drain before the shell. When no input is pending there is
-//! nothing to drain, so the domain proves delivery by raising its own
-//! vectors and waiting for the real handlers to answer.
+//! the kernel drain before the shell.
 //!
 //! Port access is limited by the TSS bitmap: claiming the sources grants
 //! exactly 0x60 and 0x64, so a stray read of any other port faults instead
 //! of silently succeeding.
 //!
-//! After delivering input the domain deliberately reads a port nobody owns:
-//! that #GP is the live proof that a domain can die loudly while the kernel
-//! survives. It is a test the kernel asked for, not a device bug — the
-//! wrong read is *the* proof, not a mistake.
+//! Bring-up runs once and ends in a deliberate fault: reading a port nobody
+//! owns is the live proof that a domain can die loudly while the kernel
+//! survives, and that `initd` can revive it. It is a test the kernel asked
+//! for, not a device bug — the wrong read is *the* proof, not a mistake.
+//!
+//! The revived run is the persistent driver. It re-claims the sources and
+//! ports the fault revoked, then serves input for the rest of the boot in an
+//! `irq_wait → drain → push` loop until `initd` stops it at shutdown.
 
 #![no_std]
 #![no_main]
@@ -38,6 +40,18 @@ const DATA: u16 = 0x60;
 const OUTPUT_FULL: u8 = 0x01;
 /// Status bit set while the byte came from the auxiliary (mouse) port.
 const AUX_DATA: u8 = 0x20;
+
+/// Bring-up phase: zero until the boot proofs have run and the domain has
+/// faulted once.
+///
+/// The kernel revives a supervised service in the same address space and image
+/// frames, so a `.bss` word survives the restart. A revived run that sees this
+/// set resumes serving instead of redoing the proofs, which would fault it
+/// again and never reach the loop.
+const PHASE_SERVING: u8 = 1;
+
+/// Current bring-up phase, in `.bss` so it survives the supervisor restart.
+static mut PHASE: u8 = 0;
 
 /// View of the ring page the kernel mapped for this domain.
 fn shared_ring() -> &'static mut SharedInputRing {
@@ -85,9 +99,48 @@ fn drain(out: &mut SharedInputRing) -> u32 {
     count
 }
 
+/// Re-claims the input authority the fault revoked, then serves input.
+///
+/// The supervisor revived this slot in the same address space, but the fault
+/// path released the IRQ claims and the port bitmap, so the resumed run must
+/// claim them again before it can touch the 8042. It then waits on the keyboard
+/// line and drains whatever the controller holds; the mouse line is claimed too
+/// and its bytes are drained on the same pass.
+fn serve() -> ! {
+    if irq_claim(IRQ_KEYBOARD as u64) == u64::MAX {
+        log("kbd: resume keyboard claim refused\n");
+        task_exit()
+    }
+    if irq_claim(IRQ_MOUSE as u64) == u64::MAX {
+        log("kbd: resume mouse claim refused\n");
+        task_exit()
+    }
+    if port_claim(DATA, 2) == u64::MAX || port_claim(STATUS, 1) == u64::MAX {
+        log("kbd: resume ports not granted\n");
+        task_exit()
+    }
+    let ring = shared_ring();
+    log("kbd: serving\n");
+    loop {
+        // Blocking call: the task sleeps here until a keyboard interrupt is
+        // recorded and a later tick wakes it. Every wake drains the controller,
+        // so a byte queued while we slept is never left behind.
+        if irq_wait(IRQ_KEYBOARD as u64) == u64::MAX {
+            abort();
+        }
+        let _ = drain(ring);
+    }
+}
+
 /// Task entry point; the kernel provides a fresh user stack.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
+    // A revived run resumes serving: the proofs are done, and repeating them
+    // would fault this slot again before it ever served a keystroke.
+    if unsafe { core::ptr::addr_of!(PHASE).read() } == PHASE_SERVING {
+        serve()
+    }
+
     log("kbd starting\n");
 
     // Claiming the sources is what maps the ring page and grants the two
@@ -175,6 +228,11 @@ pub unsafe extern "C" fn _start() -> ! {
     // per-task bitmap followed us into ring 3: had the kernel's own TSS been
     // loaded instead, these reads would raise #GP and stop the boot.
     log("kbd: claimed ports readable, other ports still fault\n");
+
+    // Persist the phase before the deliberate fault, so the run `initd`
+    // revives resumes serving instead of faulting again.
+    // SAFETY: single-threaded; written once, immediately before the fault.
+    unsafe { core::ptr::addr_of_mut!(PHASE).write(PHASE_SERVING) };
 
     // Now the proof that a fault in this domain does not take the kernel
     // down: port 0 was claimed by no one, so this read raises #GP. Before

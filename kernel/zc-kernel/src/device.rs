@@ -78,10 +78,11 @@ pub const BLK_SETUP_GRANTS: usize = 0;
 
 /// Service grants the `initd` supervisor holds at spawn.
 ///
-/// One: authority over the block service. The supervisor names the service
-/// by id in the lifecycle syscalls, and the kernel checks this grant before
-/// touching the slot, so a task without it cannot start or stop a domain.
-pub const INITD_SETUP_GRANTS: usize = 1;
+/// Two: authority over the block service and the keyboard service. The
+/// supervisor names a service by id in the lifecycle syscalls, and the kernel
+/// checks this grant before touching the slot, so a task without it cannot
+/// start or stop a domain.
+pub const INITD_SETUP_GRANTS: usize = 2;
 
 /// Port grants the device manager holds at spawn: config for scanning plus
 /// the discovered BAR window with [`crate::capability::Rights::GRANT`] so it
@@ -151,9 +152,10 @@ mod tests {
         // bit-31 port ranges, so one object can never gate another path.
         assert_ne!(service.object(), irq_grant(zc_abi::IRQ_KEYBOARD).object());
         assert_ne!(service.object(), port_grant(0x60, 2).object());
-        // The supervisor may query status and start/stop its service.
+        // The supervisor may query status and start/stop its services.
         assert!(service.rights().contains(Rights::READ));
         assert!(service.rights().contains(Rights::WRITE));
-        assert_eq!(INITD_SETUP_GRANTS, 1);
+        // One grant per supervised service: block and keyboard.
+        assert_eq!(INITD_SETUP_GRANTS, 2);
     }
 }
