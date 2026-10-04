@@ -33,6 +33,10 @@ const PROMPT: (u8, u8, u8) = (120, 220, 140);
 const OUTPUT: (u8, u8, u8) = (176, 182, 192);
 /// Cursor block color.
 const CURSOR: (u8, u8, u8) = (120, 220, 140);
+/// Close-button glyph color.
+const CLOSE_FG: (u8, u8, u8) = (226, 96, 96);
+/// Minimize-button glyph color.
+const MIN_FG: (u8, u8, u8) = (226, 200, 120);
 
 /// Terminal width in character cells.
 const TERM_COLS: usize = 44;
@@ -142,7 +146,26 @@ impl Term {
             return BORDER;
         }
         if ly < TITLE_HEIGHT {
-            return title_bar_at(lx, ly);
+            let base = title_bar_at(lx, ly);
+            // Window decorations: minimize and close glyphs at the right end
+            // of the title bar. They are part of the shared render, so the
+            // kernel's verifier recomputes them with the client's pixels.
+            if w > 80 {
+                let ty = if TITLE_HEIGHT > GLYPH_H {
+                    (TITLE_HEIGHT - GLYPH_H) / 2
+                } else {
+                    0
+                };
+                let close_x = w - 2 - GLYPH_W - 4;
+                if lx >= close_x && lx < close_x + GLYPH_W && ly >= ty && ly < ty + GLYPH_H {
+                    return glyph_over(b'x', lx - close_x, ly - ty, base, CLOSE_FG);
+                }
+                let min_x = close_x - GLYPH_W - 4;
+                if lx >= min_x && lx < min_x + GLYPH_W && ly >= ty && ly < ty + GLYPH_H {
+                    return glyph_over(b'-', lx - min_x, ly - ty, base, MIN_FG);
+                }
+            }
+            return base;
         }
         let body_y = ly - TITLE_HEIGHT;
         if body_y < PAD_Y {
@@ -300,6 +323,16 @@ const fn starts_with(hay: &[u8], needle: &[u8]) -> bool {
     true
 }
 
+/// Overlays a single glyph on `base`, painting lit pixels `fg`.
+#[must_use]
+const fn glyph_over(ch: u8, gx: u32, gy: u32, base: (u8, u8, u8), fg: (u8, u8, u8)) -> (u8, u8, u8) {
+    if glyph_bit(ch, gy, gx) {
+        fg
+    } else {
+        base
+    }
+}
+
 /// Renders one title-bar pixel: the bar color with the terminal title text.
 #[must_use]
 pub const fn title_bar_at(lx: u32, ly: u32) -> (u8, u8, u8) {
@@ -399,6 +432,30 @@ mod tests {
         assert!(saw_output, "command output not rendered");
         assert!(saw_bg, "terminal background not rendered");
         assert!(saw_title_fg, "title text not rendered");
+    }
+
+    #[test]
+    fn title_bar_shows_minimize_and_close_glyphs() {
+        let term = Term::new();
+        let (w, h) = (300u32, 120u32);
+        let mut saw_close = false;
+        let mut saw_min = false;
+        let mut ly = 0;
+        while ly < TITLE_HEIGHT {
+            let mut lx = 0;
+            while lx < w {
+                let c = term.render(lx, ly, w, h);
+                if c == CLOSE_FG {
+                    saw_close = true;
+                } else if c == MIN_FG {
+                    saw_min = true;
+                }
+                lx += 1;
+            }
+            ly += 1;
+        }
+        assert!(saw_close, "close glyph not rendered");
+        assert!(saw_min, "minimize glyph not rendered");
     }
 
     #[test]

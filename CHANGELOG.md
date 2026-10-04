@@ -34,10 +34,24 @@ makes the client window a live graphical terminal: the kernel feeds it a
 scripted keystroke session over a new `SYS_TERM_READ`, the client drives a
 shared `zc-abi::terminal::Term` state machine and paints the result, and the
 kernel replays the same script through the same state machine to verify the
-window — so dynamic content stays a proof, not a trusted claim.
+window — so dynamic content stays a proof, not a trusted claim. F8f adds the
+desktop chrome: a taskbar (launcher, focused task button, clock) and window
+decorations (minimize and close), all deterministic and proven by the same
+checksum.
 
 ### Added
 
+- **Taskbar and window decorations** (F8f): the top panel is now a taskbar —
+  a launcher button (`ZC`), a task button for the focused window (`Terminal`),
+  and a clock — drawn with the F8c bitmap font in `zc_abi::desktop::panel_color_at`.
+  The window title bar gains minimize (`-`) and close (`x`) glyphs in
+  `Term::render`. Both are fully deterministic and route through the same
+  shared layout the kernel's frame verifier uses, so `fb: desktop checksum ok`
+  proves them: the taskbar is verified as part of the static desktop, and the
+  decorations as part of the window region. No compositor, client, or kernel
+  change was needed — the chrome lives entirely in the shared `zc-abi` layout.
+  Host tests assert the launcher, task button, labels, and background paint,
+  and that both decoration glyphs render.
 - **Live graphical terminal driven by input** (F8d-2): the client window is now
   driven by keystrokes rather than a fixed transcript. A new `SYS_TERM_READ`
   (30) serves the kernel's scripted session (`zc-abi::terminal::SCRIPT`), and

@@ -7,6 +7,7 @@
 
 use crate::PixelFormat;
 use crate::fb::encode;
+use crate::font::{GLYPH_H, text_blend, text_width};
 
 /// Height of the top panel, clamped for very short displays.
 pub const PANEL_HEIGHT: u32 = 32;
@@ -297,10 +298,91 @@ pub const fn window_color_at(lx: u32, ly: u32, w: u32, h: u32) -> (u8, u8, u8) {
     crate::terminal::INITIAL.render(lx, ly, w, h)
 }
 
+/// Height of a taskbar button.
+const BUTTON_H: u32 = 24;
+/// Left edge of the launcher button.
+const LAUNCHER_X: u32 = 4;
+/// Width of the launcher button.
+const LAUNCHER_W: u32 = 40;
+/// Left edge of the running-window task button.
+const TASK_X: u32 = 48;
+/// Width of the running-window task button.
+const TASK_W: u32 = 104;
+
+/// Taskbar background.
+const PANEL_BG: (u8, u8, u8) = (46, 50, 58);
+/// Launcher button fill.
+const LAUNCHER_BG: (u8, u8, u8) = (70, 130, 200);
+/// Focused task-button fill.
+const TASK_BG: (u8, u8, u8) = (58, 74, 104);
+/// Button label color.
+const BUTTON_FG: (u8, u8, u8) = (235, 238, 245);
+/// Clock text color.
+const CLOCK_FG: (u8, u8, u8) = (170, 176, 186);
+
+/// The launcher button label.
+const LAUNCHER_LABEL: &str = "ZC";
+/// The running window's taskbar label.
+const TASK_LABEL: &str = "Terminal";
+/// A fixed clock string. A live clock is a later step; a fixed value keeps the
+/// panel deterministic so the frame checksum covers it.
+const CLOCK_LABEL: &str = "12:00";
+
+/// Returns the `(red, green, blue)` channels of one top-panel (taskbar) pixel.
+///
+/// The panel is the taskbar: a launcher button, one task button for the
+/// focused window, and a clock. It is fully deterministic and drawn with the
+/// shared bitmap font, so the kernel's frame verifier recomputes it and the
+/// checksum proves it renders.
+#[must_use]
+pub const fn panel_color_at(x: u32, y: u32, width: u32, height: u32) -> (u8, u8, u8) {
+    let panel = panel_height(height);
+    if panel == 0 {
+        return PANEL_BG;
+    }
+    // Buttons sit in a band with a small vertical margin, clamped for short
+    // panels; the label is centered against a 16px cell.
+    let margin = if panel > BUTTON_H { (panel - BUTTON_H) / 2 } else { 0 };
+    let in_band = y >= margin && y < margin + BUTTON_H;
+    let ty = if panel > GLYPH_H { (panel - GLYPH_H) / 2 } else { 0 };
+
+    if in_band && x >= LAUNCHER_X && x < LAUNCHER_X + LAUNCHER_W {
+        return button_label(LAUNCHER_LABEL, LAUNCHER_X, LAUNCHER_W, x, y, ty, LAUNCHER_BG);
+    }
+    if in_band && x >= TASK_X && x < TASK_X + TASK_W {
+        return button_label(TASK_LABEL, TASK_X, TASK_W, x, y, ty, TASK_BG);
+    }
+    // Clock, right-aligned with an 8px margin.
+    let clock_w = text_width(CLOCK_LABEL);
+    if width > clock_w + 8 {
+        let clock_x = width - 8 - clock_w;
+        if x >= clock_x && x < clock_x + clock_w {
+            return text_blend(CLOCK_LABEL, clock_x, ty, x, y, PANEL_BG, CLOCK_FG);
+        }
+    }
+    PANEL_BG
+}
+
+/// Renders a centered button label over a fill color.
+#[must_use]
+const fn button_label(
+    label: &str,
+    x: u32,
+    w: u32,
+    px: u32,
+    py: u32,
+    ty: u32,
+    fill: (u8, u8, u8),
+) -> (u8, u8, u8) {
+    let tw = text_width(label);
+    let tx = if w > tw { x + (w - tw) / 2 } else { x + 2 };
+    text_blend(label, tx, ty, px, py, fill, BUTTON_FG)
+}
+
 /// Returns the `(red, green, blue)` channels of one desktop pixel.
 ///
-/// The layout is a background gradient, a top panel with a start button, and
-/// one window with a border, a title bar, and a body.
+/// The layout is a background gradient, a top taskbar, and one window with a
+/// border, a title bar, and a body.
 #[must_use]
 pub const fn color_at(x: u32, y: u32, width: u32, height: u32, frame: u32) -> (u8, u8, u8) {
     let window = window_rect(frame, width, height);
@@ -308,10 +390,7 @@ pub const fn color_at(x: u32, y: u32, width: u32, height: u32, frame: u32) -> (u
         return window_color_at(x - window.x, y - window.y, window.w, window.h);
     }
     if y < panel_height(height) {
-        if x < width / 8 {
-            return (70, 130, 200);
-        }
-        return (46, 50, 58);
+        return panel_color_at(x, y, width, height);
     }
     // Background: a vertical/horizontal gradient, guarded for empty sizes.
     let r = if width == 0 {
@@ -465,6 +544,38 @@ mod tests {
         }
         assert!(found_fg, "title text foreground not rendered");
         assert!(found_bar, "title bar background not preserved under text");
+    }
+
+    #[test]
+    fn taskbar_renders_launcher_task_button_and_clock() {
+        let (width, height) = (1280u32, 800u32);
+        let panel = panel_height(height);
+        let mut saw_launcher = false;
+        let mut saw_task = false;
+        let mut saw_label = false;
+        let mut saw_bg = false;
+        let mut y = 0;
+        while y < panel {
+            let mut x = 0;
+            while x < width {
+                let c = panel_color_at(x, y, width, height);
+                if c == LAUNCHER_BG {
+                    saw_launcher = true;
+                } else if c == TASK_BG {
+                    saw_task = true;
+                } else if c == BUTTON_FG {
+                    saw_label = true;
+                } else if c == PANEL_BG {
+                    saw_bg = true;
+                }
+                x += 1;
+            }
+            y += 1;
+        }
+        assert!(saw_launcher, "launcher button not painted");
+        assert!(saw_task, "task button not painted");
+        assert!(saw_label, "button labels not painted");
+        assert!(saw_bg, "panel background not painted");
     }
 
     #[test]

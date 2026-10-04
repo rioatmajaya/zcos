@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 5 grants`, `task 6: devmgr: blk published` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8d-2 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `wm: window mapped`; `wm: move ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: desktop checksum ok`; `zc-abi` font/terminal host tests pass |
+| **F8** | Desktop | 🔄 F8f done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `wm: window mapped`; `wm: move ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: desktop checksum ok`; `zc-abi` font/terminal/taskbar host tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -511,12 +511,39 @@ full browser. Note them as follow-ups, do not build them here.
       derives the expected content independently instead of trusting the
       client's surface. Host tests cover editing, `echo`, unknown commands,
       scrolling, and rendering.
-- [ ] F8d-3: route real blocking keyboard input (the kbd domain's PS/2 stream)
-      to the focused window's terminal client, replacing the kernel's scripted
-      session with an interactive one, and connect the terminal to the F7 VFS
-      so commands act on the filesystem.
+- [ ] F8d-3: interactive keyboard input. **Root cause found 2026-10-04:** the
+      kbd domain (task 5) is a *one-shot proof*, not a driver — it runs its
+      boot proofs, deliberately reads an unowned port to prove fault isolation
+      (`fault vector 13`), is restarted once, faults again, and dies. Nothing
+      drains the 8042 after boot, and even while it ran its bytes went to the
+      serial shell, not the window. So typing in the graphical terminal does
+      nothing today. Split into:
+      - [ ] F8d-3a: make the kbd domain persistent — a `.bss` "proofs done"
+        flag (which survives a restart, like `zc-blk`) so the first run keeps
+        the F6 fault proof and the restarted run enters an
+        `irq_wait → drain → push` loop, supervised by `initd`.
+      - [ ] F8d-3b: route the PS/2 stream to the focused window's terminal
+        client (COM1 serial stays with the shell), and turn the client and
+        compositor into an event loop that re-renders and re-composites on
+        input.
+      - [ ] F8d-3c: a proof model for genuinely interactive pixels — the kernel
+        cannot recompute non-deterministic content, so verify the window region
+        against the client's own surface frames (kernel-owned) instead: the
+        proof becomes "the compositor placed the client's pixels faithfully",
+        not "the kernel knows the exact screen". This is the tradeoff F8f
+        deliberately deferred.
+      - [ ] *(later)* connect the terminal to the F7 VFS so commands act on the
+        filesystem.
 - [ ] F8e: native Rust UI client library (widgets, event loop, no X11/Win32).
-- [ ] F8f: window decorations, focus, and an app launcher / taskbar.
+- [x] F8f: window decorations, focus, and a taskbar. The top panel is now a
+      taskbar — a launcher button (`ZC`), a task button for the focused window
+      (`Terminal`), and a clock — in `zc_abi::desktop::panel_color_at`; the
+      window title bar gains minimize (`-`) and close (`x`) glyphs in
+      `Term::render`. Both are deterministic and route through the shared
+      `zc-abi` layout the kernel verifies, so `fb: desktop checksum ok` proves
+      them with no compositor, client, or kernel change. Host tests cover the
+      taskbar buttons, labels, background, and both decoration glyphs. A live
+      (non-fixed) clock and multi-window focus are follow-ups.
 - [ ] F8g: fonts and assets loaded from the F7 VFS, not baked into binaries.
 - [ ] F8h: minimum daily apps — file manager, settings, clock/calendar.
 - [ ] F8i: audio stack (virtio-snd first, then HD Audio) after the desktop is
@@ -541,6 +568,10 @@ full browser. Note them as follow-ups, do not build them here.
   that script through the shared `zc-abi::terminal::Term` state machine, so the
   input → command → render path is proven end to end. The `zc-abi` font and
   terminal host tests pass.
+- The desktop chrome renders and is proven (F8f): the same
+  `fb: desktop checksum ok` recomputes the taskbar (launcher, task button,
+  clock) from `zc_abi::desktop::panel_color_at` and the window decorations
+  from `Term::render`, and the taskbar and decoration host tests pass.
 - Clean shutdown: `power: halt clean`.
 - Audio plays a known tone and the driver reports no XRUN under a stress
   buffer: `snd: playback ok`.

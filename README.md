@@ -120,7 +120,9 @@ live graphical terminal: the kernel feeds a scripted keystroke session over
 machine (prompt editing, `help`/`echo`, scrolling) and paints the result, and
 the kernel replays the same script through the same state machine to verify the
 window — so dynamic client content stays a proof rather than a trusted claim.
-See [ADR 0016](docs/adr/0016-window-client-delegation.md).
+F8f adds the desktop chrome: a taskbar (launcher, focused task button, clock)
+and window decorations (minimize and close), deterministic and proven by the
+same checksum. See [ADR 0016](docs/adr/0016-window-client-delegation.md).
 
 ## Development
 
