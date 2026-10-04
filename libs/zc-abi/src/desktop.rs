@@ -7,7 +7,6 @@
 
 use crate::PixelFormat;
 use crate::fb::encode;
-use crate::font::GLYPH_H;
 
 /// Height of the top panel, clamped for very short displays.
 pub const PANEL_HEIGHT: u32 = 32;
@@ -286,6 +285,12 @@ pub const fn window_rect(frame: u32, width: u32, height: u32) -> Rect {
 /// Coordinates are local to the window's top-left corner. The window content is
 /// independent of where the window sits, so a client can paint its own surface
 /// with these pixels and the compositor can blit that surface anywhere.
+///
+/// The interior is the deterministic terminal transcript
+/// ([`crate::terminal`]): the title bar carries the window label and the body
+/// renders the shell's `help` output. Both the compositor and the kernel's
+/// frame verifier route through this function, so the window content is proven
+/// rather than assumed.
 #[must_use]
 pub const fn window_color_at(lx: u32, ly: u32, w: u32, h: u32) -> (u8, u8, u8) {
     // A window narrower than its border has no interior; every pixel is border.
@@ -297,19 +302,9 @@ pub const fn window_color_at(lx: u32, ly: u32, w: u32, h: u32) -> (u8, u8, u8) {
         return (28, 30, 38);
     }
     if ly < TITLE_HEIGHT {
-        // Title bar with a centered label. The label is part of the
-        // deterministic layout, so the kernel's frame checksum proves it
-        // renders: the compositor and the verifier both route through here.
-        let bar = (70, 110, 180);
-        let fg = (235, 238, 245);
-        let text = "ZC OS";
-        // Center the label within the title bar: 8px left margin, vertically
-        // centered against the 16px cell when the bar is at least that tall.
-        let tx = 8;
-        let ty = if TITLE_HEIGHT > GLYPH_H { (TITLE_HEIGHT - GLYPH_H) / 2 } else { 0 };
-        return crate::font::text_blend(text, tx, ty, lx, ly, bar, fg);
+        return crate::terminal::title_bar_at(lx, ly);
     }
-    (210, 212, 218)
+    crate::terminal::body_at(lx, ly)
 }
 
 /// Returns the `(red, green, blue)` channels of one desktop pixel.

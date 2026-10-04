@@ -112,9 +112,12 @@ surface to a client task (`user/zc-win`) with `SYS_CAP_DELEGATE`, and the client
 paints it over two dedicated IPC channels. The compositor composites and moves
 the client's window, and the same kernel checksum proves the delegated pixels
 reached the screen. F8c adds a 2D renderer: `zc-abi::font` embeds a VGA 8x16
-bitmap font and a pure `text_blend` overlay, so the window title label `ZC OS`
-renders through the same `window_color_at` the kernel's frame verifier calls —
-text is proven by `fb: desktop checksum ok`, not assumed. See
+bitmap font and a pure `text_blend` overlay, so the window title label renders
+through the same `window_color_at` the kernel's frame verifier calls — text is
+proven by `fb: desktop checksum ok`, not assumed. F8d starts the graphical
+terminal: the client window now renders a deterministic transcript (a
+`Terminal` title bar, a prompt, and the shell's `help` output with a cursor)
+from `zc-abi::terminal`, proven by the same checksum. See
 [ADR 0016](docs/adr/0016-window-client-delegation.md).
 
 ## Development

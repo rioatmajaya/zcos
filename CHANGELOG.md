@@ -29,10 +29,24 @@ the window manager and the first client window, painted by a second task over a
 delegated surface. F8b adds the PS/2 mouse to the input domain. F8c adds a
 2D renderer: a bitmap font and a pure text overlay the compositor and the
 kernel's frame verifier share, so the window title label renders as part of the
-single-source-of-truth desktop layout and is proven by the same checksum.
+single-source-of-truth desktop layout and is proven by the same checksum. F8d
+starts the graphical terminal: the client window now renders a deterministic
+terminal transcript — a `Terminal` title bar, a prompt, and the shell's `help`
+output — through the same shared layout, so the window content is proven by the
+frame checksum.
 
 ### Added
 
+- **Graphical terminal window** (F8d-1): `zc-abi::terminal` holds the
+  deterministic terminal content the client window renders: a `Terminal` title
+  bar and a body with a prompt, the shell's `help` output, and a steady cursor
+  block, all drawn with the F8c bitmap font on a dark background. Because the
+  client paints its surface with `window_pixel_at` and the kernel verifies the
+  frame with `window_color_at`, both route through this one module, so the
+  transcript is proven by `fb: desktop checksum ok` rather than assumed. Host
+  tests assert the prompt, output, and background all paint, and that the
+  padding stays dark. Live input routing and command execution are the next
+  F8d step.
 - **2D renderer with a bitmap font and text overlay** (F8c): `zc-abi::font`
   embeds the standard VGA 8x16 glyph set (ASCII `0x20`..=`0x7F`, carried over
   from the earlier prototype's `font8x16.raw`) and exposes `glyph_row`,

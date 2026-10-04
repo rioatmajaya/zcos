@@ -19,6 +19,7 @@ pub mod ipc;
 pub mod service;
 pub mod surface;
 pub mod syscall;
+pub mod terminal;
 pub mod vfs;
 
 pub use driver::{
