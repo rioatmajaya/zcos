@@ -281,6 +281,13 @@ static mut RESTART_BUDGET: [u8; TASK_COUNT] = [0; TASK_COUNT];
 /// the same page at [`zc_abi::INPUT_RING_VIRT`] and writes there.
 static mut INPUT_RING_PHYS: u64 = 0;
 
+/// Per-task cursor into the scripted terminal session.
+///
+/// `SYS_TERM_READ` hands the terminal client the next keystroke of
+/// [`zc_abi::terminal::SCRIPT`]; the kernel replays the same script when it
+/// verifies the window, so client and verifier agree on the final screen.
+static mut TERM_CURSORS: [u64; TASK_COUNT] = [0; TASK_COUNT];
+
 /// Ticks after task start that trigger the timeout path instead of waiting.
 ///
 /// Sized generously: slow emulation still finishes the scripted session
@@ -1653,6 +1660,23 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             regs.set_result(0);
             0
         }
+        Ok(Action::TermRead) => {
+            use zc_abi::terminal::SCRIPT;
+            let me = tasks.current();
+            // SAFETY: owned here; interrupts are masked through this arm.
+            let cursors = unsafe { &mut *addr_of_mut!(TERM_CURSORS) };
+            let cursor = &mut cursors[me];
+            if (*cursor as usize) < SCRIPT.len() {
+                let byte = SCRIPT[*cursor as usize];
+                *cursor += 1;
+                regs.set_result(u64::from(byte));
+            } else {
+                // The scripted session is over; a real terminal would block
+                // here instead.
+                regs.set_result(u64::MAX);
+            }
+            0
+        }
         Ok(_) => {
             regs.set_result(u64::MAX);
             0
@@ -1825,8 +1849,17 @@ pub unsafe extern "C" fn user_finished() -> ! {
 /// window, so a compositor that forgot to repaint the window's old position
 /// leaves stale pixels and fails the hash — this is the proof that damage
 /// tracking is correct, not just that some colors changed.
+///
+/// The window region is no longer deterministic: it holds the client's live
+/// terminal. The kernel replays the *same* script it served through
+/// `SYS_TERM_READ` through the *same* shared state machine
+/// ([`zc_abi::terminal::Term`]) the client used, so the expected window pixels
+/// are derived independently rather than trusted from the client. A client
+/// that drops a key, mis-runs a command, or paints the wrong pixels diverges
+/// and fails the hash.
 fn verify_framebuffer() {
-    use zc_abi::{FRAME_MOVED, HASH_OFFSET, hash_step, pixel_at};
+    use zc_abi::terminal::{SCRIPT, Term};
+    use zc_abi::{FRAME_MOVED, HASH_OFFSET, hash_step, pixel_at, window_rect};
 
     // SAFETY: published once during setup before any task ran.
     let info = unsafe { core::ptr::addr_of!(FB_INFO).read() };
@@ -1834,26 +1867,49 @@ fn verify_framebuffer() {
         crate::serial::write_str("fb: unavailable, skipped\n");
         return;
     }
+    // Rebuild the terminal screen the client should be showing.
+    let mut terminal = Term::new();
+    let mut key = 0;
+    while key < SCRIPT.len() {
+        terminal.push_key(SCRIPT[key]);
+        key += 1;
+    }
+    let window = window_rect(FRAME_MOVED, info.width, info.height);
+
     let width = u64::from(info.width);
     let height = u64::from(info.height);
     let stride = u64::from(info.stride);
-    let mut expected = HASH_OFFSET;
+    let mut want = HASH_OFFSET;
     let mut actual = HASH_OFFSET;
     let mut y = 0;
     while y < height {
         let mut x = 0;
         while x < width {
-            let Some(pixel) = pixel_at(
-                info.pixel_format,
-                x as u32,
-                y as u32,
-                info.width,
-                info.height,
-                FRAME_MOVED,
-            ) else {
-                crate::fail("unsupported fb format");
+            let pixel = if window.contains(x as u32, y as u32) {
+                match terminal.pixel(
+                    info.pixel_format,
+                    x as u32 - window.x,
+                    y as u32 - window.y,
+                    window.w,
+                    window.h,
+                ) {
+                    Some(pixel) => pixel,
+                    None => crate::fail("unsupported fb format"),
+                }
+            } else {
+                match pixel_at(
+                    info.pixel_format,
+                    x as u32,
+                    y as u32,
+                    info.width,
+                    info.height,
+                    FRAME_MOVED,
+                ) {
+                    Some(pixel) => pixel,
+                    None => crate::fail("unsupported fb format"),
+                }
             };
-            expected = hash_step(expected, pixel);
+            want = hash_step(want, pixel);
             // SAFETY: the setup mapped exactly this range with user
             // permissions; the identity map covers it for the check.
             let seen =
@@ -1863,7 +1919,7 @@ fn verify_framebuffer() {
         }
         y += 1;
     }
-    if expected != actual {
+    if want != actual {
         crate::fail("desktop checksum mismatch");
     }
     let _ = crate::serial::print(format_args!(

@@ -99,6 +99,12 @@ pub const SYS_SURFACE_MAP: u64 = 28;
 /// Only the task that created the surface may destroy it, and its frames are
 /// returned to the allocator.
 pub const SYS_SURFACE_DESTROY: u64 = 29;
+/// Reads the next terminal keystroke, returning the byte or `u64::MAX` when the
+/// kernel's scripted session is exhausted. The boot proof feeds a fixed script
+/// ([`crate::terminal::SCRIPT`]) so the client and the kernel's frame verifier
+/// derive the same final screen; a real interactive terminal will block here
+/// instead.
+pub const SYS_TERM_READ: u64 = 30;
 
 /// Error codes returned by failed syscalls.
 ///
@@ -184,6 +190,7 @@ mod tests {
         assert_eq!(SYS_SURFACE_CREATE, 27);
         assert_eq!(SYS_SURFACE_MAP, 28);
         assert_eq!(SYS_SURFACE_DESTROY, 29);
+        assert_eq!(SYS_TERM_READ, 30);
     }
 
     #[test]

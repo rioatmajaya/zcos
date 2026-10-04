@@ -286,25 +286,15 @@ pub const fn window_rect(frame: u32, width: u32, height: u32) -> Rect {
 /// independent of where the window sits, so a client can paint its own surface
 /// with these pixels and the compositor can blit that surface anywhere.
 ///
-/// The interior is the deterministic terminal transcript
-/// ([`crate::terminal`]): the title bar carries the window label and the body
-/// renders the shell's `help` output. Both the compositor and the kernel's
-/// frame verifier route through this function, so the window content is proven
-/// rather than assumed.
+/// The interior is the terminal's initial screen ([`crate::terminal::INITIAL`]):
+/// the title bar carries the window label and the body an empty prompt. This is
+/// the deterministic placeholder the compositor draws before it blits the
+/// client's own (live) terminal surface over the window; the kernel's frame
+/// verifier replaces the window region with the client's expected terminal
+/// state, so the live content is proven rather than assumed.
 #[must_use]
 pub const fn window_color_at(lx: u32, ly: u32, w: u32, h: u32) -> (u8, u8, u8) {
-    // A window narrower than its border has no interior; every pixel is border.
-    // The guard also keeps `w - 2` from underflowing for degenerate sizes.
-    if w < 2 || h < 2 {
-        return (28, 30, 38);
-    }
-    if lx < 2 || lx >= w - 2 || ly < 2 || ly >= h - 2 {
-        return (28, 30, 38);
-    }
-    if ly < TITLE_HEIGHT {
-        return crate::terminal::title_bar_at(lx, ly);
-    }
-    crate::terminal::body_at(lx, ly)
+    crate::terminal::INITIAL.render(lx, ly, w, h)
 }
 
 /// Returns the `(red, green, blue)` channels of one desktop pixel.

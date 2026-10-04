@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 5 grants`, `task 6: devmgr: blk published` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8d-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: window painted`; `wm: window mapped`; `wm: move ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: desktop checksum ok`; `zc-abi` font/terminal host tests pass |
+| **F8** | Desktop | 🔄 F8d-2 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `wm: window mapped`; `wm: move ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: desktop checksum ok`; `zc-abi` font/terminal host tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -487,7 +487,7 @@ full browser. Note them as follow-ups, do not build them here.
 - [x] F8c: 2D renderer with a bitmap font and text overlay. `zc-abi::font`
       embeds the VGA 8x16 glyph set and exposes `glyph_row`/`glyph_bit`/
       `text_blend`/`text_width` as pure `const`-callable helpers; the window
-      title bar renders the label `ZC OS` through `window_color_at`, which both
+      title bar renders a title label through `window_color_at`, which both
       the compositor and the kernel's frame verifier call, so the text is proven
       by `fb: desktop checksum ok`. Host tests assert the glyph strokes paint
       and the bar color survives. TrueType `glyf` shaping is deferred to the
@@ -500,10 +500,21 @@ full browser. Note them as follow-ups, do not build them here.
       kernel verifies with `window_color_at`, so both route through the one
       module and the transcript is proven by `fb: desktop checksum ok`. Host
       tests assert the prompt, output, background, and padding.
-- [ ] F8d-2: graphical terminal speaking the existing shell protocol — route
-      keyboard input from the compositor to the terminal client and drive a
-      real command (dynamic content needs a proof model for non-deterministic
-      client pixels).
+- [x] F8d-2: live graphical terminal driven by input. `SYS_TERM_READ` (30)
+      serves the kernel's scripted keystroke session
+      (`zc-abi::terminal::SCRIPT`); `zc-abi::terminal::Term` is a shared,
+      allocation-free state machine (prompt editing, backspace, `help`/`echo`,
+      scrolling) that both the client and the kernel run. The client applies
+      the keys it reads and paints `Term::pixel`; the kernel replays the same
+      script and verifies the window region against `Term::render`, which is
+      the new proof model for non-deterministic client pixels — the kernel
+      derives the expected content independently instead of trusting the
+      client's surface. Host tests cover editing, `echo`, unknown commands,
+      scrolling, and rendering.
+- [ ] F8d-3: route real blocking keyboard input (the kbd domain's PS/2 stream)
+      to the focused window's terminal client, replacing the kernel's scripted
+      session with an interactive one, and connect the terminal to the F7 VFS
+      so commands act on the filesystem.
 - [ ] F8e: native Rust UI client library (widgets, event loop, no X11/Win32).
 - [ ] F8f: window decorations, focus, and an app launcher / taskbar.
 - [ ] F8g: fonts and assets loaded from the F7 VFS, not baked into binaries.
@@ -524,10 +535,12 @@ full browser. Note them as follow-ups, do not build them here.
 - Text renders on the desktop and is proven by the frame verifier:
   `fb: desktop checksum ok` (which recomputes `window_color_at` including the
   title label), plus `zc-abi` font and `text_blend` host tests passing.
-- The client window renders the terminal transcript (F8d-1): the same
-  `fb: desktop checksum ok` recomputes the `Terminal` title bar and the prompt/
-  output body from `zc-abi::terminal`, and the `zc-abi` terminal host tests
-  pass.
+- The client window is a live terminal (F8d-1/F8d-2): the client logs
+  `client: terminal ready` after consuming the kernel's scripted session, and
+  the same `fb: desktop checksum ok` recomputes the window region by replaying
+  that script through the shared `zc-abi::terminal::Term` state machine, so the
+  input → command → render path is proven end to end. The `zc-abi` font and
+  terminal host tests pass.
 - Clean shutdown: `power: halt clean`.
 - Audio plays a known tone and the driver reports no XRUN under a stress
   buffer: `snd: playback ok`.

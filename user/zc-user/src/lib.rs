@@ -16,8 +16,9 @@ pub use zc_abi::{
     SYS_CREATE, SYS_FB_INFO, SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME,
     SYS_MOUNT, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ, SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO,
     SYS_SERIAL_READ, SYS_SERVICE_START, SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT,
-    SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_UMOUNT, SYS_WRITE,
-    SYS_YIELD, Stat, SurfaceInfo, SyscallError, WM_ACK, supervise_kind, supervise_service,
+    SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TERM_READ,
+    SYS_UMOUNT, SYS_WRITE, SYS_YIELD, Stat, SurfaceInfo, SyscallError, WM_ACK, supervise_kind,
+    supervise_service,
 };
 
 /// Issues a syscall with no arguments.
@@ -156,6 +157,17 @@ pub fn stat(path: &str, stat: &mut Stat) -> bool {
 #[inline(always)]
 pub fn serial_read() -> u8 {
     syscall0(SYS_SERIAL_READ) as u8
+}
+
+/// Reads the next terminal keystroke, or `u64::MAX` when the scripted session
+/// the kernel serves is exhausted.
+///
+/// The boot proof drives the window client from a fixed script so the client
+/// and the kernel's frame verifier derive the same terminal screen; a real
+/// interactive terminal will block here instead.
+#[inline(always)]
+pub fn term_read() -> u64 {
+    syscall0(SYS_TERM_READ)
 }
 
 /// Closes a descriptor, returning 0 or `u64::MAX` on failure.

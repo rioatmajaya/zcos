@@ -60,6 +60,20 @@ pub const fn text_blend(
     base: (u8, u8, u8),
     fg: (u8, u8, u8),
 ) -> (u8, u8, u8) {
+    text_blend_bytes(text.as_bytes(), ox, oy, px, py, base, fg)
+}
+
+/// [`text_blend`] over a raw byte slice, for text a task assembled at runtime.
+#[must_use]
+pub const fn text_blend_bytes(
+    text: &[u8],
+    ox: u32,
+    oy: u32,
+    px: u32,
+    py: u32,
+    base: (u8, u8, u8),
+    fg: (u8, u8, u8),
+) -> (u8, u8, u8) {
     let len = text.len() as u32;
     if len == 0 {
         return base;
@@ -70,7 +84,7 @@ pub const fn text_blend(
     }
     let col = (px - ox) / GLYPH_W;
     let row = py - oy;
-    let ch = text.as_bytes()[col as usize];
+    let ch = text[col as usize];
     if glyph_bit(ch, row, px - ox - col * GLYPH_W) {
         fg
     } else {
@@ -81,6 +95,12 @@ pub const fn text_blend(
 /// Width in pixels the string `text` occupies at this font's cell size.
 #[must_use]
 pub const fn text_width(text: &str) -> u32 {
+    text_width_bytes(text.as_bytes())
+}
+
+/// [`text_width`] for a raw byte slice.
+#[must_use]
+pub const fn text_width_bytes(text: &[u8]) -> u32 {
     text.len() as u32 * GLYPH_W
 }
 

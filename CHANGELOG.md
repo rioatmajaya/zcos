@@ -30,13 +30,30 @@ delegated surface. F8b adds the PS/2 mouse to the input domain. F8c adds a
 2D renderer: a bitmap font and a pure text overlay the compositor and the
 kernel's frame verifier share, so the window title label renders as part of the
 single-source-of-truth desktop layout and is proven by the same checksum. F8d
-starts the graphical terminal: the client window now renders a deterministic
-terminal transcript — a `Terminal` title bar, a prompt, and the shell's `help`
-output — through the same shared layout, so the window content is proven by the
-frame checksum.
+makes the client window a live graphical terminal: the kernel feeds it a
+scripted keystroke session over a new `SYS_TERM_READ`, the client drives a
+shared `zc-abi::terminal::Term` state machine and paints the result, and the
+kernel replays the same script through the same state machine to verify the
+window — so dynamic content stays a proof, not a trusted claim.
 
 ### Added
 
+- **Live graphical terminal driven by input** (F8d-2): the client window is now
+  driven by keystrokes rather than a fixed transcript. A new `SYS_TERM_READ`
+  (30) serves the kernel's scripted session (`zc-abi::terminal::SCRIPT`), and
+  `zc-abi::terminal::Term` is a shared, allocation-free state machine — prompt
+  editing, backspace, `help`/`echo` commands, and scrolling — that both the
+  client and the kernel run. The client applies the keys it reads and paints
+  `Term::pixel`; the kernel replays the same script and verifies the window
+  region against `Term::render`, so a client that drops a key or mis-renders
+  fails `fb: desktop checksum ok` instead of shipping silently. This is the new
+  proof model for non-deterministic client pixels: the kernel derives the
+  expected content independently instead of trusting the client's surface.
+  `window_color_at` is now the deterministic placeholder the compositor draws
+  before it blits the client's live surface. Host tests cover prompt editing,
+  backspace, `echo`, unknown commands, scrolling, and rendering. Routing real
+  blocking keyboard input is the follow-up; this proves the input → command →
+  render path deterministically.
 - **Graphical terminal window** (F8d-1): `zc-abi::terminal` holds the
   deterministic terminal content the client window renders: a `Terminal` title
   bar and a body with a prompt, the shell's `help` output, and a steady cursor
@@ -45,8 +62,7 @@ frame checksum.
   frame with `window_color_at`, both route through this one module, so the
   transcript is proven by `fb: desktop checksum ok` rather than assumed. Host
   tests assert the prompt, output, and background all paint, and that the
-  padding stays dark. Live input routing and command execution are the next
-  F8d step.
+  padding stays dark.
 - **2D renderer with a bitmap font and text overlay** (F8c): `zc-abi::font`
   embeds the standard VGA 8x16 glyph set (ASCII `0x20`..=`0x7F`, carried over
   from the earlier prototype's `font8x16.raw`) and exposes `glyph_row`,
