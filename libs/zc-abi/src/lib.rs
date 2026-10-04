@@ -41,7 +41,7 @@ pub use desktop::{
 pub use font::{GLYPH_H, GLYPH_W, glyph_bit, glyph_row, text_blend, text_width};
 pub use ipc::{
     IPC_CHANNELS, IPC_DATA, IPC_DISCOVERY, IPC_FS, IPC_FS_REPLY, IPC_SUPERVISE, IPC_WM,
-    IPC_WM_REPLY, MESSAGE_WORDS, Message, WM_ACK,
+    IPC_WM_REPLY, MESSAGE_WORDS, Message, WM_ACK, WM_DONE,
 };
 pub use service::{
     SERVICE_KIND_EXIT, SERVICE_KIND_FAULT, service_cap, supervise_event, supervise_kind,

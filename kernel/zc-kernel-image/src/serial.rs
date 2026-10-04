@@ -153,20 +153,6 @@ pub fn poll_input() {
     }
 }
 
-/// Appends bytes a driver domain produced into the shared ring.
-///
-/// Called from the timer tick so a domain's translated keystrokes reach the
-/// same stream COM1 bytes use, without the driver writing kernel memory.
-pub fn push_input(bytes: &[u8]) {
-    // SAFETY: owned here; the caller runs with interrupts masked and the
-    // kernel is the only consumer, so the ring has a single producer per
-    // wakeup.
-    let ring = unsafe { &mut *core::ptr::addr_of_mut!(INPUT_RING) };
-    for byte in bytes {
-        ring.push(*byte);
-    }
-}
-
 /// Returns whether the receive ring holds a byte.
 pub fn input_available() -> bool {
     // SAFETY: read-only and interrupt-masked here.

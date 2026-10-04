@@ -39,10 +39,29 @@ desktop chrome: a taskbar (launcher, focused task button, clock) and window
 decorations (minimize and close), all deterministic and proven by the same
 checksum. F8d-3a makes the keyboard domain persistent: a supervised service
 `initd` revives after its boot fault, which then serves input for the rest of
-the boot until the supervisor stops it at shutdown.
+the boot until the supervisor stops it at shutdown. F8d-3b wires that live
+keyboard to the window: the kernel routes PS/2 bytes to a per-window input
+queue instead of the serial ring, `SYS_TERM_READ` serves the window queue, and
+the client and compositor become event loops that repaint on each keystroke
+until the session closes.
 
 ### Added
 
+- **Input-driven window session** (F8d-3b): the window terminal is now driven
+  by real input routing rather than a kernel-only script feed. The kernel
+  splits the input domain's byte stream: mouse frames are consumed for the
+  cursor, and keyboard bytes are routed to a per-window queue
+  (`zc_kernel::input::route`, host-tested) instead of the COM1 ring the shell
+  reads. `SYS_TERM_READ` (30) now serves that window queue after the scripted
+  session and blocks while the window is open, so the client reads one
+  keystroke at a time. `zc-win` repaints and sends `WM_ACK` per keystroke;
+  `zcompositor` runs an event loop that re-composites the window at its moved
+  position and flushes only that rectangle on every `WM_ACK`, and stops on the
+  new `WM_DONE`. When the shell exits, the kernel closes the window session, so
+  the client's read returns `u64::MAX`, it paints its final frame and exits,
+  and the compositor follows. The frame checksum still recomputes the expected
+  window from the shared `Term` state machine, so the event-driven pixels stay
+  a proof.
 - **Persistent keyboard driver, supervised by `initd`** (F8d-3a): the kbd
   domain is no longer a one-shot proof that faults and dies. It still runs its
   boot proofs and faults deliberately once (the F6 fault-isolation proof), but

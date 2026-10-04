@@ -4,9 +4,12 @@
 //! It creates a full-screen back buffer through the capability-gated surface
 //! syscall and a separate window surface it delegates to a client task. The
 //! client paints the window; the compositor composites it, moves it between two
-//! proof frames, and flushes only the damaged regions. The kernel's frame
-//! checksum recomputes the expected final frame, so both damage tracking and
-//! the delegated window pixels are proven rather than assumed.
+//! proof frames, and flushes only the damaged regions. After the move it runs
+//! an event loop: every [`WM_ACK`] from the client re-composites the window at
+//! its new position and flushes just that rectangle, and [`WM_DONE`] ends the
+//! session. The kernel's frame checksum recomputes the expected final frame, so
+//! both damage tracking and the delegated window pixels are proven rather than
+//! assumed.
 
 #![no_std]
 #![no_main]
@@ -14,7 +17,7 @@
 
 use zc_abi::{
     DamageList, FRAME_INITIAL, FRAME_MOVED, FramebufferInfo, IPC_WM, IPC_WM_REPLY, PixelFormat,
-    Rect, SurfaceInfo, WM_ACK, pixel_at, window_rect,
+    Rect, SurfaceInfo, WM_ACK, WM_DONE, pixel_at, window_rect,
 };
 use zc_user::{
     cap_delegate, framebuffer_info, log, recv_from, send_to, surface_create, surface_destroy,
@@ -33,9 +36,13 @@ const WINDOW_CLIENT_TASK: u64 = 8;
 /// Task entry point; the kernel provides a fresh user stack.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
+    // The client blocks on `IPC_WM` for its surface id, so every failure before
+    // the handshake must release it with a zero object; otherwise the client
+    // waits for a window that will never arrive and the boot never finishes.
     let mut fb = FramebufferInfo::UNAVAILABLE;
     if !framebuffer_info(&mut fb) || !fb.is_available() {
         log("compositor: fb unavailable\n");
+        let _ = send_to(IPC_WM as u64, 0);
         task_exit()
     }
     let format = fb.pixel_format;
@@ -45,12 +52,14 @@ pub unsafe extern "C" fn _start() -> ! {
     // than paint nothing.
     if pixel_at(format, 0, 0, width, height, FRAME_INITIAL).is_none() {
         log("compositor: unsupported format\n");
+        let _ = send_to(IPC_WM as u64, 0);
         task_exit()
     }
 
     let created = surface_create(width, height, format as u32);
     if created == u64::MAX {
         log("compositor: surface create failed\n");
+        let _ = send_to(IPC_WM as u64, 0);
         task_exit()
     }
     let object = created as u32;
@@ -58,40 +67,47 @@ pub unsafe extern "C" fn _start() -> ! {
     let mapped = surface_map(object, Some(&mut surface));
     if mapped == u64::MAX || !surface.is_available() {
         log("compositor: surface map failed\n");
+        let _ = send_to(IPC_WM as u64, 0);
         task_exit()
     }
     log_surface(width, height, surface.stride, mapped);
 
     let back = mapped as *mut u32;
     let full = Rect::new(0, 0, width, height);
-    let window = window_rect(FRAME_MOVED, width, height);
+    let moved = window_rect(FRAME_MOVED, width, height);
 
     // The window is a separate surface the compositor hands to a client: it
     // creates the surface, delegates a read/write capability, and assigns the
     // object id over the window channel. The client paints into it and
-    // acknowledges, so the compositor composites the client's own pixels.
-    let window_object = surface_create(window.w, window.h, format as u32);
+    // acknowledges, so the compositor composites the client's own pixels. Map
+    // it up front so the pixels are held before the first frame arrives.
+    let window_object = surface_create(moved.w, moved.h, format as u32);
     if window_object == u64::MAX {
         log("compositor: window create failed\n");
+        let _ = send_to(IPC_WM as u64, 0);
         task_exit()
     }
     let window_object = window_object as u32;
     if cap_delegate(window_object, WINDOW_CLIENT_TASK, 0x3) != 0 {
         log("compositor: window delegate failed\n");
-        task_exit()
-    }
-    let _ = send_to(IPC_WM as u64, u64::from(window_object));
-    if recv_from(IPC_WM_REPLY as u64) != WM_ACK {
-        log("compositor: client did not acknowledge\n");
+        let _ = send_to(IPC_WM as u64, 0);
         task_exit()
     }
     let mut window_surface = SurfaceInfo::UNAVAILABLE;
     let window_mapped = surface_map(window_object, Some(&mut window_surface));
     if window_mapped == u64::MAX || !window_surface.is_available() {
         log("compositor: window map failed\n");
+        let _ = send_to(IPC_WM as u64, 0);
         task_exit()
     }
     let window_pixels = window_mapped as *const u32;
+
+    // Hand the client its object id, then wait for its first painted frame.
+    let _ = send_to(IPC_WM as u64, u64::from(window_object));
+    if recv_from(IPC_WM_REPLY as u64) != WM_ACK {
+        log("compositor: client did not acknowledge\n");
+        task_exit()
+    }
 
     // Frame 0: paint the whole desktop into the back buffer, overlay the
     // client's window, and present it.
@@ -126,7 +142,7 @@ pub unsafe extern "C" fn _start() -> ! {
         surface.stride,
         window_pixels,
         window_surface.stride,
-        window_rect(FRAME_MOVED, width, height),
+        moved,
         width,
         height,
     );
@@ -142,6 +158,28 @@ pub unsafe extern "C" fn _start() -> ! {
         log_damage(drawn, total);
     }
     log("wm: move ok\n");
+
+    // Event loop: the client repaints on every keystroke and acknowledges, so
+    // re-composite its window at the moved position and flush only that
+    // rectangle. `WM_DONE` means the client's session closed; composite the
+    // final frame it painted before it exited and stop.
+    loop {
+        let message = recv_from(IPC_WM_REPLY as u64);
+        blit_window(
+            back,
+            surface.stride,
+            window_pixels,
+            window_surface.stride,
+            moved,
+            width,
+            height,
+        );
+        blit_rect(back, &fb, surface.stride, moved);
+        if message == WM_DONE {
+            break;
+        }
+        log("compositor: frame updated\n");
+    }
 
     // Both surfaces are no longer needed once the display holds the final
     // frame; returning their frames proves destroy works and leaves nothing.

@@ -645,6 +645,13 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             // `initd` wakes. A task that is not a supervised service posts
             // nothing.
             post_supervise(me as usize, SERVICE_KIND_EXIT);
+            // The shell anchors the window input session: when it exits there
+            // is no more input to route, so a client blocked in `SYS_TERM_READ`
+            // must observe the end instead of waiting forever. `exit_current`
+            // then unblocks every task, so the client's retry sees it closed.
+            if me as usize == service::SHELL_TASK {
+                close_window_input();
+            }
             // SAFETY: as above; the data-channel depth is diagnostic only.
             let depth = unsafe { endpoint_for(zc_abi::IPC_DATA as u64).map_or(0, |e| e.len()) };
             match tasks.exit_current(regs, frame) {
@@ -1615,15 +1622,29 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             let cursors = unsafe { &mut *addr_of_mut!(TERM_CURSORS) };
             let cursor = &mut cursors[me];
             if (*cursor as usize) < SCRIPT.len() {
+                // The scripted session runs first, so the proof boot derives
+                // the same final screen the client paints.
                 let byte = SCRIPT[*cursor as usize];
                 *cursor += 1;
                 regs.set_result(u64::from(byte));
+                0
+            } else if let Some(byte) = pop_window_input() {
+                // After the script the terminal reads the physical keyboard
+                // the drain routed here; a byte is popped only when returned,
+                // so a retry never drops one.
+                regs.set_result(u64::from(byte));
+                0
+            } else if window_input_open() {
+                // No byte yet: sleep until the drain routes one (or the shell
+                // exits and closes the session). The kernel rewinds this
+                // syscall, so the retry re-evaluates from the top.
+                block_with_retry(tasks, regs, frame, 0)
             } else {
-                // The scripted session is over; a real terminal would block
-                // here instead.
+                // The session is over; the client paints its final frame and
+                // leaves.
                 regs.set_result(u64::MAX);
+                0
             }
-            0
         }
         Ok(_) => {
             regs.set_result(u64::MAX);
@@ -1732,17 +1753,17 @@ pub unsafe extern "C" fn sched_tick(regs: *mut SyscallRegs, frame: *mut IrqFrame
     let regs = unsafe { &mut *regs };
     let frame = unsafe { &mut *frame };
     let tasks = unsafe { &mut *addr_of_mut!(TASKS) };
-    // Drain new COM1 bytes, then wake any task they unblock: a serial waiter
-    // whose byte arrived retries its read instead of sleeping through it. The
-    // keyboard needs no poll here: its interrupt is now a message to the
-    // driver domain, which owns the 8042 and the shared ring.
+    // Drain new COM1 bytes and keyboard bytes the input domain produced, then
+    // wake any task they unblock: a serial waiter whose byte arrived retries
+    // its read instead of sleeping through it, and a window client blocked in
+    // `SYS_TERM_READ` picks up the keystroke the drain just routed to it.
     crate::serial::poll_input();
     drain_domain_input();
     // A filesystem reply may have arrived while its caller slept. Routing it
     // here means the next retry finds it even if no other wakeup fired; the
     // reply's own `SendTo` already made the caller runnable.
     crate::zcfs_proxy::poll();
-    if crate::serial::input_available() {
+    if crate::serial::input_available() || window_input_available() {
         tasks.unblock_all();
     }
     // An interrupt only records a count; the tick is where a domain sleeping
@@ -2933,24 +2954,75 @@ fn revoke_keyboard(task: u32) {
 
 /// Latest mouse report stashed from the input stream.
 ///
-/// Written by [`drain_domain_input`] when it strips a mouse frame; the shell
-/// never sees frame bytes. A future pointer consumer (F8d/F8f) reads this
-/// instead of parsing the stream itself.
+/// Written by [`drain_domain_input`] when it strips a mouse frame; no frame
+/// byte reaches either consumer. A future pointer consumer reads this instead
+/// of parsing the stream itself.
 static mut MOUSE_LAST: [u8; 3] = [0; 3];
 
 /// How many mouse frames the drain has stashed since boot.
 static mut MOUSE_FRAME_COUNT: u64 = 0;
 
-/// Copies bytes the input domain produced into the shared input stream.
+/// Byte capacity of the PS/2 keyboard queue the window client reads.
+const WINDOW_INPUT_CAP: usize = 256;
+
+/// Keyboard bytes the input domain produced, waiting for the window client.
+///
+/// COM1 bytes stay in `serial::INPUT_RING` for the shell: the physical
+/// keyboard belongs to the focused window, so the drain routes translated
+/// keyboard bytes here while mouse frames are stripped before either sink.
+/// The client pops through `SYS_TERM_READ`, and the drain is the only writer.
+static mut WINDOW_INPUT: zc_kernel::irq::ByteRing<WINDOW_INPUT_CAP> =
+    zc_kernel::irq::ByteRing::new();
+
+/// Whether the window input session is open.
+///
+/// Closed when the shell exits: the shell anchors the session, so a client
+/// blocked in `SYS_TERM_READ` then observes `u64::MAX` and leaves instead of
+/// waiting for input that can never come.
+static mut WINDOW_INPUT_OPEN: bool = true;
+
+/// Appends keyboard bytes to the window queue.
+fn push_window_input(bytes: &[u8]) {
+    // SAFETY: owned here; interrupts are masked around the drain.
+    let ring = unsafe { &mut *addr_of_mut!(WINDOW_INPUT) };
+    for &byte in bytes {
+        ring.push(byte);
+    }
+}
+
+/// Removes the oldest keyboard byte for the window client.
+fn pop_window_input() -> Option<u8> {
+    // SAFETY: owned here; the drain is the only writer.
+    unsafe { (*addr_of_mut!(WINDOW_INPUT)).pop() }
+}
+
+/// Returns whether a keyboard byte waits for the window client.
+fn window_input_available() -> bool {
+    // SAFETY: read-only.
+    unsafe { !(*addr_of!(WINDOW_INPUT)).is_empty() }
+}
+
+/// Returns whether the window input session is still open.
+fn window_input_open() -> bool {
+    // SAFETY: read-only.
+    unsafe { addr_of!(WINDOW_INPUT_OPEN).read() }
+}
+
+/// Ends the window input session so a blocked client can leave.
+fn close_window_input() {
+    // SAFETY: owned here; the exit path runs with interrupts masked.
+    unsafe { addr_of_mut!(WINDOW_INPUT_OPEN).write(false) };
+}
+
+/// Copies bytes the input domain produced into the window and mouse sinks.
 ///
 /// Runs with interrupts masked, so the domain cannot push while the kernel
 /// pops. The domain only appends and the kernel only removes, which keeps the
-/// ring single-producer on each side. Mouse frames (`FF 4D b dx dy`) are
-/// stripped and stashed; only keyboard bytes reach the serial stream, so the
-/// shell transcript can never see a frame.
+/// ring single-producer on each side. [`zc_kernel::input::route`] splits the
+/// stream: mouse frames (`FF 4D b dx dy`) are stashed and keyboard bytes go to
+/// [`WINDOW_INPUT`], so neither the shell's COM1 ring nor the terminal ever
+/// sees a frame byte.
 fn drain_domain_input() {
-    use zc_kernel::mouse::{FRAME_KIND_MOUSE, FRAME_LEN, FRAME_TAG};
-
     // SAFETY: written once with interrupts disabled before any task runs.
     let phys = unsafe { addr_of!(INPUT_RING_PHYS).read() };
     if phys == 0 {
@@ -2967,22 +3039,18 @@ fn drain_domain_input() {
         scratch[count] = byte;
         count += 1;
     }
-    let mut at = 0;
-    while at < count {
-        if scratch[at] == FRAME_TAG
-            && at + FRAME_LEN <= count
-            && scratch[at + 1] == FRAME_KIND_MOUSE
-        {
-            // SAFETY: mouse state owned here; interrupts are masked.
-            unsafe {
-                MOUSE_LAST = [scratch[at + 2], scratch[at + 3], scratch[at + 4]];
-                MOUSE_FRAME_COUNT += 1;
-            }
-            at += FRAME_LEN;
-        } else {
-            crate::serial::push_input(&scratch[at..at + 1]);
-            at += 1;
+    let mut keyboard = [0u8; 32];
+    let mut mouse = [[0u8; 3]; 8];
+    let (keys, frames) = zc_kernel::input::route(&scratch[..count], &mut keyboard, &mut mouse);
+    if frames > 0 {
+        // SAFETY: mouse state owned here; interrupts are masked.
+        unsafe {
+            MOUSE_LAST = mouse[frames - 1];
+            MOUSE_FRAME_COUNT += frames as u64;
         }
+    }
+    if keys > 0 {
+        push_window_input(&keyboard[..keys]);
     }
 }
 

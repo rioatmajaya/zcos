@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 6 grants`, `task 6: devmgr: blk published` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8f, F8d-3a done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `wm: window mapped`; `wm: move ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar host tests pass |
+| **F8** | Desktop | 🔄 F8f, F8d-3a, F8d-3b done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `wm: window mapped`; `wm: move ok`; `compositor: frame updated`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar host tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -531,10 +531,22 @@ full browser. Note them as follow-ups, do not build them here.
         so `fb: desktop checksum ok` still runs. The kernel-side restart budget
         was removed (a supervised fault is revived by its supervisor); the
         keyboard domain also publishes `/dev/kbd` through `devfs`.
-      - [ ] F8d-3b: route the PS/2 stream to the focused window's terminal
+      - [x] F8d-3b: route the PS/2 stream to the focused window's terminal
         client (COM1 serial stays with the shell), and turn the client and
         compositor into an event loop that re-renders and re-composites on
-        input.
+        input. `zc_kernel::input::route` (host-tested) splits the input
+        domain's bytes: mouse frames feed the cursor, keyboard bytes go to a
+        per-window queue instead of the COM1 ring the shell reads.
+        `SYS_TERM_READ` (30) now serves that window queue after the scripted
+        session and blocks while the window is open. `zc-win` reads one
+        keystroke at a time, repaints, and sends `WM_ACK`; `zcompositor`
+        re-composites the window at its moved position and flushes only that
+        rectangle on each `WM_ACK`, and stops on the new `WM_DONE`. The kernel
+        closes the window session when the shell exits, so the client's read
+        returns `u64::MAX`, it paints its final frame and exits, and the
+        compositor follows — no all-blocked deadlock. The window pixels are
+        still verified: the kernel recomputes them from the shared `Term` state
+        machine, so `fb: desktop checksum ok` is unchanged.
       - [ ] F8d-3c: a proof model for genuinely interactive pixels — the kernel
         cannot recompute non-deterministic content, so verify the window region
         against the client's own surface frames (kernel-owned) instead: the
@@ -585,6 +597,11 @@ full browser. Note them as follow-ups, do not build them here.
   `kbd: serving` after `initd: restarted kbd`, and `initd: kbd stopped` before
   `fb: desktop checksum ok`, so a live driver is stopped at shutdown instead of
   keeping the boot alive.
+- The window is an input-driven session (F8d-3b): the client logs `client:
+  window painted` and the compositor logs `compositor: frame updated` for each
+  client frame before `compositor: ready`, and the kernel's `fb: desktop
+  checksum ok` still recomputes the window from the shared `Term` state
+  machine, so the event-driven pixels stay a proof.
 - Clean shutdown: `power: halt clean`.
 - Audio plays a known tone and the driver reports no XRUN under a stress
   buffer: `snd: playback ok`.

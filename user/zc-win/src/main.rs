@@ -2,21 +2,25 @@
 //!
 //! The compositor owns the display and the surface factory. It creates a
 //! window surface and delegates a read/write capability to this task, then
-//! assigns the object id over [`IPC_WM`]. This client maps the surface, drives
-//! a [`Term`] with the keystrokes the kernel serves through `SYS_TERM_READ`,
-//! paints the resulting screen, and acknowledges on [`IPC_WM_REPLY`] so the
-//! compositor can composite the finished frame.
+//! assigns the object id over [`IPC_WM`]. This client maps the surface and
+//! runs an event loop: it reads one keystroke at a time from `SYS_TERM_READ`,
+//! repaints the terminal, and sends [`WM_ACK`] so the compositor can
+//! re-composite the window. The kernel serves the scripted session first, then
+//! the physical keyboard the input domain routed to this window, and returns
+//! `u64::MAX` once the session closes — the client then paints its final frame
+//! and sends [`WM_DONE`] so the compositor stops.
 //!
-//! The screen is dynamic, but not trusted: the kernel replays the same script
-//! through the same shared state machine to recompute the window pixels, so a
-//! client that paints the wrong thing fails the frame checksum.
+//! The screen is dynamic, but not trusted: while the script runs, the kernel
+//! replays the same script through the same shared state machine to recompute
+//! the window pixels, so a client that paints the wrong thing fails the frame
+//! checksum.
 
 #![no_std]
 #![no_main]
 #![allow(unsafe_code)]
 
 use zc_abi::terminal::Term;
-use zc_abi::{IPC_WM, IPC_WM_REPLY, PixelFormat, SurfaceInfo, WM_ACK};
+use zc_abi::{IPC_WM, IPC_WM_REPLY, PixelFormat, SurfaceInfo, WM_ACK, WM_DONE};
 use zc_user::{log, recv_from, send_to, surface_map, task_exit, term_read};
 
 /// Task entry point; the kernel provides a fresh user stack.
@@ -29,32 +33,44 @@ pub unsafe extern "C" fn _start() -> ! {
     if mapped == u64::MAX || !surface.is_available() {
         log("client: map failed\n");
     } else if let Some(format) = PixelFormat::from_raw(surface.format) {
-        // Drive the terminal with the kernel-served keystrokes, then paint the
-        // final screen. The kernel replays the same script to verify it.
+        let pixels = mapped as *mut u32;
         let mut terminal = Term::new();
+        log("client: terminal ready\n");
+        // Paint the initial prompt so the compositor can composite frame 0,
+        // then repaint and acknowledge once per keystroke.
+        paint(
+            &terminal,
+            pixels,
+            surface.stride,
+            format,
+            surface.width,
+            surface.height,
+        );
+        let _ = send_to(IPC_WM_REPLY as u64, WM_ACK);
         loop {
             let key = term_read();
             if key == u64::MAX {
                 break;
             }
             terminal.push_key(key as u8);
+            paint(
+                &terminal,
+                pixels,
+                surface.stride,
+                format,
+                surface.width,
+                surface.height,
+            );
+            let _ = send_to(IPC_WM_REPLY as u64, WM_ACK);
         }
-        log("client: terminal ready\n");
-        paint(
-            &terminal,
-            mapped as *mut u32,
-            surface.stride,
-            format,
-            surface.width,
-            surface.height,
-        );
         log("client: window painted\n");
     } else {
         log("client: unsupported format\n");
     }
-    // Acknowledge on every path so the compositor never blocks; if painting
-    // failed, the kernel's frame checksum catches it.
-    let _ = send_to(IPC_WM_REPLY as u64, WM_ACK);
+    // Tell the compositor the session is over on every path, so it never waits
+    // for a frame that will not come; a map or format failure leaves its
+    // window blank, and the kernel's frame checksum catches that.
+    let _ = send_to(IPC_WM_REPLY as u64, WM_DONE);
     task_exit()
 }
 

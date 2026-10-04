@@ -45,11 +45,12 @@ pub const IPC_SUPERVISE: usize = 4;
 /// client should map and paint.
 pub const IPC_WM: usize = 5;
 
-/// Window-reply channel: the client tells the compositor it has painted.
+/// Window-reply channel: the client tells the compositor it painted.
 ///
-/// One word per message, always [`WM_ACK`]. The direction is one-way (client to
-/// compositor); a separate channel from [`IPC_WM`] means the compositor can
-/// never read back its own assignment and mistake it for the acknowledgement.
+/// One word per message: [`WM_ACK`] after each repaint and a final [`WM_DONE`].
+/// The direction is one-way (client to compositor); a separate channel from
+/// [`IPC_WM`] means the compositor can never read back its own assignment and
+/// mistake it for the acknowledgement.
 pub const IPC_WM_REPLY: usize = 6;
 
 /// The acknowledgement a window client sends once it has painted its surface.
@@ -57,6 +58,14 @@ pub const IPC_WM_REPLY: usize = 6;
 /// Distinct from every surface object id (`0x2000_0000 | slot`), so a stray
 /// assignment can never be read as an ack.
 pub const WM_ACK: u64 = 0x574D_0000_0000_0001;
+
+/// The message a window client sends once it is finished, after its last
+/// [`WM_ACK`].
+///
+/// The compositor composites the final frame and stops on it. Without this a
+/// client that exited after its last ack would strand the compositor in
+/// `recv_from`, waiting for a frame that never comes.
+pub const WM_DONE: u64 = 0x574D_0000_0000_0002;
 
 /// A copied IPC message.
 ///
@@ -151,7 +160,10 @@ mod tests {
         assert!(IPC_SUPERVISE < IPC_CHANNELS);
         assert!(IPC_WM < IPC_CHANNELS);
         assert!(IPC_WM_REPLY < IPC_CHANNELS);
-        // The ack must not collide with any surface object id.
+        // The ack and the done sentinel must not collide with each other or
+        // with any surface object id.
         assert_ne!(WM_ACK, u64::from(crate::surface::SURFACE_FACTORY));
+        assert_ne!(WM_DONE, WM_ACK);
+        assert_ne!(WM_DONE, u64::from(crate::surface::SURFACE_FACTORY));
     }
 }

@@ -35,7 +35,12 @@ receives a raw frame.
 carries a `WM_ACK` sentinel back. This mirrors the filesystem request/reply
 split (ADR 0009): a single channel would let the compositor read back its own
 queued assignment and mistake it for the acknowledgement. IPC stays one word per
-message; pixels never cross it.
+message; pixels never cross it. F8d-3b extends the reply channel into a frame
+stream: the client sends one `WM_ACK` per repaint, and a final `WM_DONE` when
+its input session closes, so the compositor can re-composite after every
+keystroke and stop cleanly. The client maps the window up front (before the
+handshake) and every pre-handshake failure path sends a zero object id, so the
+client's blocking receive never hangs.
 
 **The window content has one source of truth.** `zc_abi::desktop::window_color_at`
 defines the window's local pixels, and `color_at` delegates to it. The client
@@ -49,6 +54,11 @@ so delegation is proven end to end rather than assumed.
 - Cross-task capability delegation is now exercised by a real client, not only
   by unit tests: `cap: task 3 delegated 0x20000001 to task 8`, then
   `client: window painted`, `wm: window mapped`, `wm: move ok`.
+- The reply channel is a frame stream, not a one-shot ack (F8d-3b): the client
+  acknowledges each repaint and signals completion with `WM_DONE`, so the
+  compositor stays an event loop while the window is live and exits when the
+  session ends. Because the kernel closes the session when the shell exits, the
+  client always has a terminal event and the loop cannot deadlock.
 - Painter and verifier cannot drift: the window pixels come from the shared
   pure layout, so the frame checksum stays the single proof.
 - The client acks on every path, including map failure, so the compositor can

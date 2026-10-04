@@ -20,6 +20,7 @@ pub mod devfs;
 pub mod ext2;
 pub mod fat32;
 pub mod gdt;
+pub mod input;
 pub mod ipc;
 pub mod iomap;
 pub mod irq;

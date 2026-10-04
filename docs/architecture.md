@@ -189,6 +189,19 @@ native Rust client library instead of a compatibility-first X11 or Win32 API.
 The first renderer uses UEFI framebuffer output and software composition;
 hardware GPU acceleration is a later driver-domain feature.
 
+The window is an input-driven session. The input domain owns the 8042; the
+kernel drains its shared ring and routes the bytes (`zc_kernel::input::route`):
+mouse frames update the cursor, and keyboard bytes go to a per-window queue
+rather than the COM1 ring the shell reads. `SYS_TERM_READ` serves that queue
+after the scripted session and blocks while the window is open. The client
+reads one keystroke at a time, repaints its `zc-abi::terminal::Term`, and sends
+`WM_ACK`; the compositor re-composites the window at its current position and
+flushes only the damaged rectangle per `WM_ACK`, and stops on `WM_DONE`. The
+kernel closes the session when the shell exits, which unblocks the client's
+read with `u64::MAX`. The window pixels remain proven, not trusted: the kernel
+recomputes the expected `Term` independently and checks the final frame, so a
+client that drops a key or mis-renders fails `fb: desktop checksum ok`.
+
 ## Compatibility
 
 Linux-driver compatibility is implemented as a DDE-style userspace adapter.
