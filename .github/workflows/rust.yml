@@ -147,6 +147,7 @@ jobs:
         grep -q "task 3: wm: move ok" build/boot.log
         grep -q "task 3: compositor: frame updated" build/boot.log
         grep -q "task 3: compositor: ready" build/boot.log
+        grep -q "wm: content ok" build/boot.log
         grep -q "fb: desktop checksum ok" build/boot.log
         grep -q "switches" build/boot.log
         grep -q "acpi: rsdp v2" build/boot.log

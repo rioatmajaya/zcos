@@ -198,9 +198,18 @@ reads one keystroke at a time, repaints its `zc-abi::terminal::Term`, and sends
 `WM_ACK`; the compositor re-composites the window at its current position and
 flushes only the damaged rectangle per `WM_ACK`, and stops on `WM_DONE`. The
 kernel closes the session when the shell exits, which unblocks the client's
-read with `u64::MAX`. The window pixels remain proven, not trusted: the kernel
-recomputes the expected `Term` independently and checks the final frame, so a
-client that drops a key or mis-renders fails `fb: desktop checksum ok`.
+read with `u64::MAX`.
+
+The window pixels remain proven, not trusted, but the proof splits by what is
+knowable. Outside the window the frame checksum recomputes `pixel_at` exactly.
+Inside the window the client's pixels are unknowable, so the checksum proves
+*placement* instead: the kernel records the surface the compositor delegates to
+the window client, hashes it when the compositor releases it, and checks the
+display's window region against that snapshot. A separate boot check still
+replays the scripted session through `Term` and compares the surface pixel for
+pixel (`wm: content ok`), so a client that drops a key or mis-renders fails
+even though the general checksum no longer knows the content. See
+[ADR 0018](adr/0018-window-placement-proof.md).
 
 ## Compatibility
 

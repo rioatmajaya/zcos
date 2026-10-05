@@ -60,7 +60,11 @@ so delegation is proven end to end rather than assumed.
   session ends. Because the kernel closes the session when the shell exits, the
   client always has a terminal event and the loop cannot deadlock.
 - Painter and verifier cannot drift: the window pixels come from the shared
-  pure layout, so the frame checksum stays the single proof.
+  pure layout, so the frame checksum stays the single proof. F8d-3c later
+  splits that proof — the checksum's window region becomes a placement check
+  against the client's own surface, with the shared-layout content check kept
+  as a separate boot proof. See
+  [ADR 0018](0018-window-placement-proof.md).
 - The client acks on every path, including map failure, so the compositor can
   never block forever; a failed paint surfaces as a checksum mismatch instead.
 - Widening `TASK_COUNT` touched every fixed task array. Each future client app

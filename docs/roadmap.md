@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 6 grants`, `task 6: devmgr: blk published` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8f, F8d-3a, F8d-3b done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `wm: window mapped`; `wm: move ok`; `compositor: frame updated`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar host tests pass |
+| **F8** | Desktop | 🔄 F8f, F8d-3a–3c done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `wm: window mapped`; `wm: move ok`; `compositor: frame updated`; `wm: content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar host tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -547,12 +547,22 @@ full browser. Note them as follow-ups, do not build them here.
         compositor follows — no all-blocked deadlock. The window pixels are
         still verified: the kernel recomputes them from the shared `Term` state
         machine, so `fb: desktop checksum ok` is unchanged.
-      - [ ] F8d-3c: a proof model for genuinely interactive pixels — the kernel
-        cannot recompute non-deterministic content, so verify the window region
-        against the client's own surface frames (kernel-owned) instead: the
-        proof becomes "the compositor placed the client's pixels faithfully",
-        not "the kernel knows the exact screen". This is the tradeoff F8f
-        deliberately deferred.
+      - [x] F8d-3c: a proof model for genuinely interactive pixels — the kernel
+        cannot recompute non-deterministic content, so the frame checksum's
+        window region now verifies the client's own surface frames
+        (kernel-owned) instead: the proof becomes "the compositor placed the
+        client's pixels faithfully", not "the kernel knows the exact screen".
+        The kernel records the surface the compositor delegates to the window
+        client, snapshots a hash of its pixels when the compositor releases it
+        (the compositor frees it before the boot ends, so this must happen on
+        the destroy path), and compares the display's window region to that
+        snapshot. `Surface::pixel_location` (host-tested) maps a coordinate to
+        a backing frame and byte offset. The desktop outside the window is
+        still recomputed exactly, and a separate pass in the same snapshot
+        still compares the surface to `Term` replayed over the script, logging
+        `wm: content ok` as the deterministic-boot content proof. See
+        [`adr/0018`](adr/0018-window-placement-proof.md). This is the tradeoff
+        F8f deliberately deferred.
       - [ ] *(later)* connect the terminal to the F7 VFS so commands act on the
         filesystem.
 - [ ] F8e: native Rust UI client library (widgets, event loop, no X11/Win32).
@@ -585,8 +595,8 @@ full browser. Note them as follow-ups, do not build them here.
   title label), plus `zc-abi` font and `text_blend` host tests passing.
 - The client window is a live terminal (F8d-1/F8d-2): the client logs
   `client: terminal ready` after consuming the kernel's scripted session, and
-  the same `fb: desktop checksum ok` recomputes the window region by replaying
-  that script through the shared `zc-abi::terminal::Term` state machine, so the
+  `wm: content ok` proves the window surface equals `Term` replayed over that
+  script through the shared `zc-abi::terminal::Term` state machine, so the
   input → command → render path is proven end to end. The `zc-abi` font and
   terminal host tests pass.
 - The desktop chrome renders and is proven (F8f): the same
@@ -599,9 +609,14 @@ full browser. Note them as follow-ups, do not build them here.
   keeping the boot alive.
 - The window is an input-driven session (F8d-3b): the client logs `client:
   window painted` and the compositor logs `compositor: frame updated` for each
-  client frame before `compositor: ready`, and the kernel's `fb: desktop
-  checksum ok` still recomputes the window from the shared `Term` state
-  machine, so the event-driven pixels stay a proof.
+  client frame before `compositor: ready`, so the event-driven pixels are
+  composited per keystroke.
+- The window region is placement-proven (F8d-3c): the boot logs `wm: content ok`
+  (the client's surface equals the scripted `Term`) and `fb: desktop checksum
+  ok` (the display's window region equals that surface, and the desktop outside
+  it is recomputed exactly), so the checksum proves placement for content the
+  kernel cannot recompute. `zc-kernel`'s `Surface::pixel_location` host test
+  passes.
 - Clean shutdown: `power: halt clean`.
 - Audio plays a known tone and the driver reports no XRUN under a stress
   buffer: `snd: playback ok`.

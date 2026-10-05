@@ -43,10 +43,24 @@ the boot until the supervisor stops it at shutdown. F8d-3b wires that live
 keyboard to the window: the kernel routes PS/2 bytes to a per-window input
 queue instead of the serial ring, `SYS_TERM_READ` serves the window queue, and
 the client and compositor become event loops that repaint on each keystroke
-until the session closes.
+until the session closes. F8d-3c makes that dynamic window provable: the frame
+checksum's window region becomes a placement proof against the client's own
+surface (which the kernel owns and hashes before the compositor frees it),
+while a separate boot check keeps proving the scripted content exactly.
 
 ### Added
 
+- **Window placement proof** (F8d-3c): the frame verifier no longer needs to
+  know the window's exact pixels. It records the surface the compositor
+  delegates to the window client, snapshots a hash of that surface's pixels on
+  the destroy path (the compositor releases it before the boot ends), and
+  checks the display's window region against the snapshot — proving the
+  compositor placed the client's pixels faithfully for *any* content, scripted
+  or typed. The desktop outside the window stays exact (`pixel_at`), and the
+  same snapshot pass still compares the surface to `Term` replayed over the
+  script, logging `wm: content ok` as the deterministic-boot content proof.
+  `Surface::pixel_location` is host-tested. See
+  [ADR 0018](docs/adr/0018-window-placement-proof.md).
 - **Input-driven window session** (F8d-3b): the window terminal is now driven
   by real input routing rather than a kernel-only script feed. The kernel
   splits the input domain's byte stream: mouse frames are consumed for the

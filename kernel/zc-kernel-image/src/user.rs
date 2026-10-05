@@ -1312,6 +1312,16 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             };
             match source_table.delegate(handle, dest_table, requested) {
                 Ok(_) => {
+                    // A surface delegated to the window client is the window
+                    // the frame verifier must prove placement for; remember it
+                    // so the destroy path can snapshot its pixels.
+                    if target == service::WINDOW_CLIENT_TASK {
+                        if let Some(slot) = surface_slot(object) {
+                            // SAFETY: owned here; interrupts are masked through
+                            // this arm.
+                            unsafe { addr_of_mut!(WINDOW_SURFACE).write(Some(slot)); }
+                        }
+                    }
                     let _ = crate::serial::print(format_args!(
                         "cap: task {me} delegated {object:#x} to task {target}\n",
                     ));
@@ -1602,6 +1612,14 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 regs.set_result(u64::MAX);
                 return 0;
             }
+            // The window client's surface is the one the frame verifier must
+            // prove placement for. The compositor releases it before the boot
+            // ends, so snapshot its pixels now, while they are still ours.
+            if unsafe { addr_of!(WINDOW_SURFACE).read() } == Some(slot) {
+                snapshot_window_surface(surface);
+                // SAFETY: owned here; interrupts are masked through this arm.
+                unsafe { addr_of_mut!(WINDOW_SURFACE).write(None); }
+            }
             let Some(surface) = surfaces.remove(slot) else {
                 regs.set_result(u64::MAX);
                 return 0;
@@ -1810,24 +1828,80 @@ pub unsafe extern "C" fn user_finished() -> ! {
     crate::boot_tail(info);
 }
 
-/// Recomputes the final desktop frame and compares it against the display.
+/// Hashes the client's window surface and proves its deterministic content.
 ///
-/// Reads every pixel back through the identity map and hashes both the pixels
-/// the compositor should have drawn (recomputed from the shared layout) and
-/// the pixels actually on the display. The expected frame is the *moved*
-/// window, so a compositor that forgot to repaint the window's old position
-/// leaves stale pixels and fails the hash — this is the proof that damage
-/// tracking is correct, not just that some colors changed.
-///
-/// The window region is no longer deterministic: it holds the client's live
-/// terminal. The kernel replays the *same* script it served through
-/// `SYS_TERM_READ` through the *same* shared state machine
-/// ([`zc_abi::terminal::Term`]) the client used, so the expected window pixels
-/// are derived independently rather than trusted from the client. A client
-/// that drops a key, mis-runs a command, or paints the wrong pixels diverges
-/// and fails the hash.
-fn verify_framebuffer() {
+/// Called from the surface-destroy path while the client's frames are still
+/// mapped. The hash is the placement reference [`verify_framebuffer`] compares
+/// the display's window region against; the same pass also compares every
+/// pixel to the terminal the kernel served through `SYS_TERM_READ`, so the
+/// boot's scripted content is proven too (`wm: content ok`). A client that
+/// dropped a key or painted the wrong pixels fails here.
+fn snapshot_window_surface(surface: &zc_kernel::surface::Surface) {
     use zc_abi::terminal::{SCRIPT, Term};
+    use zc_abi::{FRAME_MOVED, HASH_OFFSET, PixelFormat, hash_step, window_rect};
+
+    // SAFETY: published once during setup before any task ran.
+    let info = unsafe { core::ptr::addr_of!(FB_INFO).read() };
+    if !info.is_available() {
+        return;
+    }
+    let Some(format) = PixelFormat::from_raw(surface.format) else {
+        crate::fail("unsupported window format");
+    };
+    // The window surface must cover exactly the window the compositor places.
+    let window = window_rect(FRAME_MOVED, info.width, info.height);
+    if surface.width != window.w || surface.height != window.h {
+        crate::fail("window surface geometry mismatch");
+    }
+    // The content is the terminal screen the kernel served the client.
+    let mut terminal = Term::new();
+    let mut key = 0;
+    while key < SCRIPT.len() {
+        terminal.push_key(SCRIPT[key]);
+        key += 1;
+    }
+    let mut hash = HASH_OFFSET;
+    let mut ly = 0;
+    while ly < surface.height {
+        let mut lx = 0;
+        while lx < surface.width {
+            let Some((frame, offset)) = surface.pixel_location(lx, ly) else {
+                crate::fail("window surface pixel out of range");
+            };
+            // SAFETY: the surface frames come from the frame allocator below
+            // the identity map, the same assumption `build_fb_tables` makes.
+            let pixel = unsafe { read_volatile((frame + offset as u64) as *const u32) };
+            hash = hash_step(hash, pixel);
+            let Some(expected) = terminal.pixel(format, lx, ly, surface.width, surface.height)
+            else {
+                crate::fail("unsupported window format");
+            };
+            if pixel != expected {
+                crate::fail("window content mismatch");
+            }
+            lx += 1;
+        }
+        ly += 1;
+    }
+    // SAFETY: owned here; interrupts are masked on the destroy path.
+    unsafe { addr_of_mut!(WINDOW_SNAPSHOT).write(Some(hash)) };
+    crate::serial::write_str("wm: content ok\n");
+}
+
+/// Verifies the final desktop frame: exact where it is deterministic,
+/// placement-checked where it is not.
+///
+/// Reads every pixel back through the identity map. Outside the window the
+/// expected pixel is recomputed from the shared layout, so a compositor that
+/// forgot to repaint the window's old position leaves stale pixels and fails
+/// the hash — the proof that damage tracking is correct, not just that some
+/// colors changed. Inside the window the client's pixels are unknowable (they
+/// are whatever the user typed), so that region is checked for *placement*: it
+/// must equal the client's own window surface, hashed by
+/// [`snapshot_window_surface`] when the compositor released it. The desktop
+/// and window regions are hashed separately and combined; either mismatch
+/// fails.
+fn verify_framebuffer() {
     use zc_abi::{FRAME_MOVED, HASH_OFFSET, hash_step, pixel_at, window_rect};
 
     // SAFETY: published once during setup before any task ran.
@@ -1836,61 +1910,58 @@ fn verify_framebuffer() {
         crate::serial::write_str("fb: unavailable, skipped\n");
         return;
     }
-    // Rebuild the terminal screen the client should be showing.
-    let mut terminal = Term::new();
-    let mut key = 0;
-    while key < SCRIPT.len() {
-        terminal.push_key(SCRIPT[key]);
-        key += 1;
-    }
     let window = window_rect(FRAME_MOVED, info.width, info.height);
 
     let width = u64::from(info.width);
     let height = u64::from(info.height);
     let stride = u64::from(info.stride);
-    let mut want = HASH_OFFSET;
-    let mut actual = HASH_OFFSET;
+    let mut want_desktop = HASH_OFFSET;
+    let mut actual_desktop = HASH_OFFSET;
+    let mut actual_window = HASH_OFFSET;
     let mut y = 0;
     while y < height {
         let mut x = 0;
         while x < width {
-            let pixel = if window.contains(x as u32, y as u32) {
-                match terminal.pixel(
-                    info.pixel_format,
-                    x as u32 - window.x,
-                    y as u32 - window.y,
-                    window.w,
-                    window.h,
-                ) {
-                    Some(pixel) => pixel,
-                    None => crate::fail("unsupported fb format"),
-                }
+            // SAFETY: the setup mapped exactly this range with user
+            // permissions; the identity map covers it for the check.
+            let seen =
+                unsafe { read_volatile((info.address + (y * stride + x) * 4) as *const u32) };
+            if window.contains(x as u32, y as u32) {
+                actual_window = hash_step(actual_window, seen);
             } else {
-                match pixel_at(
+                let Some(expected) = pixel_at(
                     info.pixel_format,
                     x as u32,
                     y as u32,
                     info.width,
                     info.height,
                     FRAME_MOVED,
-                ) {
-                    Some(pixel) => pixel,
-                    None => crate::fail("unsupported fb format"),
-                }
-            };
-            want = hash_step(want, pixel);
-            // SAFETY: the setup mapped exactly this range with user
-            // permissions; the identity map covers it for the check.
-            let seen =
-                unsafe { read_volatile((info.address + (y * stride + x) * 4) as *const u32) };
-            actual = hash_step(actual, seen);
+                ) else {
+                    crate::fail("unsupported fb format");
+                };
+                want_desktop = hash_step(want_desktop, expected);
+                actual_desktop = hash_step(actual_desktop, seen);
+            }
             x += 1;
         }
         y += 1;
     }
-    if want != actual {
+    if want_desktop != actual_desktop {
         crate::fail("desktop checksum mismatch");
     }
+    // SAFETY: written on the compositor's destroy path before the boot ends.
+    let Some(want_window) = (unsafe { addr_of!(WINDOW_SNAPSHOT).read() }) else {
+        crate::fail("window surface was never released");
+    };
+    if actual_window != want_window {
+        crate::fail("window placement mismatch");
+    }
+    // Fold the window hash's two halves into the desktop hash so the reported
+    // value covers the whole frame; the comparisons above gate the boot.
+    let actual = hash_step(
+        hash_step(actual_desktop, actual_window as u32),
+        (actual_window >> 32) as u32,
+    );
     let _ = crate::serial::print(format_args!(
         "fb: desktop checksum ok ({} px, {:#x})\n",
         width * height,
@@ -2980,6 +3051,21 @@ static mut WINDOW_INPUT: zc_kernel::irq::ByteRing<WINDOW_INPUT_CAP> =
 /// blocked in `SYS_TERM_READ` then observes `u64::MAX` and leaves instead of
 /// waiting for input that can never come.
 static mut WINDOW_INPUT_OPEN: bool = true;
+
+/// Surface slot the compositor delegated to the window client, if any.
+///
+/// Recorded when a surface object is delegated to `WINDOW_CLIENT_TASK`, so the
+/// frame verifier can tell the client's window surface from the compositor's
+/// own back buffer. Cleared once that surface is released.
+static mut WINDOW_SURFACE: Option<u32> = None;
+
+/// Hash of the client's window surface, snapshotted when it was released.
+///
+/// The compositor destroys the window surface before the boot ends, so the
+/// verifier cannot read it directly. It hashes the pixels on release instead,
+/// and the frame checksum compares the display's window region against this
+/// snapshot — the placement proof for content the kernel cannot recompute.
+static mut WINDOW_SNAPSHOT: Option<u64> = None;
 
 /// Appends keyboard bytes to the window queue.
 fn push_window_input(bytes: &[u8]) {

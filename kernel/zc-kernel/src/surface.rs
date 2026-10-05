@@ -37,6 +37,30 @@ impl Surface {
             None
         }
     }
+
+    /// Returns the backing frame and byte offset for pixel `(x, y)`.
+    ///
+    /// Pixels are tightly packed at four bytes each (`stride == width`, which
+    /// is the stride `SurfaceMap` reports), so the offset is
+    /// `(y * width + x) * 4`. The caller adds the offset to the returned frame
+    /// to read the pixel. Returns `None` for a coordinate outside the surface
+    /// or past the backing pages, so a bad lookup fails closed instead of
+    /// reading unrelated memory.
+    #[must_use]
+    pub fn pixel_location(&self, x: u32, y: u32) -> Option<(u64, usize)> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let offset = (u64::from(y) * u64::from(self.width) + u64::from(x)) * 4;
+        let page = offset / PAGE_SIZE as u64;
+        if page >= u64::from(self.pages) {
+            return None;
+        }
+        Some((
+            self.frames[page as usize],
+            (offset % PAGE_SIZE as u64) as usize,
+        ))
+    }
 }
 
 /// Fixed-size table of live surfaces, indexed by slot.
@@ -231,6 +255,32 @@ mod tests {
         assert!(table.is_empty());
         assert!(table.get(0).is_none());
         assert!(table.remove(0).is_none());
+    }
+
+    #[test]
+    fn pixel_location_walks_pages_and_rejects_out_of_range() {
+        // 64 * 32 * 4 = 8192 bytes, exactly two pages.
+        let mut frames = [0u64; SURFACE_MAX_PAGES];
+        frames[0] = 0x10_0000;
+        frames[1] = 0x10_1000;
+        let surface = Surface {
+            width: 64,
+            height: 32,
+            format: 0,
+            pages: 2,
+            owner: 3,
+            frames,
+        };
+        assert_eq!(surface.pixel_location(0, 0), Some((0x10_0000, 0)));
+        assert_eq!(surface.pixel_location(1, 0), Some((0x10_0000, 4)));
+        // Pixel 1023 is the last of page 0: (y * 64 + x) * 4 = 4092.
+        assert_eq!(surface.pixel_location(63, 15), Some((0x10_0000, 4092)));
+        // Pixel 1024 starts page 1.
+        assert_eq!(surface.pixel_location(0, 16), Some((0x10_1000, 0)));
+        assert_eq!(surface.pixel_location(63, 31), Some((0x10_1000, 4092)));
+        // A coordinate outside the surface fails closed.
+        assert_eq!(surface.pixel_location(64, 0), None);
+        assert_eq!(surface.pixel_location(0, 32), None);
     }
 
     #[test]

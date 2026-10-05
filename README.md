@@ -130,8 +130,13 @@ driver no longer keeps the boot from finishing. F8d-3b wires that live keyboard
 to the window: the kernel routes PS/2 keyboard bytes to a per-window input
 queue instead of the COM1 ring the shell reads, `SYS_TERM_READ` serves that
 queue, and the client and compositor run an event loop that repaints on each
-keystroke (`WM_ACK`) and stops when the session closes (`WM_DONE`). See
-[ADR 0016](docs/adr/0016-window-client-delegation.md).
+keystroke (`WM_ACK`) and stops when the session closes (`WM_DONE`). F8d-3c
+makes that dynamic window provable: the frame checksum's window region becomes
+a placement proof against the client's own surface, which the kernel owns and
+hashes before the compositor frees it, while a separate boot check keeps
+proving the scripted content exactly. See
+[ADR 0016](docs/adr/0016-window-client-delegation.md) and
+[ADR 0018](docs/adr/0018-window-placement-proof.md).
 
 ## Development
 
