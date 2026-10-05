@@ -6,7 +6,8 @@ The system uses a native graphical stack and a capability-based microkernel.
 
 ## Project status
 
-ZC OS is in roadmap phase **F7 — VFS & storage**: phases F0–F6 are done, so
+ZC OS is in roadmap phase **F8 — desktop**, with **F7 — VFS & storage**
+complete: phases F0–F6 are done, so
 the full path from firmware to restartable userspace drivers works end to end,
 and the block domain writes, flushes, and reads a sector back (F7a) behind a
 write-back cache with explicit eviction and flush ordering (F7b), then mounts
@@ -158,6 +159,8 @@ The host verification script checks all of them.
 
 - [Architecture](docs/architecture.md) — trust boundaries, boot protocol, and
   the address-space / authority model.
+- [Interface specifications](docs/specs/README.md) — the frozen syscall, IPC,
+  boot-info, and server protocols every task depends on.
 - [Roadmap](docs/roadmap.md) — phases F0–F9, tasks, and machine-runnable pass
   criteria.
 - [Changelog](CHANGELOG.md) — what changed, per release.

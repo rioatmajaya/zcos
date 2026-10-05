@@ -50,6 +50,15 @@ while a separate boot check keeps proving the scripted content exactly.
 
 ### Added
 
+- **Frozen interface specifications**: `docs/specs/` now documents the
+  normative interfaces that cross the kernel/userspace boundary — the syscall
+  ABI (numbers, arguments, return codes, capability rights and object
+  namespaces, fixed per-task windows), the IPC ABI (message layout, the seven
+  channels, the window and supervision word encodings), the boot-info ABI
+  (loader hand-off and validation), and the server protocol (service table,
+  discovery handshake, filesystem exchange page). The Rust code in `libs/zc-abi`
+  stays the single source of truth; the specs describe it and must change with
+  it, so a server can never silently drift from the kernel.
 - **Window placement proof** (F8d-3c): the frame verifier no longer needs to
   know the window's exact pixels. It records the surface the compositor
   delegates to the window client, snapshots a hash of that surface's pixels on

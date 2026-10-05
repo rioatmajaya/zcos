@@ -17,6 +17,11 @@ Services, filesystems, networking, the compositor, and device drivers run in
 separate userspace domains. A failed driver may therefore be restarted by the
 device manager instead of bringing down the kernel.
 
+The interfaces that cross this boundary — syscalls, IPC, the boot hand-off, and
+the server protocol — are frozen and specified in
+[`docs/specs/`](specs/README.md). They are an ABI: a change is recorded and, for
+the boot contract, versioned.
+
 ## Boot protocol
 
 The loader passes a `zc_abi::BootInfo` pointer in the first platform calling

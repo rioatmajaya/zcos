@@ -52,6 +52,10 @@ boot in QEMU. If your change breaks the boot test, fix it before anything else.
   `ExitBootServices`.
 - A change to the kernel/loader ABI must bump the protocol version and update
   `libs/zc-abi`.
+- A change to a frozen interface (syscall numbers, IPC channels, the boot
+  contract, the server protocol) must update `libs/zc-abi`, the matching
+  document in [`docs/specs/`](docs/specs/README.md), and — when it changes a
+  decision — an ADR, all in the same commit.
 
 ## Commit convention
 
