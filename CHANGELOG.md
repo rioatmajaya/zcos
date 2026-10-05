@@ -46,7 +46,9 @@ the client and compositor become event loops that repaint on each keystroke
 until the session closes. F8d-3c makes that dynamic window provable: the frame
 checksum's window region becomes a placement proof against the client's own
 surface (which the kernel owns and hashes before the compositor frees it),
-while a separate boot check keeps proving the scripted content exactly.
+while a separate boot check keeps proving the scripted content exactly. Track
+**K — kernel minimalism** has started: M1 moves the storage parsers out of the
+privileged crate.
 
 ### Added
 
@@ -392,6 +394,13 @@ while a separate boot check keeps proving the scripted content exactly.
 
 ### Changed
 
+- **Storage parsers moved out of the kernel crate** (Track K, M1): `zcfs`,
+  ext2, FAT32, the MBR table, the write-back block cache, and the virtio
+  register layout now live in the new shared `zc-storage` crate. Only the block
+  domain links them, so ring 0 no longer carries any filesystem code; `zc-kernel`
+  keeps the mechanisms. `zc-kernel`'s test count drops from 268 to 200 and
+  `zc-storage` runs the 68 moved tests. No behaviour change: the boot log and
+  the frame hash are byte-identical.
 - The frame allocator is now global and reserves the virtual windows user
   address spaces remap (`FrameAllocator::reserve`). The surface syscalls
   allocate frames while a task is running, and the kernel reaches a fresh

@@ -77,10 +77,12 @@ budgeted domain restarts in place. A ring-0 fault is fatal, on purpose.
 The kernel crate provides the mechanisms — boot-contract validation, a
 physical frame allocator with recycling, virtual-memory helpers, task and
 scheduler tables, bounded IPC endpoints, a VFS with a `FileSystem` trait and
-mount table, the `zcfs` log-structured format, ACPI/MADT parsing, and
-generation-safe capability
+mount table, ACPI/MADT parsing, and generation-safe capability
 tables — and is covered by host unit tests, as are the shared
-`zc-abi`/`zc-elf` crates and the loader's UEFI bindings.
+`zc-abi`/`zc-elf` crates and the loader's UEFI bindings. The storage parsers —
+the MBR table, the `zcfs`, ext2, and FAT32 formats, the write-back cache, and
+the virtio register layout — live in the shared `zc-storage` crate, which only
+the block domain links: ring 0 carries no filesystem code.
 
 The block domain writes and flushes a data sector and reads it back, and a
 four-slot write-back cache sits in front of the device (dirty data is written

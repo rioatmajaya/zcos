@@ -5,6 +5,7 @@ members = [
     "kernel/zc-kernel",
     "libs/zc-abi",
     "libs/zc-elf",
+    "libs/zc-storage",
 ]
 
 # The kernel image is a freestanding `x86_64-unknown-none` binary. It is built

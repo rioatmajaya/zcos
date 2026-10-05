@@ -7,7 +7,7 @@ name = "blk"
 version = "0.1.0"
 dependencies = [
  "zc-abi",
- "zc-kernel",
+ "zc-storage",
  "zc-user",
 ]
 
@@ -16,7 +16,7 @@ name = "zc-abi"
 version = "0.1.0"
 
 [[package]]
-name = "zc-kernel"
+name = "zc-storage"
 version = "0.1.0"
 dependencies = [
  "zc-abi",

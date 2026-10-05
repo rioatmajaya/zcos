@@ -36,12 +36,12 @@ use zc_abi::{
     FS_STATUS_NOT_SUPPORTED, FS_STATUS_NO_SPACE, FS_STATUS_OK, FS_STATUS_TABLE_FULL, INFO_LEN,
     INFO_QUEUE0, INFO_VIRT, IPC_DISCOVERY, IPC_FS, IPC_FS_REPLY, QUEUE_VIRT, STAT_LEN,
 };
-use zc_kernel::block_cache::{CACHE_MAGIC, CACHE_TEST_SECTOR, Cache, cache_pattern_byte};
-use zc_kernel::ext2::{self, Ext2Error};
-use zc_kernel::fat32::{self, FatError, Sector};
-use zc_kernel::mbr;
-use zc_kernel::virtio;
-use zc_kernel::zcfs::{self, BlockIo, ZcfsError};
+use zc_storage::block_cache::{CACHE_MAGIC, CACHE_TEST_SECTOR, Cache, cache_pattern_byte};
+use zc_storage::ext2::{self, Ext2Error};
+use zc_storage::fat32::{self, FatError, Sector};
+use zc_storage::mbr;
+use zc_storage::virtio;
+use zc_storage::zcfs::{self, BlockIo, ZcfsError};
 use zc_user::{
     abort, log, port_claim, port_inb, port_inl, port_inw, port_outb, port_outl, port_outw,
     recv_from, send_to, task_exit,

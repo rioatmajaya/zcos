@@ -2,7 +2,7 @@
 # Verify the block driver's writes reached the test disk.
 #
 # The driver writes two markers and flushes them (see
-# kernel/zc-kernel/src/virtio.rs and kernel/zc-kernel/src/block_cache.rs).
+# libs/zc-storage/src/virtio.rs and libs/zc-storage/src/block_cache.rs).
 # Reading the host image after QEMU exits proves the writes left the guest:
 # the raw path and the write-back cache both persisted, not just their DMA
 # buffers.

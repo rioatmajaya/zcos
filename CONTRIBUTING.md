@@ -36,6 +36,7 @@ boot in QEMU. If your change breaks the boot test, fix it before anything else.
 | `kernel/zc-kernel-image` | Freestanding bootable kernel binary |
 | `libs/zc-abi` | Versioned loader-to-kernel ABI, syscall numbers |
 | `libs/zc-elf` | Shared ELF parser |
+| `libs/zc-storage` | Storage/filesystem parsers linked only by the block domain |
 | `user/*` | Ring-3 domains (drivers, shell, framebuffer, device manager) |
 | `tools/` | Build, image, and QEMU scripts |
 | `docs/` | Roadmap, architecture, ADRs, blocked components |

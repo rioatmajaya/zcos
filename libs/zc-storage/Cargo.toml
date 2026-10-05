@@ -1,0 +1,13 @@
+[package]
+name = "zc-storage"
+description = "Storage and filesystem parsers shared by the ZC OS kernel and userspace drivers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+zc-abi = { path = "../zc-abi" }
+
+[lints]
+workspace = true

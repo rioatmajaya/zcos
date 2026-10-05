@@ -277,7 +277,7 @@ VFS → write path → journaling → `fsck`**.
       reached `build/disk.img` after QEMU exits, so durability is proven, not
       just the in-guest buffer.
 - [x] F7b: block cache with writeback. A pure, host-tested `Cache<N>` in
-      `zc-kernel::block_cache` owns four sector buffers; the driver holds it in
+      `zc-storage::block_cache` owns four sector buffers; the driver holds it in
       `.bss` and drives it through `cache_read`/`cache_write`/`cache_flush`.
       Dirty data is written back before a slot is reused (eviction) and again
       by flush, so ordering is explicit. The boot log proves a miss, a hit, a
@@ -289,7 +289,7 @@ VFS → write path → journaling → `fsck`**.
       to find the volume, then reads `HELLO.TXT` through the block cache; a
       host-side check reads the same file with mtools.
 - [x] *(follow-up)* F7c-2: read-only **ext2** on a second MBR partition (the
-      "then ext2" half of the original F7c). `zc-kernel::ext2` parses the
+      "then ext2" half of the original F7c). `zc-storage::ext2` parses the
       superblock, the group descriptor, inode locations, directory entries,
       and direct/single/double/triple indirect block maps, all host-tested
       against an in-memory image. The driver mounts the ext2 partition through
@@ -305,7 +305,7 @@ VFS → write path → journaling → `fsck`**.
       but the read-only default returns `NotSupported`; the writable path
       lands in F7e.
 - [x] F7e: the ZC-native **zcfs** format and its durable write path.
-      `zc-kernel::zcfs` is a log-structured volume: a dual CRC-32 superblock,
+      `zc-storage::zcfs` is a log-structured volume: a dual CRC-32 superblock,
       fixed 512-byte `CREATE`/`DATA` records, and a write order that appends a
       record and flushes before advancing the superblock, so a torn tail leaks
       space instead of corrupting. The block domain mounts the third MBR
@@ -699,6 +699,26 @@ Reference: `12-driver-lainnya.md`, `25-virtio.md`.
 Emulator first, then one physical machine. Serial/early console before any
 hardware driver. Order: serial console → storage controller → USB → input →
 GPU. Reference: `29-debugging-perangkat-keras.md`.
+
+### Track K — Minimalisme kernel
+
+Kernel hanya menyimpan mekanisme: memori, penjadwalan, IPC, capability,
+timer/interrupt, dan pembawa pesan. Apa pun yang bisa hidup di server harus
+pindah ke ring 3. Tiga langkah:
+
+1. **M1 — parser keluar dari crate kernel.** `zcfs`, ext2, FAT32, MBR, cache
+   blok, dan tata letak virtio pindah ke `libs/zc-storage`; hanya domain blok
+   yang me-link-nya, jadi ring 0 tidak lagi memuat kode filesystem.
+2. **M2 — satu enumerator PCI.** Hapus scan PCI di kernel; `zc-devmgr` menjadi
+   satu-satunya pemindai, dengan capability "broker" (GRANT-only) sebagai
+   sumber otoritas delegasinya.
+3. **M3 — VFS server di ring 3.** Pindahkan mount table, tabel descriptor,
+   `ramfs`/`tmpfs`/`devfs`, dan `perms` ke domain `zc-vfs`; syscall FS di kernel
+   menjadi shim IPC. Prasyarat: mekanisme penyerahan frame initramfs
+   (`SYS_MAP_FRAME`) dan protokol VFS baru.
+
+Pass criteria: `cargo test --workspace` dan boot proof tetap hijau di setiap
+langkah; frame hash tidak berubah kecuali perubahan yang disengaja.
 
 ---
 

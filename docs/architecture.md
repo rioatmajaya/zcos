@@ -120,6 +120,11 @@ keyboard domains are supervised today.
 
 ## Storage and crash consistency
 
+The storage parsers live outside the kernel: the MBR table, the `zcfs`, ext2,
+and FAT32 formats, the write-back block cache, and the virtio register layout
+are all in the shared `zc-storage` crate, which only the block domain links.
+The kernel schedules, maps memory, and moves messages; it does not read disks.
+
 The writable volume is a log-structured filesystem, **zcfs**: fixed 512-byte
 self-checksummed records appended to a log, never rewritten in place, with the
 head recorded in two superblock copies. The write order is the crash rule — the

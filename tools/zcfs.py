@@ -2,7 +2,7 @@
 """Host tooling for zcfs, the ZC-native log-structured filesystem.
 
 This is the host half of the cross-implementation check. The guest implements
-the same format in Rust (`kernel/zc-kernel/src/zcfs.rs`); the two must agree
+the same format in Rust (`libs/zc-storage/src/zcfs.rs`); the two must agree
 byte for byte. That agreement is what makes a custom on-disk format verifiable
 without a third-party `fsck`.
 
