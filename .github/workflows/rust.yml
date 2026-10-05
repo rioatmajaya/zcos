@@ -69,8 +69,9 @@ jobs:
         grep -q "task 2: hello.txt: file, 31 bytes" build/boot.log
         grep -q "task 2: shell exiting" build/boot.log
         grep -q "vfs: mounted ramfs at /" build/boot.log
-        grep -q "pci: 7 functions" build/boot.log
-        grep -q "pci: blk device 00:02.0 claimed by driver task" build/boot.log
+        # The kernel no longer scans PCI: the device manager does, from ring 3,
+        # and brokers the BAR it finds (ADR 0019).
+        ! grep -q "^pci:" build/boot.log
         grep -q "task 4: blk: disk magic ok" build/boot.log
         grep -q "task 4: blk: write ok" build/boot.log
         grep -q "task 4: blk: flush ok" build/boot.log

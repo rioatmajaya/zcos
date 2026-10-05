@@ -88,6 +88,26 @@ pub fn syscall3(number: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
     result
 }
 
+/// Issues a syscall with four arguments in `rdi`, `rsi`, `rdx`, and `r10`.
+#[inline(always)]
+pub fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
+    let result: u64;
+    // SAFETY: as in `syscall0`; `r10` carries the fourth argument, matching
+    // the `SyscallRegs` block the `int 0x80` stub saves.
+    unsafe {
+        asm!(
+            "int $0x80",
+            inlateout("rax") number => result,
+            in("rdi") arg0,
+            in("rsi") arg1,
+            in("rdx") arg2,
+            in("r10") arg3,
+            options(nostack, preserves_flags),
+        );
+    }
+    result
+}
+
 /// Sends one word on the task's endpoint, blocking when full.
 #[inline(always)]
 pub fn send(word: u64) -> u64 {
@@ -315,6 +335,23 @@ pub fn port_claim(start: u16, len: u16) -> u64 {
 #[inline(always)]
 pub fn cap_delegate(object: u32, target: u64, rights: u8) -> u64 {
     syscall3(SYS_CAP_DELEGATE, u64::from(object), target, u64::from(rights))
+}
+
+/// Brokers an I/O port range to another task, returning 0 or `u64::MAX`.
+///
+/// The caller must hold the port broker grant (see `zc_abi::PORT_BROKER_OBJECT`);
+/// `start`/`len` must lie inside the kernel's broker window. The kernel mints
+/// the target's port capability itself, so the range travels as a raw word
+/// rather than a packed capability (whose packing cannot be decoded).
+#[inline(always)]
+pub fn port_delegate(start: u16, len: u16, target: u64, rights: u8) -> u64 {
+    syscall4(
+        SYS_CAP_DELEGATE,
+        u64::from(zc_abi::PORT_BROKER_OBJECT),
+        target,
+        u64::from(rights),
+        (u64::from(start) << 16) | u64::from(len),
+    )
 }
 
 /// Revives (starts) a supervised service domain, returning 0 or `u64::MAX`.

@@ -706,12 +706,13 @@ Kernel hanya menyimpan mekanisme: memori, penjadwalan, IPC, capability,
 timer/interrupt, dan pembawa pesan. Apa pun yang bisa hidup di server harus
 pindah ke ring 3. Tiga langkah:
 
-1. **M1 — parser keluar dari crate kernel.** `zcfs`, ext2, FAT32, MBR, cache
+1. ✅ **M1 — parser keluar dari crate kernel.** `zcfs`, ext2, FAT32, MBR, cache
    blok, dan tata letak virtio pindah ke `libs/zc-storage`; hanya domain blok
    yang me-link-nya, jadi ring 0 tidak lagi memuat kode filesystem.
-2. **M2 — satu enumerator PCI.** Hapus scan PCI di kernel; `zc-devmgr` menjadi
-   satu-satunya pemindai, dengan capability "broker" (GRANT-only) sebagai
-   sumber otoritas delegasinya.
+2. ✅ **M2 — satu enumerator PCI.** Scan PCI di kernel dihapus; `zc-devmgr`
+   menjadi satu-satunya pemindai, dengan capability "broker" (GRANT-only)
+   sebagai sumber otoritas delegasinya
+   ([ADR 0019](adr/0019-port-broker-capability.md)).
 3. **M3 — VFS server di ring 3.** Pindahkan mount table, tabel descriptor,
    `ramfs`/`tmpfs`/`devfs`, dan `perms` ke domain `zc-vfs`; syscall FS di kernel
    menjadi shim IPC. Prasyarat: mekanisme penyerahan frame initramfs

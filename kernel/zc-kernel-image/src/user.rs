@@ -1310,6 +1310,32 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 regs.set_result(u64::MAX);
                 return 0;
             };
+            // A port broker names the range it discovered as a raw
+            // `(start << 16) | len` word in `r10`: the packed port capability
+            // cannot be decoded back into a range, so the kernel validates the
+            // raw range against the broker window and mints the driver's
+            // capability itself. The manager can neither widen its authority
+            // nor hand over an object it does not hold, and use-rights only
+            // mean brokering cannot chain.
+            if object == zc_abi::PORT_BROKER_OBJECT {
+                let raw = regs.r10 as u32;
+                let start = (raw >> 16) as u16;
+                let len = (raw & 0xFFFF) as u16;
+                let use_only = Rights::READ.union(Rights::WRITE);
+                if !zc_kernel::device::pci_io_window_contains(start, len)
+                    || !use_only.contains(requested)
+                {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+                let minted = zc_abi::port_cap(start, len);
+                let _ = dest_table.insert(Capability::new(minted, requested));
+                let _ = crate::serial::print(format_args!(
+                    "cap: task {me} delegated {minted:#x} to task {target}\n",
+                ));
+                regs.set_result(0);
+                return 0;
+            }
             match source_table.delegate(handle, dest_table, requested) {
                 Ok(_) => {
                     // A surface delegated to the window client is the window
@@ -2172,16 +2198,11 @@ fn new_address_space(
 
 /// Maps the user code and data frames, loads both tasks, and enters ring 3.
 ///
-/// `blk_bar` is the virtio BAR base the PCI scan in [`crate::main`] found,
-/// if any: hardware discovery stays in one place, and this function only
-/// turns it into capability grants through [`zc_kernel::device`]. Never
-/// returns: tasks exit through [`user_finished`] and timeouts through
-/// [`user_timeout`].
-pub fn enter(
-    alloc: &mut FrameAllocator<'_>,
-    boot_info: *const BootInfo,
-    blk_bar: Option<u16>,
-) -> ! {
+/// Hardware discovery is not this function's job: the device manager scans
+/// the bus from ring 3 and the kernel only provisions the capabilities it
+/// needs, through [`zc_kernel::device`]. Never returns: tasks exit through
+/// [`user_finished`] and timeouts through [`user_timeout`].
+pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
     // Mask interrupts for the whole setup: a tick during half-built tables
     // would corrupt the first task's initial state. The `iretq` frame
     // re-enables them on entry.
@@ -2496,16 +2517,13 @@ pub fn enter(
         // refuses and the driver exits instead of touching the bus.
         let (cfg_start, cfg_len) = device::pci_config_range();
         let _ = caps[DEVMGR_INDEX].insert(device::port_grant(cfg_start, cfg_len));
-        if let Some(base) = blk_bar {
-            let (bar_start, bar_len) = device::bar_range(base);
-            let _ = caps[DEVMGR_INDEX].insert(Capability::new(
-                zc_abi::port_cap(bar_start, bar_len),
-                Rights::WRITE.union(Rights::GRANT),
-            ));
-        }
+        // Broker authority instead of a pre-computed BAR: the manager holds
+        // one window with GRANT only and narrows it to the BAR it discovers,
+        // so the kernel never scans the bus to provision a grant.
+        let _ = caps[DEVMGR_INDEX].insert(device::pci_io_broker_grant());
         // Counts follow what was actually inserted above, so the line stays
         // honest on hardware without the device too.
-        let devmgr_grants = 1 + usize::from(blk_bar.is_some());
+        let devmgr_grants = device::DEVMGR_SETUP_GRANTS;
         let total = zc_kernel::device::BLK_SETUP_GRANTS
             + zc_kernel::device::KBD_GRANT_COUNT
             + devmgr_grants;

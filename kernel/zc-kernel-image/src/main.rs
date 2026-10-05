@@ -34,7 +34,6 @@ mod apic;
 mod gdt;
 mod hpet;
 mod kbd;
-mod pci;
 mod serial;
 mod idt;
 mod smp;
@@ -165,22 +164,11 @@ fn kernel_main(boot_info: *const BootInfo) -> ! {
     exercise_traps_and_timer();
     acpi::describe(info.rsdp);
     report_initramfs(info);
-    let devices = pci::enumerate();
-    // Hardware discovery happens exactly once, here: the BAR base flows into
-    // `user::enter` as data, which turns it into capability grants through
-    // the device table. The kernel reports the hardware; it grants nothing.
-    let mut blk_bar = None;
-    if let Some(blk) = pci::find_blk(&devices) {
-        let _ = serial::print(format_args!(
-            "pci: blk device {:02x}:{:02x}.{} claimed by driver task\n",
-            blk.bus, blk.device, blk.function,
-        ));
-        if zc_kernel::pci::bar_is_io(blk.bar0) {
-            blk_bar = Some((zc_kernel::pci::bar_base(blk.bar0) & 0xFFFF) as u16);
-        }
-    }
+    // Discovery happens in the ring-3 device manager (ADR 0019): it scans the
+    // bus through the config window the kernel grants it and brokers the BAR
+    // it finds. The kernel never touches the bus.
     smp::bring_up(frames());
-    user::enter(frames(), boot_info, blk_bar);
+    user::enter(frames(), boot_info);
 }
 
 /// Prints the firmware handoff tail and idles forever.

@@ -59,8 +59,9 @@ payload travel in the filesystem exchange page, described in
 ### Discovery (channel 1)
 
 `zc-devmgr` scans PCI (with the config-port capability), enables I/O decoding
-and bus mastering, delegates the block device's port window to `zc-blk`, and
-then sends exactly one word on `IPC_DISCOVERY`:
+and bus mastering, brokers the block device's port window to `zc-blk` through
+its port-broker capability, and then sends exactly one word on
+`IPC_DISCOVERY`:
 
 - the BAR base as a `u16`, or
 - `ABSENT` (`u64::MAX`) when no block device was found or config access was

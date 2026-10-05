@@ -56,28 +56,6 @@ pub(crate) fn inw(port: u16) -> u16 {
     value
 }
 
-/// Writes a 32-bit doubleword to an I/O port.
-///
-/// Shared with PCI and virtio drivers; same safety contract as [`outb`].
-pub(crate) fn outl(port: u16, value: u32) {
-    // SAFETY: the kernel runs at ring 0; port I/O is permitted.
-    unsafe {
-        asm!("out dx, eax", in("dx") port, in("eax") value, options(nomem, nostack, preserves_flags));
-    }
-}
-
-/// Reads a 32-bit doubleword from an I/O port.
-///
-/// Shared with PCI and virtio drivers; same safety contract as [`inb`].
-pub(crate) fn inl(port: u16) -> u32 {
-    let value: u32;
-    // SAFETY: the kernel runs at ring 0; port I/O is permitted.
-    unsafe {
-        asm!("in eax, dx", out("eax") value, in("dx") port, options(nomem, nostack, preserves_flags));
-    }
-    value
-}
-
 /// Initialises COM1 for 38400 baud, 8 data bits, no parity, one stop bit.
 ///
 /// Matching the loader's settings keeps the captured stream on one baud line.

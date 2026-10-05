@@ -48,7 +48,9 @@ checksum's window region becomes a placement proof against the client's own
 surface (which the kernel owns and hashes before the compositor frees it),
 while a separate boot check keeps proving the scripted content exactly. Track
 **K — kernel minimalism** has started: M1 moves the storage parsers out of the
-privileged crate.
+privileged crate. M2 moves PCI enumeration out of it too — the ring-3 device
+manager scans the bus and brokers the BAR it finds, so the kernel never touches
+it and `kernel/zc-kernel-image/src/pci.rs` is gone.
 
 ### Added
 
@@ -391,9 +393,25 @@ privileged crate.
   the first six decisions.
 - `docs/blocked/`: a blocker registry, with the OVMF SMP entry.
 - A CI `changelog` job that requires an `[Unreleased]` section.
+- **Port-broker capability** (Track K, M2): `PORT_BROKER_OBJECT`
+  (`0x1000_0001`, its own namespace) carries `GRANT` over the PCI I/O window
+  `0x1000..=0xFFFF` and nothing else, so a device manager can hand a driver the
+  BAR it discovered but cannot claim or touch a port itself. A `syscall4` stub
+  passes a fourth argument in `r10`, letting `SYS_CAP_DELEGATE` name the
+  discovered `(start, len)` range as a raw word — a packed port capability
+  cannot be decoded back into a range — which the kernel validates against the
+  window before minting the driver's capability.
 
 ### Changed
 
+- **PCI enumeration moved to ring 3** (Track K, M2): the kernel no longer scans
+  the bus. `user/zc-devmgr` owns the config window, discovers the transitional
+  virtio-blk BAR, and brokers it to the block driver through the new broker
+  capability, so the kernel's boot path carries no device knowledge, the
+  `pci:` diagnostic lines disappear, and `kernel/zc-kernel-image/src/pci.rs`
+  plus its `serial::outl`/`inl` helpers are deleted. `zc-kernel::device` gains
+  `pci_io_broker_grant` and `pci_io_window_contains` in place of `bar_range`.
+  The frame hash is unchanged at `0x5b8ba1ab75967a51`.
 - **Storage parsers moved out of the kernel crate** (Track K, M1): `zcfs`,
   ext2, FAT32, the MBR table, the write-back block cache, and the virtio
   register layout now live in the new shared `zc-storage` crate. Only the block
@@ -457,6 +475,16 @@ privileged crate.
   ring 0. A new [`docs/carry-over.md`](docs/carry-over.md) records what from the
   earlier prototype is worth reusing (host emulator, compositor, GUI toolkit,
   `.sof` packaging) and what to leave behind (hand-written and ring-0 drivers).
+
+### Fixed
+
+- **Kernel interrupt stacks were too small for the syscall frame** (Track K,
+  M2): `user_syscall`'s widest arms materialise two 8 KiB `Surface` values
+  (`frames: [u64; 1024]`, `Copy`) for a frame just over 16 KiB, but every IDT
+  gate ran on a 16 KiB `IST1_STACK`. The overflow was latent until M2's `.bss`
+  reshuffle put `NEXT_CR3`/`FRAMES` in its shadow, at which point every syscall
+  corrupted the next task's page table and the boot wedged. Both interrupt
+  stacks are now 64 KiB.
 
 ## [0.1.0] - 2026-10-01
 

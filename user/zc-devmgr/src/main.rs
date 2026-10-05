@@ -1,12 +1,13 @@
 //! Device manager: PCI enumeration from ring 3.
 //!
 //! The kernel grants this domain — and only this domain — the PCI type-1
-//! configuration ports. It scans bus zero for the transitional virtio-blk
-//! device, enables I/O decoding plus bus mastering on it, and sends the
-//! winning BAR base to the block driver over the IPC discovery channel. The
-//! driver then reads its window instead of scanning the bus itself, so it
-//! never needs config access: least privilege by construction, and the scan
-//! lives in exactly one place.
+//! configuration ports, plus one I/O window carrying `GRANT` and nothing else.
+//! It scans bus zero for the transitional virtio-blk device, enables I/O
+//! decoding plus bus mastering on it, and hands the block driver the BAR it
+//! found by narrowing that window — so the kernel never learns the address and
+//! never scans the bus. The driver then reads its window instead of scanning
+//! itself, so it never needs config access: least privilege by construction,
+//! and the scan lives in exactly one place.
 //!
 //! When no device answers, the manager sends the absent marker and the
 //! driver exits cleanly instead of faulting on the bus. The rendezvous is
@@ -18,10 +19,10 @@
 #![no_main]
 #![allow(unsafe_code)]
 
-use zc_abi::{IPC_DISCOVERY, port_cap};
+use zc_abi::IPC_DISCOVERY;
 use zc_kernel::capability::Rights;
 use zc_kernel::pci;
-use zc_user::{cap_delegate, log, port_claim, port_inl, port_outl, send_to, task_exit};
+use zc_user::{log, port_claim, port_delegate, port_inl, port_outl, send_to, task_exit};
 
 /// Index of the block driver in the bring-up task order.
 ///
@@ -112,7 +113,12 @@ pub unsafe extern "C" fn _start() -> ! {
     // Hand the window over before announcing it: the driver claims on wake,
     // so the grant must already sit in its table when the message lands.
     // Delegation before publication is the whole ordering contract.
-    if cap_delegate(port_cap(port, 0x100), BLK_TASK, Rights::WRITE.bits()) == u64::MAX {
+    //
+    // The kernel grants this domain one I/O window with GRANT only and never
+    // learns where the device sits; the scan narrows that window to the BAR it
+    // found. The range travels as raw start/len — the kernel mints the driver's
+    // port capability itself, so a packed capability is never decoded.
+    if port_delegate(port, 0x100, BLK_TASK, Rights::WRITE.bits()) == u64::MAX {
         log("devmgr: delegation refused\n");
     }
     publish(port);

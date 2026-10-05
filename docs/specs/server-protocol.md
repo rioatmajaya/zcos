@@ -62,9 +62,9 @@ so one input domain claims both sources.
 
 Device discovery is a single rendezvous on `IPC_DISCOVERY` (see
 [`ipc-abi.md`](ipc-abi.md#discovery-channel-1)): the manager scans PCI, enables
-the device, delegates its port window to the driver, and only then sends the
-BAR base (or `ABSENT`). The driver blocks for exactly one word, so the manager
-must send on every path. **Delegate before publish** is the ordering contract.
+the device, brokers its port window to the driver, and only then sends the BAR
+base (or `ABSENT`). The driver blocks for exactly one word, so the manager must
+send on every path. **Delegate before publish** is the ordering contract.
 
 ## Filesystem exchange page
 

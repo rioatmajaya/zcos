@@ -51,10 +51,43 @@ pub const fn pci_config_range() -> (u16, u16) {
     (PCI_CONFIG_START, PCI_CONFIG_LEN)
 }
 
-/// Port range covering a virtio BAR window once its base is known.
+/// Start of the I/O window a device manager may broker.
+///
+/// PCI I/O BARs are assigned by firmware above the legacy fixed devices
+/// (`0x0000`–`0x03FF`: DMA, PIC, PIT, the 8042 controller). The broker window
+/// starts at `0x1000` and covers the rest of the 16-bit port space, so a
+/// manager can hand out a discovered BAR without the kernel knowing its
+/// address — which is why the kernel no longer scans the bus to provision one.
+pub const PCI_IO_WINDOW_START: u16 = 0x1000;
+
+/// Length of the broker window; covers ports `0x1000..=0xFFFF`.
+pub const PCI_IO_WINDOW_LEN: u16 = 0xF000;
+
+/// Capability object granting a device manager broker authority over PCI I/O.
+///
+/// `GRANT` alone: the manager may hand a driver a narrower window it
+/// discovered but cannot itself claim or touch a port in the window, so it
+/// stays a pure broker and the driver's authority is exactly its own BAR. The
+/// object carries no range — the window lives in [`pci_io_window_contains`],
+/// because a packed port capability cannot be decoded back into a range.
 #[must_use]
-pub const fn bar_range(base: u16) -> (u16, u16) {
-    (base, 0x100)
+pub const fn pci_io_broker_grant() -> Capability {
+    Capability::new(zc_abi::PORT_BROKER_OBJECT, Rights::GRANT)
+}
+
+/// Returns whether a raw `(start, len)` range lies inside the broker window.
+///
+/// The manager names the range it discovered as `(start << 16) | len`; the
+/// kernel validates it here before minting the driver's port capability, so a
+/// manager can never widen its authority past the window it was granted.
+#[must_use]
+pub const fn pci_io_window_contains(start: u16, len: u16) -> bool {
+    if len == 0 {
+        return false;
+    }
+    let end = start as u32 + len as u32;
+    let window_end = PCI_IO_WINDOW_START as u32 + PCI_IO_WINDOW_LEN as u32;
+    (start as u32) >= (PCI_IO_WINDOW_START as u32) && end <= window_end
 }
 
 /// Capability object granting lifecycle control of one supervised service.
@@ -85,8 +118,8 @@ pub const BLK_SETUP_GRANTS: usize = 0;
 pub const INITD_SETUP_GRANTS: usize = 2;
 
 /// Port grants the device manager holds at spawn: config for scanning plus
-/// the discovered BAR window with [`crate::capability::Rights::GRANT`] so it
-/// can hand the window — and only the window — to the driver.
+/// the broker window ([`pci_io_broker_grant`], `GRANT` only) so it can hand
+/// the discovered BAR — and only the BAR — to the driver.
 pub const DEVMGR_SETUP_GRANTS: usize = 2;
 
 /// How many grants the keyboard domain always holds: two IRQs plus two ports.
@@ -100,7 +133,6 @@ mod tests {
     fn keyboard_grants_are_exact() {
         assert_eq!(kbd_port_ranges(), [(0x60, 2), (0x64, 1)]);
         assert_eq!(pci_config_range(), (0xCF8, 8));
-        assert_eq!(bar_range(0x6080), (0x6080, 0x100));
     }
 
     #[test]
@@ -123,11 +155,29 @@ mod tests {
         // Block driver: nothing at spawn; its single window arrives by
         // delegation before its claim runs, or the claim fails closed.
         assert_eq!(BLK_SETUP_GRANTS, 0);
-        // Manager: config to scan with, BAR-with-grant to hand over.
+        // Manager: config to scan with, the broker window to hand over.
         assert_eq!(DEVMGR_SETUP_GRANTS, 2);
-        let bar = bar_range(0x6080);
-        assert_ne!(bar, pci_config_range());
-        assert_eq!(port_grant(bar.0, bar.1).object(), port_cap(0x6080, 0x100));
+        // The broker object is its own namespace and carries GRANT without
+        // WRITE, so a manager can broker a device window but never claim one.
+        let broker = pci_io_broker_grant();
+        assert_eq!(broker.object(), zc_abi::PORT_BROKER_OBJECT);
+        assert!(broker.rights().contains(Rights::GRANT));
+        assert!(!broker.rights().contains(Rights::WRITE));
+    }
+
+    #[test]
+    fn the_broker_window_bounds_a_discovered_bar() {
+        // A discovered BAR inside the window is accepted, its exact end too.
+        assert!(pci_io_window_contains(0xC000, 0x100));
+        assert!(pci_io_window_contains(0x1000, 0x100));
+        assert!(pci_io_window_contains(0xFF00, 0x100));
+        // Below the window, reaching past it, or empty is refused.
+        assert!(!pci_io_window_contains(0x0F00, 0x100));
+        assert!(!pci_io_window_contains(0xFF80, 0x100));
+        assert!(!pci_io_window_contains(0xC000, 0));
+        // The config ports the manager also holds are outside the window, so
+        // it can never broker bus access.
+        assert!(!pci_io_window_contains(PCI_CONFIG_START, PCI_CONFIG_LEN));
     }
 
     #[test]

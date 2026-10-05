@@ -9,7 +9,9 @@ The ring-3 → ring-0 call surface. Normative source of truth:
 
 - The syscall instruction is `int $0x80` (IDT vector `0x80`, DPL 3).
 - `rax` carries the syscall number on entry and the result on return.
-- `rdi`, `rsi`, `rdx` carry arguments 0, 1, 2.
+- `rdi`, `rsi`, `rdx`, `r10` carry arguments 0, 1, 2, 3. Only
+  `SYS_CAP_DELEGATE` uses `r10` today (the port broker's raw range); every
+  other syscall ignores it.
 - The kernel preserves every register except `rax`.
 
 A syscall never returns more than one word. Bulk data moves through a pointer
@@ -31,7 +33,7 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 0 | `SYS_YIELD` | — | *not implemented* | `u64::MAX` |
 | 1 | `SYS_SEND` | endpoint handle, message ptr | 0 | `u64::MAX` |
 | 2 | `SYS_RECV` | endpoint handle, buffer ptr | 0 | `u64::MAX` |
-| 3 | `SYS_CAP_DELEGATE` | object id, target task index, rights bits | 0 | `u64::MAX` |
+| 3 | `SYS_CAP_DELEGATE` | object id, target task index, rights bits, broker range (`r10`) | 0 | `u64::MAX` |
 | 4 | `SYS_MAP_FRAME` | — | *not implemented* | `u64::MAX` |
 | 5 | `SYS_TASK_EXIT` | — | never returns | — |
 | 6 | `SYS_LOG_WRITE` | UTF-8 ptr, length | 0 | `u64::MAX` |
@@ -105,11 +107,26 @@ collide. `zc-abi` host tests assert the disjointness.
 | I/O port range | bit 31 | `0x8000_0000 \| (start << 16) \| len` | `port_cap(0x60, 2)` |
 | Supervised service | bit 30 | `0x4000_0000 \| (id & 0x3FFF_FFFF)` | `service_cap(0)` = `0x4000_0000` |
 | Surface | bit 29 | `0x2000_0000 \| (slot & 0xFF)` | `surface_cap(0)` = `0x2000_0000` |
+| Port broker | bit 28 | `0x1000_0001` | `PORT_BROKER_OBJECT` |
 
 The surface **factory** capability is `0x2000_FFFF`; its low bytes `0xFFFF`
 cannot be produced by any valid slot, so it is never mistaken for a surface.
 `SYS_SURFACE_CREATE` requires the factory; a created surface mints
 `READ | WRITE | GRANT` for its creator.
+
+### Port broker delegation
+
+`PORT_BROKER_OBJECT` is the one delegation that does not name an object the
+source already holds. A holder of the broker capability may call
+`SYS_CAP_DELEGATE` with the broker object, a target, use-rights, and a raw
+`(start << 16) | len` range in `r10`; the kernel refuses any range outside the
+PCI I/O window `0x1000..=0xFFFF` (`zc_kernel::device::pci_io_window_contains`)
+or any requested right beyond `READ | WRITE`, then mints `port_cap(start, len)`
+into the target's table itself. A packed `port_cap` is never used as input:
+bit 31 is both the namespace tag and the top bit of `start`, so a range cannot
+be recovered from it. The broker is therefore a pure source of authority — it
+cannot claim the ports it hands out, and it cannot re-delegate what it was
+given.
 
 ## Fixed per-task virtual windows
 

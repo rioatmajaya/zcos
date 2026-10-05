@@ -65,9 +65,11 @@ context switch can never leave the previous task's TLB live. Syscall buffer
 validation walks the *running* task's page tables rather than a single global
 one, which is what makes the check meaningful once the tables differ.
 
-Port I/O authority follows the same split. A driver domain holds exactly the
-PCI configuration ports and its own BAR window, or the two 8042 ports, and
-faults on anything else instead of running with blanket `IOPL`.
+Port I/O authority follows the same split. The device manager holds exactly the
+PCI configuration ports plus a broker window it may hand out but not use, a
+driver holds exactly the BAR window it was brokered, the keyboard domain holds
+the two 8042 ports, and each faults on anything else instead of running with
+blanket `IOPL`.
 
 The bitmap lives in the TSS, and the hardware allows only one: `LTR` marks a
 TSS descriptor busy and refuses to load a busy one, so one TSS per task is not
@@ -92,14 +94,17 @@ the device's authority — the keyboard domain gets the 8042 ports plus one
 shared ring page, and nothing else — which keeps "who may touch this device"
 and "who is told when it fires" the same decision.
 
-Discovery is a message, not a scan. The device manager owns PCI config
-exclusively, enumerates bus zero, and sends the winning BAR base to the block
-driver over the IPC discovery channel; the driver blocks for exactly that
-word, then claims only its window. A separate data channel carries the
-produser stream, and the queues never mix — the 2000-word sequence proves it
-on every boot. The manager exits after sending, so at steady state no task
-holds config access at all — the bus cannot be reprogrammed from ring 3
-after boot.
+Discovery is a message, not a scan — and since
+[ADR 0019](adr/0019-port-broker-capability.md) the scan itself is ring-3 work.
+The device manager owns PCI config exclusively, enumerates bus zero, and
+brokers the winning BAR to the block driver through a `GRANT`-only port-broker
+capability before sending the base over the IPC discovery channel; the driver
+blocks for exactly that word, then claims only its window. The kernel never
+touches the bus, so its boot path carries no device knowledge. A separate data
+channel carries the producer stream, and the queues never mix — the 2000-word
+sequence proves it on every boot. The manager exits after sending, so at steady
+state no task holds config access at all — the bus cannot be reprogrammed from
+ring 3 after boot.
 
 Ring-3 faults are kills, not machine stops. A CPU exception in user mode ends
 that domain: its IRQ claims, port grants, and shared ring page are revoked,

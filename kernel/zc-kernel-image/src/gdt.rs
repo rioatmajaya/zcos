@@ -13,17 +13,31 @@ use zc_kernel::gdt::{
 };
 use zc_kernel::iomap::{self, BITMAP_BYTES, TaskPorts, TSS_BITMAP_SIZE};
 
-/// 16 KiB ring-0 stack used when traps arrive from userspace.
+/// Bytes reserved for each kernel interrupt stack.
+///
+/// Every IDT gate runs on [`IST1_STACK`], including the `int 0x80` syscall
+/// gate, so the size must cover the largest handler frame. `user_syscall` is
+/// the widest: its arms that create or destroy a surface materialise a
+/// [`zc_kernel::surface::Surface`] by value (`frames: [u64; 1024]`, 8 KiB,
+/// `Copy`), and the compiler keeps two such temporaries live at once — one
+/// for `SurfaceTable::create`, one for `SurfaceTable::remove` — for a frame
+/// just over 16 KiB. A 16 KiB stack silently overflowed into whatever the
+/// linker had placed below it; when that happened to be `NEXT_CR3`/`FRAMES`,
+/// every syscall corrupted the next task's page table and the boot wedged.
+/// 64 KiB leaves room for the two temporaries plus nested formatting.
+const INTERRUPT_STACK_BYTES: usize = 64 * 1024;
+
+/// Ring-0 stack used when traps arrive from userspace.
 ///
 /// One stack serves every task: handlers are masked against each other and
 /// never re-enter, so sharing it is safe and keeps per-task state small.
-static mut RSP0_STACK: [u8; 16_384] = [0; 16_384];
+static mut RSP0_STACK: [u8; INTERRUPT_STACK_BYTES] = [0; INTERRUPT_STACK_BYTES];
 
-/// 16 KiB interrupt stack referenced by every IDT gate.
+/// Interrupt stack referenced by every IDT gate.
 ///
 /// Like [`RSP0_STACK`], one per CPU is enough: an interrupt gate clears IF,
 /// so a second interrupt cannot arrive while this stack is in use.
-static mut IST1_STACK: [u8; 16_384] = [0; 16_384];
+static mut IST1_STACK: [u8; INTERRUPT_STACK_BYTES] = [0; INTERRUPT_STACK_BYTES];
 
 /// The kernel's GDT: five segments plus a two-slot TSS descriptor.
 static mut GDT: [u64; GDT_SLOTS] = [0; GDT_SLOTS];
@@ -155,8 +169,8 @@ pub fn allowed_ports(task: usize) -> usize {
 /// bitmap starts fully denied, so no task can touch a port until it is
 /// granted one and the switch runs.
 pub fn install() {
-    let rsp0_top = aligned_top(addr_of!(RSP0_STACK) as u64, 16_384);
-    let ist1_top = aligned_top(addr_of!(IST1_STACK) as u64, 16_384);
+    let rsp0_top = aligned_top(addr_of!(RSP0_STACK) as u64, INTERRUPT_STACK_BYTES as u64);
+    let ist1_top = aligned_top(addr_of!(IST1_STACK) as u64, INTERRUPT_STACK_BYTES as u64);
 
     // SAFETY: single early-boot initialisation; all objects are owned here.
     unsafe {

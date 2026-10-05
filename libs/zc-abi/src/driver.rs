@@ -125,6 +125,19 @@ pub const fn port_cap(start: u16, len: u16) -> u32 {
     0x8000_0000 | ((start as u32) << 16) | (len as u32)
 }
 
+/// Capability object id granting authority to broker I/O port windows.
+///
+/// A device manager holds this object with `GRANT` rights and hands a driver
+/// a range it discovered. It lives in its own namespace (bit 28), so it can
+/// never be mistaken for an IRQ source, a port range, a service, or a surface.
+///
+/// The brokered range travels as a raw `(start << 16) | len` word rather than
+/// a packed [`port_cap`], because a port capability's bit 31 doubles as both
+/// the namespace tag and the top bit of `start`, so it cannot be decoded back
+/// into a range. The kernel validates the raw range against the broker window
+/// and constructs the driver's capability itself.
+pub const PORT_BROKER_OBJECT: u32 = 0x1000_0001;
+
 /// Offset of the first queue-frame physical address in the descriptor.
 pub const INFO_QUEUE0: usize = 0;
 /// Offset of the second queue-frame physical address.
@@ -222,5 +235,17 @@ mod tests {
         assert_ne!(port_cap(0x60, 2), port_cap(0x64, 1));
         assert_ne!(port_cap(0xCF8, 8), port_cap(0xC000, 0x100));
         assert_eq!(port_cap(0x60, 2), 0x8060_0002);
+    }
+
+    #[test]
+    fn broker_object_stays_in_its_own_namespace() {
+        // Bit 28 only: clear of IRQ sources, the port tag (31), services (30),
+        // and surfaces (29), so the broker can never collide with a grant.
+        assert_eq!(PORT_BROKER_OBJECT & 0x8000_0000, 0);
+        assert_eq!(PORT_BROKER_OBJECT & 0x4000_0000, 0);
+        assert_eq!(PORT_BROKER_OBJECT & 0x2000_0000, 0);
+        assert_ne!(PORT_BROKER_OBJECT, port_cap(0, 1));
+        assert_ne!(PORT_BROKER_OBJECT, crate::service_cap(0));
+        assert_ne!(PORT_BROKER_OBJECT, crate::SURFACE_FACTORY);
     }
 }
