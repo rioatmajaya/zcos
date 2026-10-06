@@ -13,15 +13,22 @@
 //! The screen is dynamic, but not trusted: while the script runs, the kernel
 //! replays the same script through the same shared state machine to recompute
 //! the window pixels, so a client that paints the wrong thing fails the frame
-//! checksum.
+//! checksum. Commands run through [`zc_abi::terminal::run_command`]; this
+//! client supplies a syscall-backed reader, so `cat` reads a real file through
+//! the F7 VFS.
 
 #![no_std]
 #![no_main]
 #![allow(unsafe_code)]
 
-use zc_abi::terminal::Term;
+use zc_abi::terminal::{Term, run_command};
 use zc_abi::{IPC_WM, IPC_WM_REPLY, PixelFormat, SurfaceInfo, WM_ACK, WM_DONE};
-use zc_user::{log, recv_from, send_to, surface_map, task_exit, term_read};
+use zc_user::{
+    close, log, open, read, recv_from, send_to, surface_map, task_exit, term_read,
+};
+
+/// Whether the client has logged its first successful VFS read.
+static mut VFS_LOGGED: bool = false;
 
 /// Task entry point; the kernel provides a fresh user stack.
 #[unsafe(no_mangle)]
@@ -52,7 +59,9 @@ pub unsafe extern "C" fn _start() -> ! {
             if key == u64::MAX {
                 break;
             }
-            terminal.push_key(key as u8);
+            if let Some(line) = terminal.push_key(key as u8) {
+                run_command(&mut terminal, line.as_bytes(), read_file);
+            }
             paint(
                 &terminal,
                 pixels,
@@ -72,6 +81,32 @@ pub unsafe extern "C" fn _start() -> ! {
     // window blank, and the kernel's frame checksum catches that.
     let _ = send_to(IPC_WM_REPLY as u64, WM_DONE);
     task_exit()
+}
+
+/// Reads `path` through the VFS syscalls, for the terminal's `cat`.
+///
+/// The kernel's frame verifier injects its own VFS-backed reader into the same
+/// `run_command`, so a read that disagrees with the kernel's fails the window
+/// content check.
+fn read_file(path: &[u8], out: &mut [u8]) -> Option<usize> {
+    let path = core::str::from_utf8(path).ok()?;
+    let fd = open(path);
+    if fd == u64::MAX {
+        return None;
+    }
+    let got = read(fd, out);
+    close(fd);
+    if got == u64::MAX {
+        return None;
+    }
+    // SAFETY: owned here; logs once, on the first successful read.
+    unsafe {
+        if !core::ptr::addr_of!(VFS_LOGGED).read() {
+            core::ptr::addr_of_mut!(VFS_LOGGED).write(true);
+            log("client: vfs ok\n");
+        }
+    }
+    Some(got as usize)
 }
 
 /// Fills the window surface with the terminal's rendered screen.

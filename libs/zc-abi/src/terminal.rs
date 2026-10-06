@@ -59,7 +59,28 @@ const LINE_H: u32 = GLYPH_H + 2;
 ///
 /// The kernel serves these through `SYS_TERM_READ` and replays them itself, so
 /// the client and the verifier derive the same final screen from one script.
-pub const SCRIPT: &[u8] = b"help\n";
+/// `cat` reads a real initramfs file through the VFS — the client through a
+/// syscall, the verifier through its own mount table — so the scripted screen
+/// proves the filesystem path end to end.
+pub const SCRIPT: &[u8] = b"help\ncat hello.txt\n";
+
+/// A command line the user submitted, copied out of the terminal.
+///
+/// Enter returns one so a caller can run it without holding a borrow of the
+/// terminal it is about to mutate.
+#[derive(Clone, Copy)]
+pub struct Line {
+    bytes: [u8; TERM_COLS],
+    len: u8,
+}
+
+impl Line {
+    /// The command text, without the prompt.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len as usize]
+    }
+}
 
 /// A fixed-capacity terminal screen: a list of text rows plus a cursor.
 ///
@@ -92,16 +113,22 @@ impl Term {
         }
     }
 
-    /// Applies one keystroke: printable bytes append, backspace deletes, and
-    /// Enter runs the current line and starts a new prompt.
-    pub fn push_key(&mut self, ch: u8) {
+    /// Applies one keystroke for editing.
+    ///
+    /// Printable bytes append and backspace deletes (never the prompt). Enter
+    /// finalizes the current input line and returns it so the caller can run it
+    /// through [`run_command`]; the output and the next prompt are the caller's
+    /// to append, so the same screen can be derived with or without a
+    /// filesystem behind the commands.
+    pub fn push_key(&mut self, ch: u8) -> Option<Line> {
         match ch {
-            b'\n' | b'\r' => self.run_current(),
+            b'\n' | b'\r' => Some(self.take_input()),
             8 | 127 => {
                 let row = (self.rows - 1) as usize;
                 if (self.len[row] as usize) > PROMPT_LEN {
                     self.len[row] -= 1;
                 }
+                None
             }
             0x20..=0x7E => {
                 let row = (self.rows - 1) as usize;
@@ -110,9 +137,27 @@ impl Term {
                     self.lines[row][at] = ch;
                     self.len[row] += 1;
                 }
+                None
             }
-            _ => {}
+            _ => None,
         }
+    }
+
+    /// Copies the current input line, without the prompt, into a [`Line`].
+    fn take_input(&self) -> Line {
+        let row = (self.rows - 1) as usize;
+        let n = self.len[row] as usize;
+        let mut line = Line {
+            bytes: [0u8; TERM_COLS],
+            len: 0,
+        };
+        let mut i = PROMPT_LEN;
+        while i < n {
+            line.bytes[line.len as usize] = self.lines[row][i];
+            line.len += 1;
+            i += 1;
+        }
+        line
     }
 
     /// Returns the number of rows currently holding text.
@@ -237,36 +282,8 @@ impl Term {
         }
     }
 
-    /// Runs the current input line and appends its output plus a fresh prompt.
-    fn run_current(&mut self) {
-        let row = (self.rows - 1) as usize;
-        let n = self.len[row] as usize;
-        // Copy the typed command out so the borrow of `self` ends before the
-        // mutating appends below.
-        let mut cmd = [0u8; TERM_COLS];
-        let mut clen = 0usize;
-        let mut i = PROMPT_LEN;
-        while i < n {
-            cmd[clen] = self.lines[row][i];
-            clen += 1;
-            i += 1;
-        }
-        let line = &cmd[..clen];
-        if clen == 0 {
-            // A bare Enter just prints a new prompt.
-        } else if starts_with(line, b"help") {
-            self.push_line(b"Commands: help echo cat stat");
-            self.push_line(b"write tmp persist chmod mount umount exit");
-        } else if starts_with(line, b"echo ") {
-            self.push_line(&line[5..]);
-        } else {
-            self.push_line(b"unknown command");
-        }
-        self.push_line(PROMPT_TEXT);
-    }
-
     /// Appends a row, scrolling the oldest off when the screen is full.
-    fn push_line(&mut self, text: &[u8]) {
+    pub fn push_line(&mut self, text: &[u8]) {
         if self.rows as usize >= TERM_ROWS {
             self.scroll();
         }
@@ -307,20 +324,71 @@ impl Default for Term {
 /// desktop layout draws before the client paints its own surface.
 pub const INITIAL: Term = Term::new();
 
-/// Returns whether `hay` begins with `needle`.
-#[must_use]
-const fn starts_with(hay: &[u8], needle: &[u8]) -> bool {
-    if hay.len() < needle.len() {
-        return false;
+/// Longest file `cat` reads through the injected reader, in bytes.
+const CAT_CAP: usize = 128;
+
+/// Runs one submitted command line, appending its output and a fresh prompt.
+///
+/// The command set is small and, apart from `cat`, side-effect free: `help`
+/// and `echo` are pure, and `cat` reads through `read_file`, which the caller
+/// supplies. The window client passes a syscall-backed reader and the kernel's
+/// frame verifier passes a VFS-backed one, so both derive the same screen from
+/// one script — the proof that the terminal's commands reach the filesystem.
+pub fn run_command(
+    term: &mut Term,
+    line: &[u8],
+    mut read_file: impl FnMut(&[u8], &mut [u8]) -> Option<usize>,
+) {
+    let (cmd, rest) = split_first_word(line);
+    if cmd.is_empty() {
+        // A bare Enter just prints a new prompt.
+    } else if cmd == b"help" {
+        term.push_line(b"Commands: help echo cat stat");
+        term.push_line(b"write tmp persist chmod mount umount exit");
+    } else if cmd == b"echo" {
+        term.push_line(rest);
+    } else if cmd == b"cat" {
+        cat(term, rest, &mut read_file);
+    } else {
+        term.push_line(b"unknown command");
     }
+    term.push_line(PROMPT_TEXT);
+}
+
+/// Reads `path` through `read_file` and appends its newline-separated lines.
+fn cat(term: &mut Term, path: &[u8], read_file: &mut impl FnMut(&[u8], &mut [u8]) -> Option<usize>) {
+    let mut buffer = [0u8; CAT_CAP];
+    let Some(read) = read_file(path, &mut buffer) else {
+        term.push_line(b"cat: cannot open");
+        return;
+    };
+    let n = if read > CAT_CAP { CAT_CAP } else { read };
+    let bytes = &buffer[..n];
+    let mut start = 0;
     let mut i = 0;
-    while i < needle.len() {
-        if hay[i] != needle[i] {
-            return false;
+    while i <= n {
+        if i == n || bytes[i] == b'\n' {
+            // A trailing newline leaves an empty tail; do not print it.
+            if i > start || i < n {
+                term.push_line(&bytes[start..i]);
+            }
+            start = i + 1;
         }
         i += 1;
     }
-    true
+}
+
+/// Splits `line` into its first whitespace-delimited word and the remainder.
+fn split_first_word(line: &[u8]) -> (&[u8], &[u8]) {
+    let mut at = 0;
+    while at < line.len() && line[at] != b' ' {
+        at += 1;
+    }
+    let mut rest = at;
+    while rest < line.len() && line[rest] == b' ' {
+        rest += 1;
+    }
+    (&line[..at], &line[rest..])
 }
 
 /// Overlays a single glyph on `base`, painting lit pixels `fg`.
@@ -348,11 +416,21 @@ pub const fn title_bar_at(lx: u32, ly: u32) -> (u8, u8, u8) {
 mod tests {
     use super::*;
 
+    fn feed(
+        term: &mut Term,
+        script: &[u8],
+        mut read: impl FnMut(&[u8], &mut [u8]) -> Option<usize>,
+    ) {
+        for &key in script {
+            if let Some(line) = term.push_key(key) {
+                run_command(term, line.as_bytes(), &mut read);
+            }
+        }
+    }
+
     fn run(script: &[u8]) -> Term {
         let mut term = Term::new();
-        for &key in script {
-            term.push_key(key);
-        }
+        feed(&mut term, script, |_, _| None);
         term
     }
 
@@ -365,7 +443,7 @@ mod tests {
 
     #[test]
     fn typing_help_prints_the_command_table() {
-        let term = run(SCRIPT);
+        let term = run(b"help\n");
         assert_eq!(term.rows(), 4);
         assert_eq!(term.line(0), b"zc> help");
         assert_eq!(term.line(1), b"Commands: help echo cat stat");
@@ -377,14 +455,14 @@ mod tests {
     fn backspace_edits_without_eating_the_prompt() {
         let mut term = Term::new();
         for &key in b"helpx" {
-            term.push_key(key);
+            let _ = term.push_key(key);
         }
         assert_eq!(term.line(0), b"zc> helpx");
-        term.push_key(8);
+        let _ = term.push_key(8);
         assert_eq!(term.line(0), b"zc> help");
         // Backspace never deletes the prompt itself.
         for _ in 0..20 {
-            term.push_key(8);
+            let _ = term.push_key(8);
         }
         assert_eq!(term.line(0), b"zc> ");
     }
@@ -403,8 +481,47 @@ mod tests {
     }
 
     #[test]
+    fn cat_reads_a_file_through_the_supplied_reader() {
+        let mut term = Term::new();
+        feed(&mut term, b"cat hello.txt\n", |path, out| {
+            assert_eq!(path, b"hello.txt");
+            let data = b"hello from the ZC OS initramfs\n";
+            out[..data.len()].copy_from_slice(data);
+            Some(data.len())
+        });
+        assert_eq!(term.line(0), b"zc> cat hello.txt");
+        assert_eq!(term.line(1), b"hello from the ZC OS initramfs");
+        assert_eq!(term.line(2), b"zc> ");
+    }
+
+    #[test]
+    fn cat_reports_a_missing_file() {
+        let term = run(b"cat nope\n");
+        assert_eq!(term.line(1), b"cat: cannot open");
+        assert_eq!(term.line(2), b"zc> ");
+    }
+
+    #[test]
+    fn the_boot_script_cats_a_file_through_the_reader() {
+        let mut term = Term::new();
+        feed(&mut term, SCRIPT, |_, out| {
+            let data = b"hello from the ZC OS initramfs\n";
+            out[..data.len()].copy_from_slice(data);
+            Some(data.len())
+        });
+        assert_eq!(term.line(3), b"zc> cat hello.txt");
+        assert_eq!(term.line(4), b"hello from the ZC OS initramfs");
+        assert_eq!(term.line(5), b"zc> ");
+    }
+
+    #[test]
     fn render_paints_prompt_output_and_background() {
-        let term = run(SCRIPT);
+        let mut term = Term::new();
+        feed(&mut term, SCRIPT, |_, out| {
+            let data = b"hello from the ZC OS initramfs\n";
+            out[..data.len()].copy_from_slice(data);
+            Some(data.len())
+        });
         let (w, h) = (320u32, 200u32);
         let mut saw_prompt = false;
         let mut saw_output = false;
@@ -463,9 +580,7 @@ mod tests {
         let mut term = Term::new();
         // Print more lines than the screen holds; the oldest must scroll off.
         for _ in 0..(TERM_ROWS + 4) {
-            for &key in b"help\n" {
-                term.push_key(key);
-            }
+            feed(&mut term, b"help\n", |_, _| None);
         }
         assert_eq!(term.rows() as usize, TERM_ROWS);
         // The last row is always a fresh prompt.

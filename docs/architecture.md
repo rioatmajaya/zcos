@@ -234,6 +234,13 @@ pixel (`wm: content ok`), so a client that drops a key or mis-renders fails
 even though the general checksum no longer knows the content. See
 [ADR 0018](adr/0018-window-placement-proof.md).
 
+The terminal's commands run through one shared `run_command`: `help` and `echo`
+are pure, and `cat` reads through a reader the caller injects — the client
+supplies the VFS syscalls, the kernel's verifier supplies its own mount table —
+so the scripted `cat hello.txt` proves the terminal read a real initramfs file
+(`wm: vfs content ok`) while both sides still derive the same screen. See
+[ADR 0022](adr/0022-terminal-commands-over-the-vfs.md).
+
 ## Compatibility
 
 Linux-driver compatibility is implemented as a DDE-style userspace adapter.

@@ -28,6 +28,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0019](0019-port-broker-capability.md) | Port broker capability for ring-3 PCI discovery | Accepted |
 | [0020](0020-device-memory-broker.md) | Device memory broker capability for ring-3 drivers | Accepted |
 | [0021](0021-coherent-dma-window.md) | Coherent DMA window for driver domains | Accepted |
+| [0022](0022-terminal-commands-over-the-vfs.md) | Terminal commands execute over the VFS | Accepted |
 
 ## Adding a decision
 

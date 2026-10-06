@@ -46,7 +46,10 @@ the client and compositor become event loops that repaint on each keystroke
 until the session closes. F8d-3c makes that dynamic window provable: the frame
 checksum's window region becomes a placement proof against the client's own
 surface (which the kernel owns and hashes before the compositor frees it),
-while a separate boot check keeps proving the scripted content exactly. Track
+while a separate boot check keeps proving the scripted content exactly. F8d-3d
+connects that terminal to the VFS: commands run through one shared executor
+with a caller-supplied file reader, so the scripted `cat` is proven against the
+kernel's own mount table. Track
 **K — kernel minimalism** has started: M1 moves the storage parsers out of the
 privileged crate. M2 moves PCI enumeration out of it too — the ring-3 device
 manager scans the bus and brokers the BAR it finds, so the kernel never touches
@@ -57,6 +60,16 @@ still learns no address.
 
 ### Added
 
+- **Terminal commands over the VFS** (F8d-3d): the graphical terminal's
+  commands now act on the F7 filesystem. `zc_abi::terminal::Term` became a pure
+  editor — Enter returns the submitted `Line` — and one shared `run_command`
+  dispatches `help`, `echo`, and the new `cat` with a caller-supplied reader:
+  the client injects the VFS syscalls and the kernel's frame verifier injects
+  its own mount table. The boot script is `help\ncat hello.txt\n`, so the kernel
+  derives the window screen from the initramfs and `wm: content ok` proves the
+  client's read end to end; the kernel also logs `wm: vfs content ok` and the
+  client `client: vfs ok`. See
+  [ADR 0022](docs/adr/0022-terminal-commands-over-the-vfs.md).
 - **Device memory broker** (K8-a): a ring-3 driver can now map a device's
   memory-mapped registers without the kernel knowing the BAR ahead of time. The
   device manager holds `MMIO_BROKER_OBJECT` (a new object namespace, bit 27)

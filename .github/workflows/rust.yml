@@ -171,6 +171,10 @@ jobs:
         grep -q "task 3: compositor: frame updated" build/boot.log
         grep -q "task 3: compositor: ready" build/boot.log
         grep -q "wm: content ok" build/boot.log
+        grep -q "wm: vfs content ok" build/boot.log
+        grep -q "task 8: client: vfs ok" build/boot.log
+        ! grep -q "window script read no file" build/boot.log
+        ! grep -q "window content mismatch" build/boot.log
         grep -q "fb: desktop checksum ok" build/boot.log
         grep -q "switches" build/boot.log
         grep -q "acpi: rsdp v2" build/boot.log

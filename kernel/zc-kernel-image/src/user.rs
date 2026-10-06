@@ -2022,7 +2022,7 @@ fn verify_dma_window() {
 /// boot's scripted content is proven too (`wm: content ok`). A client that
 /// dropped a key or painted the wrong pixels fails here.
 fn snapshot_window_surface(surface: &zc_kernel::surface::Surface) {
-    use zc_abi::terminal::{SCRIPT, Term};
+    use zc_abi::terminal::{SCRIPT, Term, run_command};
     use zc_abi::{FRAME_MOVED, HASH_OFFSET, PixelFormat, hash_step, window_rect};
 
     // SAFETY: published once during setup before any task ran.
@@ -2038,13 +2038,24 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface) {
     if surface.width != window.w || surface.height != window.h {
         crate::fail("window surface geometry mismatch");
     }
-    // The content is the terminal screen the kernel served the client.
+    // The content is the terminal screen the kernel served the client. The
+    // kernel derives it from its own mount table, so the scripted `cat` proves
+    // the client read the same bytes through the VFS.
+    // SAFETY: owned here; reset before the replay.
+    unsafe { addr_of_mut!(WINDOW_VFS_READS).write(0) };
     let mut terminal = Term::new();
     let mut key = 0;
     while key < SCRIPT.len() {
-        terminal.push_key(SCRIPT[key]);
+        if let Some(line) = terminal.push_key(SCRIPT[key]) {
+            run_command(&mut terminal, line.as_bytes(), kernel_read_file);
+        }
         key += 1;
     }
+    // SAFETY: `kernel_read_file` owns the counter and ran above.
+    if unsafe { addr_of!(WINDOW_VFS_READS).read() } == 0 {
+        crate::fail("window script read no file");
+    }
+    crate::serial::write_str("wm: vfs content ok\n");
     let mut hash = HASH_OFFSET;
     let mut ly = 0;
     while ly < surface.height {
@@ -2071,6 +2082,27 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface) {
     // SAFETY: owned here; interrupts are masked on the destroy path.
     unsafe { addr_of_mut!(WINDOW_SNAPSHOT).write(Some(hash)) };
     crate::serial::write_str("wm: content ok\n");
+}
+
+/// Successful reads the frame verifier's scripted session performed.
+static mut WINDOW_VFS_READS: u32 = 0;
+
+/// Reads `path` from the kernel's own mount table, for the frame verifier.
+///
+/// Read-only, so it is safe on the surface-destroy path. A filesystem served
+/// over IPC returns `WouldBlock` and reports as unavailable, which is why the
+/// scripted session only reads the initramfs.
+fn kernel_read_file(path: &[u8], out: &mut [u8]) -> Option<usize> {
+    // SAFETY: mounted during setup before any task ran; read-only here.
+    let mounts = unsafe { &*core::ptr::addr_of!(MOUNTS) };
+    let resolved = mounts.resolve(path).ok()?;
+    let read = resolved.fs.read(resolved.node, 0, out).ok()?;
+    // SAFETY: owned here; the snapshot runs with interrupts masked.
+    unsafe {
+        let count = addr_of!(WINDOW_VFS_READS).read();
+        addr_of_mut!(WINDOW_VFS_READS).write(count + 1);
+    }
+    Some(read)
 }
 
 /// Verifies the final desktop frame: exact where it is deterministic,

@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 7 grants`, `task 6: devmgr: blk published`, `dma: window coherent ok` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8f, F8d-3a–3c done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `wm: window mapped`; `wm: move ok`; `compositor: frame updated`; `wm: content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar host tests pass |
+| **F8** | Desktop | 🔄 F8f, F8d-3a–3d done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `client: vfs ok`; `wm: window mapped`; `wm: move ok`; `compositor: frame updated`; `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar host tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -564,8 +564,15 @@ full browser. Note them as follow-ups, do not build them here.
         `wm: content ok` as the deterministic-boot content proof. See
         [`adr/0018`](adr/0018-window-placement-proof.md). This is the tradeoff
         F8f deliberately deferred.
-      - [ ] *(later)* connect the terminal to the F7 VFS so commands act on the
-        filesystem.
+      - [x] F8d-3d: connect the terminal to the F7 VFS. `Term` is now a pure
+        editor and one shared `run_command` dispatches the commands with a
+        caller-supplied file reader: the client injects the VFS syscalls and
+        the kernel's frame verifier injects its own mount table. The boot
+        script is `help\ncat hello.txt\n`, so the kernel derives the window
+        screen from the initramfs and `wm: content ok` proves the client's read
+        end to end; the kernel also logs `wm: vfs content ok` and the client
+        `client: vfs ok`. See
+        [`adr/0022`](adr/0022-terminal-commands-over-the-vfs.md).
 - [ ] F8e: native Rust UI client library (widgets, event loop, no X11/Win32).
 - [x] F8f: window decorations, focus, and a taskbar. The top panel is now a
       taskbar — a launcher button (`ZC`), a task button for the focused window
@@ -618,6 +625,11 @@ full browser. Note them as follow-ups, do not build them here.
   it is recomputed exactly), so the checksum proves placement for content the
   kernel cannot recompute. `zc-kernel`'s `Surface::pixel_location` host test
   passes.
+- The terminal's commands reach the filesystem (F8d-3d): the boot logs
+  `wm: vfs content ok` (the kernel derived the scripted window from its own
+  mount table) and `task 8: client: vfs ok` (the client read the same file
+  through the VFS syscalls), and `wm: content ok` proves the two screens match.
+  The `zc-abi` `cat` host tests pass.
 - Clean shutdown: `power: halt clean`.
 - Audio plays a known tone and the driver reports no XRUN under a stress
   buffer: `snd: playback ok`.
