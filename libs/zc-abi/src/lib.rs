@@ -11,6 +11,7 @@
 
 #![no_std]
 
+pub mod cursor;
 pub mod desktop;
 pub mod font;
 pub mod driver;
@@ -35,6 +36,9 @@ pub use driver::{
     INPUT_RING_VIRT, IRQ_KEYBOARD, IRQ_MOUSE, IRQ_SOURCES, PORT_BROKER_OBJECT, QUEUE_VIRT, port_cap,
 };
 pub use fb::encode;
+pub use cursor::{
+    Cursor, MOUSE_NO_REPORT, MOUSE_SCRIPT, SPRITE_H, SPRITE_W, pack_report, unpack_report,
+};
 pub use desktop::{
     DamageList, FRAME_INITIAL, FRAME_MOVED, HASH_OFFSET, HASH_PRIME, PANEL_HEIGHT, Rect,
     TITLE_HEIGHT, color_at, hash_step, panel_height, pixel_at, window_color_at, window_pixel_at,
@@ -59,7 +63,8 @@ pub use surface::{
 };
 pub use syscall::{
     SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOSE, SYS_CREATE, SYS_FB_INFO, SYS_IRQ_CLAIM, SYS_IRQ_TEST,
-    SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_MOUNT, SYS_MMIO_MAP, SYS_OPEN, SYS_PORT_CLAIM,
+    SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_MOUNT, SYS_MMIO_MAP, SYS_MOUSE_READ, SYS_OPEN,
+    SYS_PORT_CLAIM,
     SYS_READ,
     SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START,
     SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY,

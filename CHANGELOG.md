@@ -49,7 +49,9 @@ surface (which the kernel owns and hashes before the compositor frees it),
 while a separate boot check keeps proving the scripted content exactly. F8d-3d
 connects that terminal to the VFS: commands run through one shared executor
 with a caller-supplied file reader, so the scripted `cat` is proven against the
-kernel's own mount table. Track
+kernel's own mount table. F8b-2 draws and moves the pointer: a shared
+`zc-abi::cursor` sprite and a non-blocking `SYS_MOUSE_READ`, composited topmost
+with damage tracking and verified pixel by pixel. Track
 **K — kernel minimalism** has started: M1 moves the storage parsers out of the
 privileged crate. M2 moves PCI enumeration out of it too — the ring-3 device
 manager scans the bus and brokers the BAR it finds, so the kernel never touches
@@ -60,6 +62,15 @@ still learns no address.
 
 ### Added
 
+- **Pointer and mouse-read syscall** (F8b-2): the desktop now draws and moves a
+  mouse pointer. `zc-abi::cursor` holds the 8x12 arrow sprite, a screen-clamped
+  `Cursor`, and the report codec, and the new `SYS_MOUSE_READ` (32) serves the
+  next report — packed as `(buttons << 16) | (dx << 8) | dy`, with
+  `MOUSE_NO_REPORT` when none is waiting — non-blocking. The kernel applies each
+  report to its own cursor as it serves it, and the compositor draws the sprite
+  topmost and repaints only the union of its old and new rectangles, so the
+  pointer moves with damage tracking and `fb: cursor ok` proves every sprite
+  pixel. See [ADR 0023](docs/adr/0023-pointer-and-mouse-read.md).
 - **Terminal commands over the VFS** (F8d-3d): the graphical terminal's
   commands now act on the F7 filesystem. `zc_abi::terminal::Term` became a pure
   editor — Enter returns the submitted `Line` — and one shared `run_command`

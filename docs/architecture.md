@@ -241,6 +241,14 @@ so the scripted `cat hello.txt` proves the terminal read a real initramfs file
 (`wm: vfs content ok`) while both sides still derive the same screen. See
 [ADR 0022](adr/0022-terminal-commands-over-the-vfs.md).
 
+The pointer is a shared, verified sprite. `zc-abi::cursor` holds the bitmap, a
+screen-clamped `Cursor`, and the report codec; the non-blocking `SYS_MOUSE_READ`
+returns the next report, which the kernel applies to its own cursor as it serves
+it. The compositor draws the sprite topmost and repaints only the union of its
+old and new rectangles, so it moves with damage tracking, and the frame verifier
+recomputes every sprite pixel (`fb: cursor ok`). See
+[ADR 0023](adr/0023-pointer-and-mouse-read.md).
+
 ## Compatibility
 
 Linux-driver compatibility is implemented as a DDE-style userspace adapter.

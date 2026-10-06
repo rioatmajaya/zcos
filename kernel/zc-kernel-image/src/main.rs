@@ -13,7 +13,8 @@ use core::fmt::Write;
 
 use zc_abi::{
     BootInfo, MemoryRegion, Message, SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOSE, SYS_FB_INFO,
-    SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_MMIO_MAP, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ, SYS_RECV,
+    SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_MMIO_MAP, SYS_MOUSE_READ, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ,
+    SYS_RECV,
     SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START, SYS_SERVICE_STATUS,
     SYS_SERVICE_STOP, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP, SYS_TASK_EXIT,
     SYS_TERM_READ, SYS_YIELD,
@@ -297,6 +298,7 @@ fn exercise_mechanisms(alloc: &mut FrameAllocator<'_>, usable: u64) {
         (SYS_SURFACE_DESTROY, Action::SurfaceDestroy),
         (SYS_TERM_READ, Action::TermRead),
         (SYS_MMIO_MAP, Action::MmioMap),
+        (SYS_MOUSE_READ, Action::MouseRead),
     ];
     for (number, expected) in dispatched {
         match syscall::dispatch(number) {

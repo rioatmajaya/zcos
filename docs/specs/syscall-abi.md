@@ -23,8 +23,8 @@ filesystem exchange page (see [`server-protocol.md`](server-protocol.md)).
 
 ## Syscall table
 
-Numbers are stable and never reused. `SYS_MMIO_MAP` (31) is the highest
-assigned number; 32 and above are rejected.
+Numbers are stable and never reused. `SYS_MOUSE_READ` (32) is the highest
+assigned number; 33 and above are rejected.
 
 Two numbers are **declared but not yet implemented**: `SYS_YIELD` (0) and
 `SYS_MAP_FRAME` (4) are recognized by the dispatch table but have no handler, so
@@ -65,6 +65,19 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 29 | `SYS_SURFACE_DESTROY` | object id | 0 | `u64::MAX` |
 | 30 | `SYS_TERM_READ` | — | keystroke byte, or `u64::MAX` at end of session | — |
 | 31 | `SYS_MMIO_MAP` | object id, `MmioInfo` out ptr, length | mapped virtual address | `u64::MAX` |
+| 32 | `SYS_MOUSE_READ` | — | packed report, or `MOUSE_NO_REPORT` when none | — |
+
+### Mouse reports
+
+`SYS_MOUSE_READ` (32) is non-blocking: it returns the next pointer report
+packed into one word, or `MOUSE_NO_REPORT` (`u64::MAX`) when none is waiting. A
+report packs as `(buttons << 16) | (dx << 8) | dy`, where `buttons` is a button
+bitmask and `dx`/`dy` are two's-complement byte deltas; the largest real word is
+`0x0007_FFFF`, so it can never collide with the sentinel. `cursor::pack_report`
+and `cursor::unpack_report` (`libs/zc-abi/src/cursor.rs`) are the canonical
+codec. The kernel serves a fixed scripted session first, then the movement the
+input drain accumulated, so the compositor and the kernel's frame verifier
+derive the same pointer position from one source.
 
 ### Failure convention
 

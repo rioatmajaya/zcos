@@ -175,6 +175,14 @@ jobs:
         grep -q "task 8: client: vfs ok" build/boot.log
         ! grep -q "window script read no file" build/boot.log
         ! grep -q "window content mismatch" build/boot.log
+        # The pointer is composited topmost and the kernel recomputes its sprite
+        # from the same reports it served; the compositor moves it with damage
+        # tracking, so the session logs a move and the verifier confirms every
+        # sprite pixel instead of trusting the compositor's position.
+        grep -q "task 3: compositor: cursor moved" build/boot.log
+        grep -q "task 3: compositor: cursor ok" build/boot.log
+        grep -q "fb: cursor ok" build/boot.log
+        ! grep -q "cursor checksum mismatch" build/boot.log
         grep -q "fb: desktop checksum ok" build/boot.log
         grep -q "switches" build/boot.log
         grep -q "acpi: rsdp v2" build/boot.log

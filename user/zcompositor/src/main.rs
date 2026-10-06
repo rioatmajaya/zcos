@@ -4,24 +4,26 @@
 //! It creates a full-screen back buffer through the capability-gated surface
 //! syscall and a separate window surface it delegates to a client task. The
 //! client paints the window; the compositor composites it, moves it between two
-//! proof frames, and flushes only the damaged regions. After the move it runs
-//! an event loop: every [`WM_ACK`] from the client re-composites the window at
-//! its new position and flushes just that rectangle, and [`WM_DONE`] ends the
-//! session. The kernel's frame checksum recomputes the expected final frame, so
-//! both damage tracking and the delegated window pixels are proven rather than
-//! assumed.
+//! proof frames, and flushes only the damaged regions. It then polls the mouse
+//! and repaints just the pointer's old and new rectangles, so the pointer moves
+//! with damage tracking rather than a full repaint. After the move it runs an
+//! event loop: every [`WM_ACK`] from the client re-composites the window at its
+//! new position and flushes just that rectangle, and [`WM_DONE`] ends the
+//! session. The kernel's frame checksum recomputes the expected final frame —
+//! desktop, window placement, and pointer sprite — so all three are proven
+//! rather than assumed.
 
 #![no_std]
 #![no_main]
 #![allow(unsafe_code)]
 
 use zc_abi::{
-    DamageList, FRAME_INITIAL, FRAME_MOVED, FramebufferInfo, IPC_WM, IPC_WM_REPLY, PixelFormat,
-    Rect, SurfaceInfo, WM_ACK, WM_DONE, pixel_at, window_rect,
+    Cursor, DamageList, FRAME_INITIAL, FRAME_MOVED, FramebufferInfo, IPC_WM, IPC_WM_REPLY,
+    PixelFormat, Rect, SurfaceInfo, WM_ACK, WM_DONE, encode, pixel_at, unpack_report, window_rect,
 };
 use zc_user::{
-    cap_delegate, framebuffer_info, log, recv_from, send_to, surface_create, surface_destroy,
-    surface_map, task_exit,
+    cap_delegate, framebuffer_info, log, mouse_read, recv_from, send_to, surface_create,
+    surface_destroy, surface_map, task_exit,
 };
 
 /// Damage rectangles the compositor tracks before collapsing to a full repaint.
@@ -109,19 +111,26 @@ pub unsafe extern "C" fn _start() -> ! {
         task_exit()
     }
 
+    // The pointer starts where the kernel's own cursor does, so the first frame
+    // already carries it and the frame proof can recompute every sprite pixel.
+    let mut cursor = Cursor::new(width, height);
+
     // Frame 0: paint the whole desktop into the back buffer, overlay the
-    // client's window, and present it.
-    paint_rect(back, surface.stride, format, width, height, full, FRAME_INITIAL);
-    blit_window(
+    // client's window, draw the pointer, and present it.
+    composite(
         back,
+        &fb,
+        format,
+        width,
+        height,
         surface.stride,
         window_pixels,
         window_surface.stride,
         window_rect(FRAME_INITIAL, width, height),
-        width,
-        height,
+        cursor,
+        full,
+        FRAME_INITIAL,
     );
-    blit_rect(back, &fb, surface.stride, full);
     log("compositor: frame 0 painted\n");
     log("wm: window mapped\n");
 
@@ -130,26 +139,26 @@ pub unsafe extern "C" fn _start() -> ! {
     let mut damage = DamageList::<DAMAGE_SLOTS>::new();
     damage.add(window_rect(FRAME_INITIAL, width, height));
     damage.add(window_rect(FRAME_MOVED, width, height));
+    // Composite each damaged rectangle: repaint the desktop, overlay the
+    // client's window where it covers the rectangle, redraw the pointer, and
+    // flush only that rectangle to the display.
     let mut index = 0;
     while index < damage.len() {
         let rect = damage.rects()[index];
-        paint_rect(back, surface.stride, format, width, height, rect, FRAME_MOVED);
-        index += 1;
-    }
-    // Overlay the client's window at its moved position, then flush the damage.
-    blit_window(
-        back,
-        surface.stride,
-        window_pixels,
-        window_surface.stride,
-        moved,
-        width,
-        height,
-    );
-    index = 0;
-    while index < damage.len() {
-        let rect = damage.rects()[index];
-        blit_rect(back, &fb, surface.stride, rect);
+        composite(
+            back,
+            &fb,
+            format,
+            width,
+            height,
+            surface.stride,
+            window_pixels,
+            window_surface.stride,
+            moved,
+            cursor,
+            rect,
+            FRAME_MOVED,
+        );
         index += 1;
     }
     let drawn = damage.pixel_count();
@@ -158,6 +167,39 @@ pub unsafe extern "C" fn _start() -> ! {
         log_damage(drawn, total);
     }
     log("wm: move ok\n");
+
+    // Cursor session: poll the scripted mouse reports and move the pointer,
+    // repainting only the union of its old and new rectangles. The kernel
+    // serves the same reports to its own cursor, so the frame proof recomputes
+    // the pointer exactly instead of trusting the compositor's position.
+    let mut cursor_moved = false;
+    loop {
+        let Some((_buttons, dx, dy)) = unpack_report(mouse_read()) else {
+            break;
+        };
+        let before = cursor.rect();
+        cursor.apply(dx, dy, width, height);
+        let rect = before.union(cursor.rect());
+        composite(
+            back,
+            &fb,
+            format,
+            width,
+            height,
+            surface.stride,
+            window_pixels,
+            window_surface.stride,
+            moved,
+            cursor,
+            rect,
+            FRAME_MOVED,
+        );
+        cursor_moved = true;
+    }
+    if cursor_moved {
+        log("compositor: cursor moved\n");
+    }
+    log("compositor: cursor ok\n");
 
     // Event loop: the client repaints on every keystroke and acknowledges, so
     // re-composite its window at the moved position and flush only that
@@ -170,6 +212,7 @@ pub unsafe extern "C" fn _start() -> ! {
             surface.stride,
             window_pixels,
             window_surface.stride,
+            moved,
             moved,
             width,
             height,
@@ -253,36 +296,52 @@ fn blit_rect(back: *const u32, fb: &FramebufferInfo, back_stride: u32, rect: Rec
     }
 }
 
-/// Copies the client's window surface into the back buffer at `rect`.
+/// Copies the client's window surface into the back buffer where it covers
+/// `clip`.
 ///
 /// The client owns the window pixels; the compositor only places them, so a
 /// client that failed to paint leaves its zeroed surface behind and the
-/// kernel's frame checksum fails.
+/// kernel's frame checksum fails. `origin` is the window's screen rectangle and
+/// `clip` bounds the write, so compositing one damaged region never disturbs
+/// pixels outside it.
 fn blit_window(
     back: *mut u32,
     back_stride: u32,
     window: *const u32,
     window_stride: u32,
-    rect: Rect,
+    origin: Rect,
+    clip: Rect,
     width: u32,
     height: u32,
 ) {
-    let right = if rect.right() > width { width } else { rect.right() };
-    let bottom = if rect.bottom() > height {
-        height
+    let x0 = if origin.x > clip.x { origin.x } else { clip.x };
+    let y0 = if origin.y > clip.y { origin.y } else { clip.y };
+    let mut right = if origin.right() < clip.right() {
+        origin.right()
     } else {
-        rect.bottom()
+        clip.right()
     };
-    let mut y = rect.y;
+    let mut bottom = if origin.bottom() < clip.bottom() {
+        origin.bottom()
+    } else {
+        clip.bottom()
+    };
+    if right > width {
+        right = width;
+    }
+    if bottom > height {
+        bottom = height;
+    }
+    let mut y = y0;
     while y < bottom {
-        let mut x = rect.x;
+        let mut x = x0;
         while x < right {
             // SAFETY: the kernel mapped both surfaces with user permissions;
-            // `(x, y)` is on screen and `(x - rect.x, y - rect.y)` stays inside
-            // the window surface.
+            // `(x, y)` is on screen and `(x - origin.x, y - origin.y)` stays
+            // inside the window surface because the loop stays within `origin`.
             unsafe {
                 let pixel = window
-                    .add(((y - rect.y) * window_stride + (x - rect.x)) as usize)
+                    .add(((y - origin.y) * window_stride + (x - origin.x)) as usize)
                     .read_volatile();
                 back.add((y * back_stride + x) as usize).write_volatile(pixel);
             }
@@ -290,6 +349,80 @@ fn blit_window(
         }
         y += 1;
     }
+}
+
+/// Draws the pointer sprite into the back buffer within `clip`.
+///
+/// The pointer is topmost, so it is drawn after the desktop and the window;
+/// only its opaque cells paint, so the pixels beneath the sprite show through.
+/// The kernel's frame verifier draws the same sprite at the same position, so
+/// the two cannot drift apart.
+fn draw_cursor(
+    back: *mut u32,
+    stride: u32,
+    format: PixelFormat,
+    width: u32,
+    height: u32,
+    cursor: Cursor,
+    clip: Rect,
+) {
+    let right = if clip.right() > width { width } else { clip.right() };
+    let bottom = if clip.bottom() > height {
+        height
+    } else {
+        clip.bottom()
+    };
+    let mut y = clip.y;
+    while y < bottom {
+        let mut x = clip.x;
+        while x < right {
+            if let Some((r, g, b)) = cursor.color_at(x, y) {
+                if let Some(pixel) = encode(format, r, g, b) {
+                    // SAFETY: `(x, y)` is on screen and inside the mapped
+                    // surface, exactly as in `paint_rect`.
+                    unsafe {
+                        back.add((y * stride + x) as usize).write_volatile(pixel);
+                    }
+                }
+            }
+            x += 1;
+        }
+        y += 1;
+    }
+}
+
+/// Composites `rect` into the back buffer and flushes it to the display.
+///
+/// The layers are painted bottom-up — desktop, then the client's window where
+/// it covers the rectangle, then the pointer — and only `rect` is copied to the
+/// display, so the caller can pass any damaged region.
+fn composite(
+    back: *mut u32,
+    fb: &FramebufferInfo,
+    format: PixelFormat,
+    width: u32,
+    height: u32,
+    stride: u32,
+    window: *const u32,
+    window_stride: u32,
+    window_origin: Rect,
+    cursor: Cursor,
+    rect: Rect,
+    frame: u32,
+) {
+    paint_rect(back, stride, format, width, height, rect, frame);
+    blit_window(
+        back,
+        stride,
+        window,
+        window_stride,
+        window_origin,
+        rect,
+        width,
+        height,
+    );
+    draw_cursor(back, stride, format, width, height, cursor, rect);
+    blit_rect(back, fb, stride, rect);
 }
 
 /// Logs the mapped surface's geometry and address.

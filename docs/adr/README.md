@@ -29,6 +29,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0020](0020-device-memory-broker.md) | Device memory broker capability for ring-3 drivers | Accepted |
 | [0021](0021-coherent-dma-window.md) | Coherent DMA window for driver domains | Accepted |
 | [0022](0022-terminal-commands-over-the-vfs.md) | Terminal commands execute over the VFS | Accepted |
+| [0023](0023-pointer-and-mouse-read.md) | Pointer state and the mouse-read syscall | Accepted |
 
 ## Adding a decision
 

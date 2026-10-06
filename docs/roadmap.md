@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 7 grants`, `task 6: devmgr: blk published`, `dma: window coherent ok` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8f, F8d-3a–3d done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `client: vfs ok`; `wm: window mapped`; `wm: move ok`; `compositor: frame updated`; `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar host tests pass |
+| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `client: vfs ok`; `wm: window mapped`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor host tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -487,6 +487,14 @@ full browser. Note them as follow-ups, do not build them here.
       ring the shell drains, stripped by the kernel before the shell.
       `input: mouse loopback ok`, `input: mouse irq self-test ok`,
       `kbd: irq 34 delivered`. See [`adr/0017`](adr/0017-input-stream-with-mouse.md).
+      - [x] F8b-2: draw and move the pointer. `zc-abi::cursor` holds the 8x12
+        arrow sprite, the screen-clamped `Cursor` position, and the report
+        codec; `SYS_MOUSE_READ` (32) serves the scripted session and then live
+        movement, non-blocking. The compositor draws the pointer topmost and
+        moves it with damage tracking — repainting only the union of its old
+        and new rectangles — and the kernel recomputes every sprite pixel, so
+        `fb: cursor ok` proves the pointer rather than trusting the compositor.
+        See [`adr/0023`](adr/0023-pointer-and-mouse-read.md).
 - [x] F8c: 2D renderer with a bitmap font and text overlay. `zc-abi::font`
       embeds the VGA 8x16 glyph set and exposes `glyph_row`/`glyph_bit`/
       `text_blend`/`text_width` as pure `const`-callable helpers; the window
@@ -630,6 +638,10 @@ full browser. Note them as follow-ups, do not build them here.
   mount table) and `task 8: client: vfs ok` (the client read the same file
   through the VFS syscalls), and `wm: content ok` proves the two screens match.
   The `zc-abi` `cat` host tests pass.
+- The pointer is drawn and moved (F8b-2): the compositor logs
+  `compositor: cursor moved` after moving the sprite with damage tracking, and
+  the kernel recomputes every sprite pixel from the same reports, logging
+  `fb: cursor ok`. The `zc-abi` cursor host tests pass.
 - Clean shutdown: `power: halt clean`.
 - Audio plays a known tone and the driver reports no XRUN under a stress
   buffer: `snd: playback ok`.

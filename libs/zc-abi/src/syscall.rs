@@ -116,6 +116,12 @@ pub const SYS_TERM_READ: u64 = 30;
 /// the region. The mapping is uncached, because the bytes are device registers
 /// rather than memory. Passing a zero length skips the info copy.
 pub const SYS_MMIO_MAP: u64 = 31;
+/// Reads the next mouse report without blocking: returns a packed
+/// `(buttons, dx, dy)` (decode with [`crate::cursor::unpack_report`]), or
+/// [`crate::cursor::MOUSE_NO_REPORT`] when none is waiting. The boot proof
+/// serves a fixed script ([`crate::cursor::MOUSE_SCRIPT`]) so the compositor
+/// and the kernel's frame verifier derive the same pointer position.
+pub const SYS_MOUSE_READ: u64 = 32;
 
 /// Error codes returned by failed syscalls.
 ///
@@ -203,6 +209,7 @@ mod tests {
         assert_eq!(SYS_SURFACE_DESTROY, 29);
         assert_eq!(SYS_TERM_READ, 30);
         assert_eq!(SYS_MMIO_MAP, 31);
+        assert_eq!(SYS_MOUSE_READ, 32);
     }
 
     #[test]

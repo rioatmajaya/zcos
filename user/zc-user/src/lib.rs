@@ -14,7 +14,8 @@ pub use zc_abi::{
     FS_ID_ZCFS, FS_OP_STOP, IPC_FS, IPC_SUPERVISE, IPC_WM, IPC_WM_REPLY, KIND_CHR, KIND_DIR,
     KIND_FILE, SERVICE_KIND_EXIT, SERVICE_KIND_FAULT, SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOSE,
     SYS_CREATE, SYS_FB_INFO, SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME,
-    SYS_MMIO_MAP, SYS_MOUNT, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ, SYS_RECV, SYS_RECV_FROM, SYS_SEND,
+    SYS_MMIO_MAP, SYS_MOUNT, SYS_MOUSE_READ, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ, SYS_RECV,
+    SYS_RECV_FROM, SYS_SEND,
     SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START, SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT,
     SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TERM_READ,
     SYS_UMOUNT, SYS_WRITE, SYS_YIELD, MmioInfo, Stat, SurfaceInfo, SyscallError, WM_ACK,
@@ -209,6 +210,17 @@ pub fn serial_read() -> u8 {
 #[inline(always)]
 pub fn term_read() -> u64 {
     syscall0(SYS_TERM_READ)
+}
+
+/// Reads the next mouse report without blocking.
+///
+/// Returns a packed `(buttons, dx, dy)` (decode with
+/// [`zc_abi::cursor::unpack_report`]) or [`zc_abi::cursor::MOUSE_NO_REPORT`]
+/// when none is waiting. The boot proof serves a fixed script so the compositor
+/// and the kernel's frame verifier derive the same pointer position.
+#[inline(always)]
+pub fn mouse_read() -> u64 {
+    syscall0(SYS_MOUSE_READ)
 }
 
 /// Closes a descriptor, returning 0 or `u64::MAX` on failure.

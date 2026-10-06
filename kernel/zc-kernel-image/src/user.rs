@@ -1819,6 +1819,44 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 0
             }
         }
+        Ok(Action::MouseRead) => {
+            use zc_abi::cursor::{MOUSE_NO_REPORT, MOUSE_SCRIPT, pack_report};
+            // The scripted session runs first, so the boot proof derives the
+            // same pointer position the compositor paints; after it the live
+            // movement the drain accumulated is delivered. Non-blocking: the
+            // compositor polls, so it never waits on a report that may not come.
+            // SAFETY: owned here; interrupts are masked through this arm.
+            let index = unsafe { &mut *addr_of_mut!(MOUSE_SCRIPT_INDEX) };
+            if *index < MOUSE_SCRIPT.len() {
+                let (dx, dy) = MOUSE_SCRIPT[*index];
+                *index += 1;
+                apply_cursor(dx, dy);
+                regs.set_result(pack_report(0, dx, dy));
+                0
+            } else {
+                // SAFETY: owned here; interrupts are masked through this arm.
+                let pending = unsafe {
+                    if addr_of!(MOUSE_PENDING_ANY).read() {
+                        let (buttons, dx, dy) = addr_of!(MOUSE_PENDING).read();
+                        addr_of_mut!(MOUSE_PENDING_ANY).write(false);
+                        Some((buttons, dx, dy))
+                    } else {
+                        None
+                    }
+                };
+                match pending {
+                    Some((buttons, dx, dy)) => {
+                        apply_cursor(dx, dy);
+                        regs.set_result(pack_report(buttons, dx, dy));
+                        0
+                    }
+                    None => {
+                        regs.set_result(MOUSE_NO_REPORT);
+                        0
+                    }
+                }
+            }
+        }
         Ok(_) => {
             regs.set_result(u64::MAX);
             0
@@ -2056,6 +2094,7 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface) {
         crate::fail("window script read no file");
     }
     crate::serial::write_str("wm: vfs content ok\n");
+    let cursor = expected_cursor();
     let mut hash = HASH_OFFSET;
     let mut ly = 0;
     while ly < surface.height {
@@ -2067,7 +2106,13 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface) {
             // SAFETY: the surface frames come from the frame allocator below
             // the identity map, the same assumption `build_fb_tables` makes.
             let pixel = unsafe { read_volatile((frame + offset as u64) as *const u32) };
-            hash = hash_step(hash, pixel);
+            // Where the pointer is opaque the display shows it, not the client's
+            // pixel, so the placement hash skips those pixels on both sides. The
+            // content comparison below still covers every pixel: the client
+            // never draws the pointer.
+            if cursor.color_at(window.x + lx, window.y + ly).is_none() {
+                hash = hash_step(hash, pixel);
+            }
             let Some(expected) = terminal.pixel(format, lx, ly, surface.width, surface.height)
             else {
                 crate::fail("unsupported window format");
@@ -2119,7 +2164,7 @@ fn kernel_read_file(path: &[u8], out: &mut [u8]) -> Option<usize> {
 /// and window regions are hashed separately and combined; either mismatch
 /// fails.
 fn verify_framebuffer() {
-    use zc_abi::{FRAME_MOVED, HASH_OFFSET, hash_step, pixel_at, window_rect};
+    use zc_abi::{FRAME_MOVED, HASH_OFFSET, encode, hash_step, pixel_at, window_rect};
 
     // SAFETY: published once during setup before any task ran.
     let info = unsafe { core::ptr::addr_of!(FB_INFO).read() };
@@ -2132,9 +2177,12 @@ fn verify_framebuffer() {
     let width = u64::from(info.width);
     let height = u64::from(info.height);
     let stride = u64::from(info.stride);
+    let cursor = expected_cursor();
     let mut want_desktop = HASH_OFFSET;
     let mut actual_desktop = HASH_OFFSET;
     let mut actual_window = HASH_OFFSET;
+    let mut want_cursor = HASH_OFFSET;
+    let mut actual_cursor = HASH_OFFSET;
     let mut y = 0;
     while y < height {
         let mut x = 0;
@@ -2143,7 +2191,15 @@ fn verify_framebuffer() {
             // permissions; the identity map covers it for the check.
             let seen =
                 unsafe { read_volatile((info.address + (y * stride + x) * 4) as *const u32) };
-            if window.contains(x as u32, y as u32) {
+            if let Some((r, g, b)) = cursor.color_at(x as u32, y as u32) {
+                // The pointer is topmost and recomputed exactly: the sprite is
+                // fixed and the kernel served the reports that positioned it.
+                let Some(expected) = encode(info.pixel_format, r, g, b) else {
+                    crate::fail("unsupported fb format");
+                };
+                want_cursor = hash_step(want_cursor, expected);
+                actual_cursor = hash_step(actual_cursor, seen);
+            } else if window.contains(x as u32, y as u32) {
                 actual_window = hash_step(actual_window, seen);
             } else {
                 let Some(expected) = pixel_at(
@@ -2173,12 +2229,17 @@ fn verify_framebuffer() {
     if actual_window != want_window {
         crate::fail("window placement mismatch");
     }
-    // Fold the window hash's two halves into the desktop hash so the reported
+    if want_cursor != actual_cursor {
+        crate::fail("cursor checksum mismatch");
+    }
+    crate::serial::write_str("fb: cursor ok\n");
+    // Fold the window and cursor hashes into the desktop hash so the reported
     // value covers the whole frame; the comparisons above gate the boot.
-    let actual = hash_step(
-        hash_step(actual_desktop, actual_window as u32),
-        (actual_window >> 32) as u32,
-    );
+    let mut actual = actual_desktop;
+    actual = hash_step(actual, actual_window as u32);
+    actual = hash_step(actual, (actual_window >> 32) as u32);
+    actual = hash_step(actual, actual_cursor as u32);
+    actual = hash_step(actual, (actual_cursor >> 32) as u32);
     let _ = crate::serial::print(format_args!(
         "fb: desktop checksum ok ({} px, {:#x})\n",
         width * height,
@@ -2439,7 +2500,11 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
     // Publish the firmware framebuffer for the info syscall and mapping.
     // SAFETY: `boot_info` is the loader structure validated on entry.
     unsafe {
-        core::ptr::addr_of_mut!(FB_INFO).write((&*boot_info).framebuffer);
+        let fb = (&*boot_info).framebuffer;
+        core::ptr::addr_of_mut!(FB_INFO).write(fb);
+        // The pointer starts at its fixed spot; the compositor and the frame
+        // verifier both derive every later position from this one value.
+        addr_of_mut!(CURSOR).write(zc_abi::cursor::Cursor::new(fb.width, fb.height));
     }
 
     // Shared framebuffer tables, linked into every task below.
@@ -3365,6 +3430,25 @@ static mut MOUSE_LAST: [u8; 3] = [0; 3];
 /// How many mouse frames the drain has stashed since boot.
 static mut MOUSE_FRAME_COUNT: u64 = 0;
 
+/// The pointer's authoritative position.
+///
+/// The kernel applies every report it serves — scripted or live — so the frame
+/// verifier can recompute the exact pointer pixels the compositor drew. Set to
+/// the fixed start position once the framebuffer is published.
+static mut CURSOR: zc_abi::cursor::Cursor = zc_abi::cursor::Cursor::at(0, 0);
+
+/// How many reports of the scripted mouse session have been served.
+static mut MOUSE_SCRIPT_INDEX: usize = 0;
+
+/// Live mouse movement accumulated since the last read.
+///
+/// The drain may strip several frames between reads; summing their deltas keeps
+/// the pointer's total travel instead of losing all but the last frame.
+static mut MOUSE_PENDING: (u8, i8, i8) = (0, 0, 0);
+
+/// Whether [`MOUSE_PENDING`] holds movement not yet delivered.
+static mut MOUSE_PENDING_ANY: bool = false;
+
 /// Byte capacity of the PS/2 keyboard queue the window client reads.
 const WINDOW_INPUT_CAP: usize = 256;
 
@@ -3466,10 +3550,49 @@ fn drain_domain_input() {
             MOUSE_LAST = mouse[frames - 1];
             MOUSE_FRAME_COUNT += frames as u64;
         }
+        let mut index = 0;
+        while index < frames {
+            accumulate_mouse(mouse[index]);
+            index += 1;
+        }
     }
     if keys > 0 {
         push_window_input(&keyboard[..keys]);
     }
+}
+
+/// Adds one mouse frame's deltas to the pending movement.
+///
+/// Saturated rather than wrapped: a burst of movement between reads should move
+/// the pointer as far as it really went, not wrap around.
+fn accumulate_mouse(frame: [u8; 3]) {
+    // SAFETY: owned here; the drain runs with interrupts masked.
+    unsafe {
+        let (buttons, dx, dy) = MOUSE_PENDING;
+        MOUSE_PENDING = (
+            buttons | frame[0],
+            (i16::from(dx) + i16::from(frame[1] as i8)).clamp(-128, 127) as i8,
+            (i16::from(dy) + i16::from(frame[2] as i8)).clamp(-128, 127) as i8,
+        );
+        MOUSE_PENDING_ANY = true;
+    }
+}
+
+/// Applies one mouse report to the authoritative pointer position.
+fn apply_cursor(dx: i8, dy: i8) {
+    // SAFETY: published during setup before any task ran.
+    let info = unsafe { core::ptr::addr_of!(FB_INFO).read() };
+    // SAFETY: owned here; the mouse syscall runs with interrupts masked.
+    unsafe {
+        let cursor = &mut *addr_of_mut!(CURSOR);
+        cursor.apply(dx, dy, info.width, info.height);
+    }
+}
+
+/// Returns the pointer position the compositor should have painted.
+fn expected_cursor() -> zc_abi::cursor::Cursor {
+    // SAFETY: read-only; written only through the mouse syscall.
+    unsafe { addr_of!(CURSOR).read() }
 }
 
 /// Returns the page-table root of a task slot.
