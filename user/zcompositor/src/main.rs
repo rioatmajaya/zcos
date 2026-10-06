@@ -213,9 +213,13 @@ pub unsafe extern "C" fn _start() -> ! {
         // so the position is proven, not trusted. Live input moves it between
         // client frames, and the boot script already placed it here.
         loop {
-            let Some((_buttons, dx, dy)) = unpack_report(mouse_read()) else {
+            let Some((buttons, dx, dy)) = unpack_report(mouse_read()) else {
                 break;
             };
+            // DIAGNOSTIC: mark a click reaching the compositor.
+            if buttons != 0 {
+                log("comp: btn\n");
+            }
             let before = cursor.rect();
             cursor.apply(dx, dy, width, height);
             let rect = before.union(cursor.rect());

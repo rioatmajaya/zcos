@@ -3608,12 +3608,15 @@ fn notify_mouse(tasks: &mut TaskTable<TASK_COUNT>) {
             if endpoint.len() == 0 {
                 if let Some(message) = zc_abi::Message::from_words(&[WM_MOUSE]) {
                     if endpoint.send(message).is_ok() {
+                        // DIAGNOSTIC: the compositor was nudged for live mouse.
+                        crate::serial::print(format_args!("kern: nudge\n"));
                         tasks.unblock_all();
                     }
                 }
             } else {
                 // A nudge was skipped because the channel already holds a
                 // wakeup; the compositor drains all mouse on its next wake.
+                crate::serial::print(format_args!("kern: nudge skipped\n"));
             }
         }
     }
@@ -3629,6 +3632,10 @@ fn notify_mouse(tasks: &mut TaskTable<TASK_COUNT>) {
 fn accumulate_mouse(frame: [u8; 3]) {
     // SAFETY: owned here; the drain runs with interrupts masked.
     unsafe {
+        // DIAGNOSTIC: mark a click frame reaching the kernel.
+        if frame[0] != 0 {
+            crate::serial::print(format_args!("kern: btn frame\n"));
+        }
         let (_buttons, dx, dy) = MOUSE_PENDING;
         MOUSE_PENDING = (
             // The latest packet holds the current button state; OR would keep a
