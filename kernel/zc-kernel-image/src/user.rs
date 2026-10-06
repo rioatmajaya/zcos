@@ -1849,6 +1849,11 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 let pending = unsafe {
                     if addr_of!(MOUSE_PENDING_ANY).read() {
                         let (buttons, dx, dy) = addr_of!(MOUSE_PENDING).read();
+                        // Consume the batch: clear the accumulator so the next
+                        // movement starts from zero. Without this the delivered
+                        // delta would stack on the last one and the pointer would
+                        // keep flying in the previous direction.
+                        addr_of_mut!(MOUSE_PENDING).write((0, 0, 0));
                         addr_of_mut!(MOUSE_PENDING_ANY).write(false);
                         Some((buttons, dx, dy))
                     } else {
@@ -3603,13 +3608,18 @@ fn notify_mouse(tasks: &mut TaskTable<TASK_COUNT>) {
 /// Adds one mouse frame's deltas to the pending movement.
 ///
 /// Saturated rather than wrapped: a burst of movement between reads should move
-/// the pointer as far as it really went, not wrap around.
+/// the pointer as far as it really went, not wrap around. Frames accumulate
+/// within one batch (between two `SYS_MOUSE_READ` calls); the read resets the
+/// accumulator, so the next batch starts from zero instead of stacking on top
+/// of the last delivered movement.
 fn accumulate_mouse(frame: [u8; 3]) {
     // SAFETY: owned here; the drain runs with interrupts masked.
     unsafe {
         let (buttons, dx, dy) = MOUSE_PENDING;
         MOUSE_PENDING = (
-            buttons | frame[0],
+            // The latest packet holds the current button state; OR would keep a
+            // released button stuck down across frames.
+            frame[0],
             (i16::from(dx) + i16::from(frame[1] as i8)).clamp(-128, 127) as i8,
             (i16::from(dy) + i16::from(frame[2] as i8)).clamp(-128, 127) as i8,
         );

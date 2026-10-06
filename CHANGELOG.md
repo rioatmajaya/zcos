@@ -536,8 +536,6 @@ still learns no address.
   corrupted the next task's page table and the boot wedged. Both interrupt
   stacks are now 64 KiB.
 
-### Fixed
-
 - **Mouse never moved because the input domain only waited on the keyboard
   interrupt** (F8b): the driver domain's `serve()` loop called
   `irq_wait(IRQ_KEYBOARD)`, so a mouse-only interrupt flowed through the real
@@ -551,6 +549,16 @@ still learns no address.
   the input domain now waits on *any* of its claimed lines and drains the 8042
   wholesale on every wake. The per-line `irq_wait(source)` semantics the
   bring-up proofs rely on are unchanged. See
+  [ADR 0023](docs/adr/0023-pointer-and-mouse-read.md).
+
+- **Live pointer flew across the screen and overshot on tiny moves** (F8b):
+  `SYS_MOUSE_READ` delivered the accumulated movement but never cleared
+  `MOUSE_PENDING`, so every later report *added* to the last delivered delta
+  instead of replacing it. The value pinned at the clamp (±127) and a stale
+  direction kept replaying — even a purely vertical move re-fired the old
+  horizontal jump. The read now resets the accumulator to zero after consuming
+  it, and button state tracks the latest packet instead of OR-ing across frames,
+  so one physical move maps to one on-screen move. See
   [ADR 0023](docs/adr/0023-pointer-and-mouse-read.md).
 
 ## [0.1.0] - 2026-10-01
