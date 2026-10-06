@@ -46,7 +46,7 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 10 | `SYS_FB_INFO` | `FramebufferInfo` out ptr | 0 | `u64::MAX` |
 | 11 | `SYS_CLOSE` | descriptor | 0 | `u64::MAX` |
 | 12 | `SYS_IRQ_CLAIM` | source index | 0 | `u64::MAX` |
-| 13 | `SYS_IRQ_WAIT` | source index | coalesced count (blocks) | — |
+| 13 | `SYS_IRQ_WAIT` | source index (or `IRQ_ANY`) | coalesced count (blocks) | `u64::MAX` |
 | 14 | `SYS_IRQ_TEST` | — | 0 | `u64::MAX` |
 | 15 | `SYS_PORT_CLAIM` | start port, length | 0 | `u64::MAX` |
 | 16 | `SYS_SEND_TO` | channel, word | 0 (blocks when full) | — |
@@ -78,6 +78,18 @@ and `cursor::unpack_report` (`libs/zc-abi/src/cursor.rs`) are the canonical
 codec. The kernel serves a fixed scripted session first, then the movement the
 input drain accumulated, so the compositor and the kernel's frame verifier
 derive the same pointer position from one source.
+
+### `SYS_IRQ_WAIT` and `IRQ_ANY`
+
+`SYS_IRQ_WAIT` (13) blocks the caller until an interrupt arrives on a source it
+owns, then returns the coalesced count since the last wait. A driver that owns
+several sources may instead pass `IRQ_ANY` (`u64::MAX`) as the source argument:
+the kernel then wakes on **any** owned source and clears every owned count at
+once. This is what the input driver domain uses — it claims both the keyboard
+and mouse lines but drains the shared 8042 wholesale on every wake, so a
+mouse-only interrupt would otherwise strand behind a keyboard-specific wait. A
+caller that does not own the requested source (including `IRQ_ANY` when the task
+owns nothing) still gets `u64::MAX`.
 
 ### Failure convention
 

@@ -49,3 +49,17 @@ snapshot skips the pixels the pointer covers so the two proofs do not fight.
   nudge on the window-reply channel after it routes a mouse frame; the compositor
   wakes, drains `SYS_MOUSE_READ`, and moves the sprite. Both sides apply the same
   served reports, so the position stays proven even when the hardware drives it.
+
+## Revision — 2026-10-06 (live mouse was frozen on real hardware)
+
+The cursor plumbing above was correct, but the input domain never drained a
+mouse-only interrupt: its `serve()` loop called `irq_wait(IRQ_KEYBOARD)`, and a
+mouse interrupt — though it recorded a count and tripped the scheduler's
+`any_pending()` wake — simply re-entered that keyboard wait and re-blocked
+without touching the 8042. The mouse bytes never reached the ring, so the
+compositor never saw a report. The fix adds **`IRQ_ANY` (`u64::MAX`)** as a
+source argument to `SYS_IRQ_WAIT`: the kernel wakes on whichever owned source
+fired and clears every owned count at once, so the domain waits on *any* of its
+claimed lines and drains the 8042 wholesale. The per-line `irq_wait(source)`
+semantics the bring-up proofs rely on are unchanged. Documented in
+[`../specs/syscall-abi.md`](../specs/syscall-abi.md) under `SYS_IRQ_WAIT`.

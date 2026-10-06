@@ -229,6 +229,33 @@ impl<const SOURCES: usize> IrqInbox<SOURCES> {
     pub fn peek(&self, source: usize) -> u32 {
         self.counts.get(source).copied().unwrap_or(0)
     }
+
+    /// Takes every pending count across the sources `task` owns.
+    ///
+    /// Returns the sum and clears each owned count, or `None` when nothing is
+    /// pending. A driver that owns several lines and drains the device
+    /// wholesale on every wake uses this to block on *any* owned source: one
+    /// call consumes keyboard and mouse alike, so a mouse-only interrupt that
+    /// the per-line [`take`](Self::take) would have skipped no longer leaves
+    /// the controller undrained.
+    pub fn take_all(&mut self, task: u32) -> Option<u32> {
+        if task >= MAX_TASKS {
+            return None;
+        }
+        let bit = 1u32 << task;
+        let mut total = 0u32;
+        for index in 0..SOURCES {
+            if self.owners[index] == bit {
+                total = total.saturating_add(self.counts[index]);
+                self.counts[index] = 0;
+            }
+        }
+        if total == 0 {
+            None
+        } else {
+            Some(total)
+        }
+    }
 }
 
 impl<const SOURCES: usize> Default for IrqInbox<SOURCES> {
@@ -362,5 +389,33 @@ mod tests {
         inbox.counts[0] = u32::MAX;
         assert!(inbox.post(0));
         assert_eq!(inbox.peek(0), u32::MAX);
+    }
+
+    #[test]
+    fn take_all_consumes_every_owned_source() {
+        let mut inbox = Inbox::new();
+        inbox.claim(0, 2).unwrap();
+        inbox.claim(1, 2).unwrap();
+        inbox.post(0);
+        inbox.post(1);
+        inbox.post(1);
+        // A mouse-only burst (source 1) must not strand behind a keyboard wait.
+        assert_eq!(inbox.take_all(2), Some(3));
+        // Once drained, the next call blocks again.
+        assert_eq!(inbox.take_all(2), None);
+        assert!(!inbox.any_pending());
+    }
+
+    #[test]
+    fn take_all_ignores_other_owners() {
+        let mut inbox = Inbox::new();
+        inbox.claim(0, 1).unwrap();
+        inbox.claim(1, 3).unwrap();
+        inbox.post(0);
+        inbox.post(1);
+        // Task 1 owns only source 0, so it sees just the one count.
+        assert_eq!(inbox.take_all(1), Some(1));
+        // Source 1 still belongs to task 3 and is untouched.
+        assert_eq!(inbox.take_all(3), Some(1));
     }
 }

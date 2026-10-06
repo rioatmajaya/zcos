@@ -26,7 +26,7 @@
 #![no_main]
 #![allow(unsafe_code)]
 
-use zc_abi::{INPUT_RING_VIRT, IRQ_KEYBOARD, IRQ_MOUSE};
+use zc_abi::{INPUT_RING_VIRT, IRQ_ANY, IRQ_KEYBOARD, IRQ_MOUSE};
 use zc_kernel::irq::SharedInputRing;
 use zc_kernel::kbd::Modifiers;
 use zc_kernel::mouse::{MouseAssembler, encode_frame};
@@ -103,9 +103,11 @@ fn drain(out: &mut SharedInputRing) -> u32 {
 ///
 /// The supervisor revived this slot in the same address space, but the fault
 /// path released the IRQ claims and the port bitmap, so the resumed run must
-/// claim them again before it can touch the 8042. It then waits on the keyboard
-/// line and drains whatever the controller holds; the mouse line is claimed too
-/// and its bytes are drained on the same pass.
+/// claim them again before it can touch the 8042. It then waits on *any* owned
+/// line — keyboard or mouse — and on every wake drains whatever the controller
+/// holds; both lines are claimed, and because the 8042 tags bytes by the aux bit,
+/// one wholesale drain services whichever fired. (Waiting for the keyboard line
+/// only would strand a mouse-only interrupt behind a keyboard wait.)
 fn serve() -> ! {
     if irq_claim(IRQ_KEYBOARD as u64) == u64::MAX {
         log("kbd: resume keyboard claim refused\n");
@@ -122,10 +124,13 @@ fn serve() -> ! {
     let ring = shared_ring();
     log("kbd: serving\n");
     loop {
-        // Blocking call: the task sleeps here until a keyboard interrupt is
-        // recorded and a later tick wakes it. Every wake drains the controller,
-        // so a byte queued while we slept is never left behind.
-        if irq_wait(IRQ_KEYBOARD as u64) == u64::MAX {
+        // Blocking call: sleep until *any* owned source fires (keyboard or
+        // mouse) and a later tick wakes this task. The 8042 is drained
+        // wholesale on every wake, so a mouse-only interrupt — which never
+        // carries a keyboard byte — is no longer stranded behind a keyboard
+        // wait. `IRQ_ANY` consumes both pending counts at once, so the loop
+        // re-blocks only when input has genuinely run dry.
+        if irq_wait(IRQ_ANY) == u64::MAX {
             abort();
         }
         let _ = drain(ring);

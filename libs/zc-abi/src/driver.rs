@@ -104,6 +104,17 @@ pub const IRQ_MOUSE: usize = 1;
 /// Total number of interrupt sources the kernel routes.
 pub const IRQ_SOURCES: usize = 5;
 
+/// Sentinel source for [`SYS_IRQ_WAIT`] meaning "wake on any source I own".
+///
+/// A driver that claims several lines (such as the input domain, which owns
+/// both the keyboard and mouse) has no use for a per-line wakeup: the 8042 is
+/// drained wholesale on every interrupt, so whichever line fired, the work is
+/// the same. Passing `IRQ_ANY` blocks until any owned source has a pending
+/// interrupt and clears every owned count at once, so the next call blocks
+/// again until genuinely new input arrives. It is `u64::MAX` so it can never
+/// collide with a real source index.
+pub const IRQ_ANY: u64 = u64::MAX;
+
 /// User address of the input driver domain's ring.
 ///
 /// One page mapped into that domain only, past the last task image so the
@@ -279,6 +290,12 @@ mod tests {
         assert!(IRQ_KEYBOARD < IRQ_SOURCES);
         assert!(IRQ_MOUSE < IRQ_SOURCES);
         assert_ne!(IRQ_KEYBOARD, IRQ_MOUSE);
+    }
+
+    #[test]
+    fn irq_any_can_never_collide_with_a_real_source() {
+        assert_eq!(IRQ_ANY, u64::MAX);
+        assert!((IRQ_ANY as usize) >= IRQ_SOURCES);
     }
 
     #[test]

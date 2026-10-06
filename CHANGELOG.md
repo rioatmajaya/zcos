@@ -536,6 +536,23 @@ still learns no address.
   corrupted the next task's page table and the boot wedged. Both interrupt
   stacks are now 64 KiB.
 
+### Fixed
+
+- **Mouse never moved because the input domain only waited on the keyboard
+  interrupt** (F8b): the driver domain's `serve()` loop called
+  `irq_wait(IRQ_KEYBOARD)`, so a mouse-only interrupt flowed through the real
+  path (vector → handler → EOI → `irq_post`) and recorded a count, but the
+  scheduler's `any_pending()` wake simply re-entered the keyboard wait, which
+  re-blocked without draining the 8042. The mouse bytes sat in the controller
+  forever and never reached the ring, the kernel drain, or the compositor — the
+  pointer froze on real hardware even though the cursor plumbing was correct. The
+  fix adds `IRQ_ANY` (`u64::MAX`) to `SYS_IRQ_WAIT`: passing it makes the kernel
+  wake on whichever owned source fired and clear every owned count at once, so
+  the input domain now waits on *any* of its claimed lines and drains the 8042
+  wholesale on every wake. The per-line `irq_wait(source)` semantics the
+  bring-up proofs rely on are unchanged. See
+  [ADR 0023](docs/adr/0023-pointer-and-mouse-read.md).
+
 ## [0.1.0] - 2026-10-01
 
 First tracked state of the project: the full path from firmware to restartable

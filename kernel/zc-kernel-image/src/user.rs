@@ -1230,10 +1230,18 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
         }
         Ok(Action::IrqWait) => {
             let me = tasks.current() as u32;
-            let source = regs.rdi as usize;
+            let rdi = regs.rdi;
             // SAFETY: owned here; traps cannot nest inside a handler.
             let irqs = unsafe { &mut *addr_of_mut!(IRQS) };
-            match irqs.take(source, me) {
+            // `IRQ_ANY` (`u64::MAX`) wakes on whichever owned source fired and
+            // clears every owned count at once; a specific source keeps the
+            // strict per-line semantics the bring-up proofs rely on.
+            let woke = if rdi == zc_abi::IRQ_ANY {
+                irqs.take_all(me)
+            } else {
+                irqs.take(rdi as usize, me)
+            };
+            match woke {
                 Some(count) => {
                     // A domain may have filled its shared ring while we
                     // slept; hand those bytes to the input stream now.
