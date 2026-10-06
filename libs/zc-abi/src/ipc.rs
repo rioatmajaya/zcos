@@ -67,6 +67,16 @@ pub const WM_ACK: u64 = 0x574D_0000_0000_0001;
 /// `recv_from`, waiting for a frame that never comes.
 pub const WM_DONE: u64 = 0x574D_0000_0000_0002;
 
+/// A kernel-to-compositor nudge that fresh mouse movement is waiting.
+///
+/// The compositor blocks in `recv_from(IPC_WM_REPLY)` between client frames, so
+/// without a wakeup it would never poll [`crate::SYS_MOUSE_READ`] and the pointer
+/// would freeze on live input. The kernel posts one word on the window-reply
+/// channel after it routes a mouse frame; the compositor drains every pending
+/// report on receipt and moves the sprite, so the pointer tracks the hardware
+/// even when no window frame is in flight.
+pub const WM_MOUSE: u64 = 0x574D_0000_0000_0003;
+
 /// A copied IPC message.
 ///
 /// Only `words[..len]` is meaningful; the kernel must ignore the tail so a
@@ -165,5 +175,8 @@ mod tests {
         assert_ne!(WM_ACK, u64::from(crate::surface::SURFACE_FACTORY));
         assert_ne!(WM_DONE, WM_ACK);
         assert_ne!(WM_DONE, u64::from(crate::surface::SURFACE_FACTORY));
+        assert_ne!(WM_MOUSE, WM_ACK);
+        assert_ne!(WM_MOUSE, WM_DONE);
+        assert_ne!(WM_MOUSE, u64::from(crate::surface::SURFACE_FACTORY));
     }
 }

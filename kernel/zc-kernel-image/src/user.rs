@@ -10,8 +10,8 @@ use core::arch::{asm, naked_asm};
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 
 use zc_abi::{
-    BootInfo, IPC_SUPERVISE, MMIO_SLOT_STRIDE, MMIO_VIRT, SERVICE_KIND_EXIT, SERVICE_KIND_FAULT,
-    SURFACE_SLOT_STRIDE, SURFACE_VIRT, service_cap, supervise_event,
+    BootInfo, IPC_SUPERVISE, IPC_WM_REPLY, MMIO_SLOT_STRIDE, MMIO_VIRT, SERVICE_KIND_EXIT,
+    SERVICE_KIND_FAULT, SURFACE_SLOT_STRIDE, SURFACE_VIRT, WM_MOUSE, service_cap, supervise_event,
 };
 use zc_kernel::capability::{Capability, CapabilityTable, Rights};
 use zc_kernel::gdt::{USER_CS, USER_RFLAGS, USER_SS};
@@ -1237,8 +1237,11 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 Some(count) => {
                     // A domain may have filled its shared ring while we
                     // slept; hand those bytes to the input stream now.
-                    drain_domain_input();
+                    let mouse = drain_domain_input();
                     tasks.unblock_all();
+                    if mouse {
+                        notify_mouse(tasks);
+                    }
                     regs.set_result(u64::from(count));
                     0
                 }
@@ -1969,7 +1972,10 @@ pub unsafe extern "C" fn sched_tick(regs: *mut SyscallRegs, frame: *mut IrqFrame
     // its read instead of sleeping through it, and a window client blocked in
     // `SYS_TERM_READ` picks up the keystroke the drain just routed to it.
     crate::serial::poll_input();
-    drain_domain_input();
+    let mouse = drain_domain_input();
+    if mouse {
+        notify_mouse(tasks);
+    }
     // A filesystem reply may have arrived while its caller slept. Routing it
     // here means the next retry finds it even if no other wakeup fired; the
     // reply's own `SendTo` already made the caller runnable.
@@ -3524,11 +3530,14 @@ fn close_window_input() {
 /// stream: mouse frames (`FF 4D b dx dy`) are stashed and keyboard bytes go to
 /// [`WINDOW_INPUT`], so neither the shell's COM1 ring nor the terminal ever
 /// sees a frame byte.
-fn drain_domain_input() {
+///
+/// Returns whether it routed any mouse frames, so the caller can wake the
+/// compositor to poll them.
+fn drain_domain_input() -> bool {
     // SAFETY: written once with interrupts disabled before any task runs.
     let phys = unsafe { addr_of!(INPUT_RING_PHYS).read() };
     if phys == 0 {
-        return;
+        return false;
     }
     // SAFETY: the page was zeroed at setup and stays mapped for the boot.
     let ring = unsafe { &mut *(phys as *mut zc_kernel::irq::SharedInputRing) };
@@ -3558,6 +3567,28 @@ fn drain_domain_input() {
     }
     if keys > 0 {
         push_window_input(&keyboard[..keys]);
+    }
+    frames > 0
+}
+
+/// Wakes the compositor because fresh mouse movement is waiting.
+///
+/// The compositor blocks in `recv_from(IPC_WM_REPLY)` between client frames, so
+/// without a nudge it never calls `SYS_MOUSE_READ` and the pointer freezes on
+/// live input. A one-word `WM_MOUSE` on the window-reply channel makes its next
+/// `recv_from` return, and it then drains every pending report and moves the
+/// sprite. The kernel applies the same reports it serves, so the new position
+/// stays a proof, not a trusted claim.
+fn notify_mouse(tasks: &mut TaskTable<TASK_COUNT>) {
+    // SAFETY: channel 6 is always in range; the compositor owns it.
+    unsafe {
+        if let Some(endpoint) = endpoint_for(IPC_WM_REPLY as u64) {
+            if let Some(message) = zc_abi::Message::from_words(&[WM_MOUSE]) {
+                if endpoint.send(message).is_ok() {
+                    tasks.unblock_all();
+                }
+            }
+        }
     }
 }
 

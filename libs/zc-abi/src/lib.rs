@@ -47,7 +47,7 @@ pub use desktop::{
 pub use font::{GLYPH_H, GLYPH_W, glyph_bit, glyph_row, text_blend, text_width};
 pub use ipc::{
     IPC_CHANNELS, IPC_DATA, IPC_DISCOVERY, IPC_FS, IPC_FS_REPLY, IPC_SUPERVISE, IPC_WM,
-    IPC_WM_REPLY, MESSAGE_WORDS, Message, WM_ACK, WM_DONE,
+    IPC_WM_REPLY, MESSAGE_WORDS, Message, WM_ACK, WM_DONE, WM_MOUSE,
 };
 pub use mmio::{
     MMIO_BROKER_OBJECT, MMIO_CAP_TAG, MMIO_END, MMIO_MAX_BYTES, MMIO_SLOTS, MMIO_SLOT_STRIDE,

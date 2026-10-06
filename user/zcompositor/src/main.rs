@@ -203,10 +203,42 @@ pub unsafe extern "C" fn _start() -> ! {
 
     // Event loop: the client repaints on every keystroke and acknowledges, so
     // re-composite its window at the moved position and flush only that
-    // rectangle. `WM_DONE` means the client's session closed; composite the
-    // final frame it painted before it exited and stop.
+    // rectangle. The pointer is foreground, so before each frame the compositor
+    // drains any mouse report the kernel routed and moves the sprite with damage
+    // tracking; a `WM_MOUSE` nudge (or any client frame) carries the wakeup. `WM_DONE`
+    // means the client's session closed; composite the final frame and stop.
     loop {
         let message = recv_from(IPC_WM_REPLY as u64);
+        // Poll the pointer first: the kernel applies the same reports it serves,
+        // so the position is proven, not trusted. Live input moves it between
+        // client frames, and the boot script already placed it here.
+        loop {
+            let Some((_buttons, dx, dy)) = unpack_report(mouse_read()) else {
+                break;
+            };
+            let before = cursor.rect();
+            cursor.apply(dx, dy, width, height);
+            let rect = before.union(cursor.rect());
+            composite(
+                back,
+                &fb,
+                format,
+                width,
+                height,
+                surface.stride,
+                window_pixels,
+                window_surface.stride,
+                moved,
+                cursor,
+                rect,
+                FRAME_MOVED,
+            );
+        }
+        if message == WM_DONE {
+            break;
+        }
+        // The client repainted; overlay the window at its moved position and
+        // flush. A `WM_MOUSE` nudge carries no window change of its own.
         blit_window(
             back,
             surface.stride,
@@ -218,10 +250,9 @@ pub unsafe extern "C" fn _start() -> ! {
             height,
         );
         blit_rect(back, &fb, surface.stride, moved);
-        if message == WM_DONE {
-            break;
+        if message == WM_ACK {
+            log("compositor: frame updated\n");
         }
-        log("compositor: frame updated\n");
     }
 
     // Both surfaces are no longer needed once the display holds the final

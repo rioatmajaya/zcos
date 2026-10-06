@@ -44,3 +44,8 @@ snapshot skips the pixels the pointer covers so the two proofs do not fight.
   checks the pointer before the window, so overlap is already handled.
 - Only the pointer is drawn; hit-testing, buttons, and window dragging are
   follow-ups (the button bitmask already crosses the syscall).
+- The pointer also tracks live input, not just the boot script. The compositor
+  blocks in `recv_from` between client frames, so the kernel posts a `WM_MOUSE`
+  nudge on the window-reply channel after it routes a mouse frame; the compositor
+  wakes, drains `SYS_MOUSE_READ`, and moves the sprite. Both sides apply the same
+  served reports, so the position stays proven even when the hardware drives it.
