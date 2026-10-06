@@ -302,7 +302,10 @@ static mut TERM_CURSORS: [u64; TASK_COUNT] = [0; TASK_COUNT];
 /// Ticks after task start that trigger the timeout path instead of waiting.
 ///
 /// Sized generously: slow emulation still finishes the scripted session
-/// two orders of magnitude below this.
+/// two orders of magnitude below this. The deadline exists for the headless
+/// boot test, where a wedged task must fail the boot instead of hanging it;
+/// the first byte of live input from an input domain disarms it, because a
+/// human driving the desktop keeps the tasks alive indefinitely by design.
 const USER_TIMEOUT_TICKS: u64 = 5000;
 
 /// Page-table entry flags for user pages: present, writable, user.
@@ -443,8 +446,24 @@ const MAX_USER_IO_LEN: u64 = 512;
 static mut RESUME_RSP: u64 = 0;
 
 /// Tick count that triggers the timeout path; `u64::MAX` until set.
+///
+/// Set to the deadline when the tasks spawn and written back to `u64::MAX`
+/// by [`disarm_user_timeout`] once live input arrives, so an interactive
+/// session is never killed by the boot watchdog.
 #[unsafe(no_mangle)]
 static mut MAX_TICKS: u64 = u64::MAX;
+
+/// Disarms the task watchdog by pushing the deadline out of reach.
+///
+/// Both the timer stub and the syscall stub compare the tick count against
+/// [`MAX_TICKS`]; `u64::MAX` can never be exceeded, so both keep taking their
+/// normal paths for the rest of the boot. Live input never occurs in the
+/// headless boot test, so there the watchdog stays armed.
+pub(crate) fn disarm_user_timeout() {
+    // SAFETY: owned here; the callers run with interrupts masked and the
+    // write is idempotent.
+    unsafe { addr_of_mut!(MAX_TICKS).write(u64::MAX) };
+}
 
 /// Copy of [`EXIT_TO_KERNEL`] reachable from naked assembly.
 #[unsafe(no_mangle)]
@@ -2334,6 +2353,9 @@ fn build_fb_tables(alloc: &mut FrameAllocator<'_>) -> Option<[u64; 2]> {
 }
 
 /// Reports a user task that never exited and stops the machine.
+///
+/// Only reachable while the watchdog is armed: live input from an input
+/// domain disarms it, so an interactive session never takes this path.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn user_timeout() -> ! {
     let _ = crate::serial::print(format_args!(
@@ -3563,6 +3585,15 @@ fn drain_domain_input() -> bool {
         scratch[count] = byte;
         count += 1;
     }
+    if count > 0 {
+        // Live input arrived: the boot has left its scripted proof phase, so
+        // disarm the task watchdog. The timeout exists so a wedged task cannot
+        // hang the headless boot test, but a human driving the desktop keeps
+        // the tasks alive indefinitely by design. CI never delivers physical
+        // input — the scripted session is served kernel-side — so there the
+        // watchdog stays armed and a wedged task still fails the boot fast.
+        disarm_user_timeout();
+    }
     let mut keyboard = [0u8; 32];
     let mut mouse = [[0u8; 3]; 8];
     let (keys, frames) = zc_kernel::input::route(&scratch[..count], &mut keyboard, &mut mouse);
@@ -3608,15 +3639,12 @@ fn notify_mouse(tasks: &mut TaskTable<TASK_COUNT>) {
             if endpoint.len() == 0 {
                 if let Some(message) = zc_abi::Message::from_words(&[WM_MOUSE]) {
                     if endpoint.send(message).is_ok() {
-                        // DIAGNOSTIC: the compositor was nudged for live mouse.
-                        crate::serial::print(format_args!("kern: nudge\n"));
                         tasks.unblock_all();
                     }
                 }
             } else {
                 // A nudge was skipped because the channel already holds a
                 // wakeup; the compositor drains all mouse on its next wake.
-                crate::serial::print(format_args!("kern: nudge skipped\n"));
             }
         }
     }
@@ -3632,10 +3660,6 @@ fn notify_mouse(tasks: &mut TaskTable<TASK_COUNT>) {
 fn accumulate_mouse(frame: [u8; 3]) {
     // SAFETY: owned here; the drain runs with interrupts masked.
     unsafe {
-        // DIAGNOSTIC: mark a click frame reaching the kernel.
-        if frame[0] != 0 {
-            crate::serial::print(format_args!("kern: btn frame\n"));
-        }
         let (_buttons, dx, dy) = MOUSE_PENDING;
         MOUSE_PENDING = (
             // The latest packet holds the current button state; OR would keep a

@@ -87,11 +87,6 @@ fn drain(out: &mut SharedInputRing) -> u32 {
         let code = port_inb(DATA);
         if status & AUX_DATA != 0 {
             if let Some(report) = mouse.feed(code) {
-                // DIAGNOSTIC: mark a click so a freeze can be localized to the
-                // button path (move-only frames stay silent).
-                if report.buttons != 0 {
-                    log("kbd: btn frame\n");
-                }
                 for byte in encode_frame(report) {
                     out.push(byte);
                 }

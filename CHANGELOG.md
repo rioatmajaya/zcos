@@ -585,7 +585,22 @@ still learns no address.
   normally. Keyboard input was never actually blocked: `SYS_TERM_READ` serves the
   routed keystrokes and the client runs them (verified end-to-end through the
   scripted session), so the fix is compositor-side only. See
+  routed keystrokes and the client runs them (verified end-to-end through the
+  scripted session), so the fix is compositor-side only. See
   [ADR 0023](docs/adr/0023-pointer-and-mouse-read.md).
+
+- **The boot watchdog killed every interactive session about five seconds
+  in** (F8b-2): the user-phase watchdog (`USER_TIMEOUT_TICKS = 5000`) exists so
+  a wedged task fails the headless boot test instead of hanging it, but it
+  compared the tick count against the deadline with no notion of an interactive
+  session. Any human at the machine — moving the pointer, clicking, typing —
+  keeps the tasks alive past 5000 ticks, and the kernel then reported
+  `user task timed out` and halted, which looked like a random freeze (often
+  right on a click, because by then the budget was spent). The first byte of
+  live input from an input domain now disarms the watchdog by pushing the
+  deadline out of reach. The headless boot test never delivers physical input —
+  the scripted session is served kernel-side — so there the watchdog stays
+  armed and a wedged task still fails the boot fast.
 
 ## [0.1.0] - 2026-10-01
 
