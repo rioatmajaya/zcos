@@ -561,6 +561,17 @@ still learns no address.
   so one physical move maps to one on-screen move. See
   [ADR 0023](docs/adr/0023-pointer-and-mouse-read.md).
 
+- **Terminal hung and stopped accepting keystrokes while the pointer was over
+  the window** (F8b): the kernel posted a `WM_MOUSE` nudge on the same 4-slot
+  `IPC_WM_REPLY` channel the client uses for `WM_ACK`, and `SYS_SEND_TO` blocks
+  when the channel is full. A fast pointer kept the channel full of `WM_MOUSE`
+  messages, so the terminal's `WM_ACK` blocked forever waiting for a free slot —
+  deadlocking keystroke input. `WM_MOUSE` is now coalesced: it is only posted
+  when the channel is empty, because the compositor already drains every pending
+  mouse report on each wake, so one queued nudge schedules a full drain and a
+  second one only competes with the client's acks. See
+  [ADR 0023](docs/adr/0023-pointer-and-mouse-read.md).
+
 ## [0.1.0] - 2026-10-01
 
 First tracked state of the project: the full path from firmware to restartable

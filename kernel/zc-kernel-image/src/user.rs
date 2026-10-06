@@ -3589,16 +3589,27 @@ fn drain_domain_input() -> bool {
 /// The compositor blocks in `recv_from(IPC_WM_REPLY)` between client frames, so
 /// without a nudge it never calls `SYS_MOUSE_READ` and the pointer freezes on
 /// live input. A one-word `WM_MOUSE` on the window-reply channel makes its next
-/// `recv_from` return, and it then drains every pending report and moves the
+/// `recv_from` return, and it then drains *every* pending report and moves the
 /// sprite. The kernel applies the same reports it serves, so the new position
 /// stays a proof, not a trusted claim.
+///
+/// The nudge is coalesced: it is only posted when the channel is empty. The
+/// compositor drains all mouse on every wake, so one queued message already
+/// schedules a full drain — adding more would only fill the shared 4-slot
+/// channel, and a fast pointer could keep it full and block the terminal's
+/// `WM_ACK` (which shares the channel and blocks when full), deadlocking
+/// keystroke input while the cursor sits over the window.
 fn notify_mouse(tasks: &mut TaskTable<TASK_COUNT>) {
     // SAFETY: channel 6 is always in range; the compositor owns it.
     unsafe {
         if let Some(endpoint) = endpoint_for(IPC_WM_REPLY as u64) {
-            if let Some(message) = zc_abi::Message::from_words(&[WM_MOUSE]) {
-                if endpoint.send(message).is_ok() {
-                    tasks.unblock_all();
+            // Coalesce: do not enqueue a second nudge onto a channel that
+            // already holds a wakeup (this one or the client's `WM_ACK`).
+            if endpoint.len() == 0 {
+                if let Some(message) = zc_abi::Message::from_words(&[WM_MOUSE]) {
+                    if endpoint.send(message).is_ok() {
+                        tasks.unblock_all();
+                    }
                 }
             }
         }
