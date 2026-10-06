@@ -50,9 +50,24 @@ while a separate boot check keeps proving the scripted content exactly. Track
 **K — kernel minimalism** has started: M1 moves the storage parsers out of the
 privileged crate. M2 moves PCI enumeration out of it too — the ring-3 device
 manager scans the bus and brokers the BAR it finds, so the kernel never touches
-it and `kernel/zc-kernel-image/src/pci.rs` is gone.
+it and `kernel/zc-kernel-image/src/pci.rs` is gone. It brokers device memory
+too: the same manager discovers the AHCI controller's ABAR and the kernel maps
+it into the domain, so a ring-3 driver can touch its registers while ring 0
+still learns no address.
 
 ### Added
+
+- **Device memory broker** (K8-a): a ring-3 driver can now map a device's
+  memory-mapped registers without the kernel knowing the BAR ahead of time. The
+  device manager holds `MMIO_BROKER_OBJECT` (a new object namespace, bit 27)
+  with `GRANT` only, discovers the AHCI controller's ABAR, and brokers the
+  range to itself; the kernel validates it is device-shaped and not
+  kernel-owned memory (`device::mmio_range_allowed` refuses usable RAM, the
+  framebuffer, an unaligned, empty, oversized, or overflowing range), records
+  it in `zc_kernel::mmio`, mints the capability, and maps the registers
+  uncached (`PTE_PCD`) and non-executable with the new `SYS_MMIO_MAP` (31). A
+  new `syscall5` passes the 64-bit base and length in `r10` and `r8`. See
+  [ADR 0020](docs/adr/0020-device-memory-broker.md).
 
 - **Frozen interface specifications**: `docs/specs/` now documents the
   normative interfaces that cross the kernel/userspace boundary — the syscall

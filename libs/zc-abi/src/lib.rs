@@ -16,6 +16,7 @@ pub mod font;
 pub mod driver;
 pub mod fb;
 pub mod ipc;
+pub mod mmio;
 pub mod service;
 pub mod surface;
 pub mod syscall;
@@ -43,6 +44,10 @@ pub use ipc::{
     IPC_CHANNELS, IPC_DATA, IPC_DISCOVERY, IPC_FS, IPC_FS_REPLY, IPC_SUPERVISE, IPC_WM,
     IPC_WM_REPLY, MESSAGE_WORDS, Message, WM_ACK, WM_DONE,
 };
+pub use mmio::{
+    MMIO_BROKER_OBJECT, MMIO_CAP_TAG, MMIO_END, MMIO_MAX_BYTES, MMIO_SLOTS, MMIO_SLOT_STRIDE,
+    MMIO_VIRT, MmioInfo, mmio_cap,
+};
 pub use service::{
     SERVICE_KIND_EXIT, SERVICE_KIND_FAULT, service_cap, supervise_event, supervise_kind,
     supervise_service,
@@ -53,7 +58,8 @@ pub use surface::{
 };
 pub use syscall::{
     SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOSE, SYS_CREATE, SYS_FB_INFO, SYS_IRQ_CLAIM, SYS_IRQ_TEST,
-    SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_MOUNT, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ,
+    SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_MOUNT, SYS_MMIO_MAP, SYS_OPEN, SYS_PORT_CLAIM,
+    SYS_READ,
     SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START,
     SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY,
     SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TERM_READ, SYS_UMOUNT, SYS_WRITE, SYS_YIELD, SyscallError,

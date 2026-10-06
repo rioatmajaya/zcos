@@ -50,6 +50,26 @@ pub const fn class_code(value: u32) -> u8 {
     ((value >> 24) & 0xFF) as u8
 }
 
+/// Class/subclass/programming-interface triple for an AHCI SATA controller.
+///
+/// A class/revision DWORD packs the base class in the high byte and the
+/// subclass and programming interface below it, so the triple is compared
+/// against the DWORD shifted right by eight.
+pub const AHCI_CLASS: u32 = 0x01_0601;
+
+/// Returns the 24-bit class/subclass/programming-interface triple of a
+/// class/revision DWORD, dropping the revision byte.
+#[must_use]
+pub const fn class_id(value: u32) -> u32 {
+    (value >> 8) & 0x00FF_FFFF
+}
+
+/// Returns whether a class/revision DWORD names an AHCI controller.
+#[must_use]
+pub const fn is_ahci(value: u32) -> bool {
+    class_id(value) == AHCI_CLASS
+}
+
 /// Masks a 32-bit BAR into its base address, clearing flag bits.
 ///
 /// Bit 0 selects I/O versus memory space; for memory BARs the low four
@@ -101,6 +121,19 @@ mod tests {
         assert_eq!(split_id(0x1001_1AF4), (0x1AF4, 0x1001));
         assert_eq!(split_id(0xFFFF_FFFF), (NO_DEVICE, NO_DEVICE));
         assert_eq!(class_code(0x0106_0100), 0x01);
+    }
+
+    #[test]
+    fn ahci_class_matches_only_the_sata_programming_interface() {
+        // Class 01 (storage), subclass 06 (SATA), prog-if 01 (AHCI), rev 00.
+        assert!(is_ahci(0x0106_0100));
+        assert_eq!(class_id(0x0106_0100), AHCI_CLASS);
+        // The revision byte is ignored; the triple is not.
+        assert!(is_ahci(0x0106_01FF));
+        // IDE (prog-if 80/8A), RAID (00), and a non-storage class all fail.
+        assert!(!is_ahci(0x0101_8A00));
+        assert!(!is_ahci(0x0104_0000));
+        assert!(!is_ahci(0x0300_0000));
     }
 
     #[test]

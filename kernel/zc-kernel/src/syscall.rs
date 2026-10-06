@@ -8,8 +8,8 @@
 
 use zc_abi::{
     SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOSE, SYS_CREATE, SYS_FB_INFO, SYS_IRQ_CLAIM, SYS_IRQ_TEST,
-    SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_MOUNT, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ,
-    SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START,
+    SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_MMIO_MAP, SYS_MOUNT, SYS_OPEN, SYS_PORT_CLAIM,
+    SYS_READ, SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START,
     SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY,
     SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TERM_READ, SYS_UMOUNT, SYS_WRITE, SYS_YIELD, SyscallError,
 };
@@ -82,6 +82,8 @@ pub enum Action {
     SurfaceDestroy,
     /// Read the next keystroke of the kernel's scripted terminal session.
     TermRead,
+    /// Map a brokered device memory region into the caller.
+    MmioMap,
 }
 
 /// Maps a raw syscall number to its [`Action`].
@@ -121,6 +123,7 @@ pub const fn dispatch(number: u64) -> Result<Action, SyscallError> {
         SYS_SURFACE_MAP => Ok(Action::SurfaceMap),
         SYS_SURFACE_DESTROY => Ok(Action::SurfaceDestroy),
         SYS_TERM_READ => Ok(Action::TermRead),
+        SYS_MMIO_MAP => Ok(Action::MmioMap),
         _ => Err(SyscallError::InvalidNumber),
     }
 }
@@ -162,12 +165,13 @@ mod tests {
         assert_eq!(dispatch(SYS_SURFACE_MAP), Ok(Action::SurfaceMap));
         assert_eq!(dispatch(SYS_SURFACE_DESTROY), Ok(Action::SurfaceDestroy));
         assert_eq!(dispatch(SYS_TERM_READ), Ok(Action::TermRead));
+        assert_eq!(dispatch(SYS_MMIO_MAP), Ok(Action::MmioMap));
     }
 
     #[test]
     fn unknown_numbers_are_rejected() {
-        // The last assigned number is SYS_TERM_READ (30), so probe past it.
-        assert_eq!(dispatch(31), Err(SyscallError::InvalidNumber));
+        // The last assigned number is SYS_MMIO_MAP (31), so probe past it.
+        assert_eq!(dispatch(32), Err(SyscallError::InvalidNumber));
         assert_eq!(
             dispatch(u64::MAX),
             Err(SyscallError::InvalidNumber)

@@ -13,8 +13,8 @@ use core::fmt::Write;
 
 use zc_abi::{
     BootInfo, MemoryRegion, Message, SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOSE, SYS_FB_INFO,
-    SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ, SYS_RECV, SYS_RECV_FROM,
-    SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START, SYS_SERVICE_STATUS,
+    SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_MMIO_MAP, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ, SYS_RECV,
+    SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START, SYS_SERVICE_STATUS,
     SYS_SERVICE_STOP, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP, SYS_TASK_EXIT,
     SYS_TERM_READ, SYS_YIELD,
 };
@@ -160,6 +160,20 @@ fn kernel_main(boot_info: *const BootInfo) -> ! {
             }
         }
     }
+    // A reserved window shadows the same-numbered physical range in every
+    // task's identity map, so the kernel's own identity-map reads of loader
+    // memory would land on whatever a task mapped there. The loader has always
+    // placed its regions clear of these windows; assert it, so a window that
+    // grows into them fails the boot loudly instead of corrupting a read.
+    for (start, end) in user::reserved_windows() {
+        let shadows = |address: u64| address >= start && address < end;
+        if info.initramfs_start != 0 && shadows(info.initramfs_start) {
+            fail("initramfs falls inside a reserved user window");
+        }
+        if shadows(boot_info as u64) {
+            fail("boot info falls inside a reserved user window");
+        }
+    }
     exercise_mechanisms(frames(), usable);
     exercise_traps_and_timer();
     acpi::describe(info.rsdp);
@@ -282,6 +296,7 @@ fn exercise_mechanisms(alloc: &mut FrameAllocator<'_>, usable: u64) {
         (SYS_SURFACE_MAP, Action::SurfaceMap),
         (SYS_SURFACE_DESTROY, Action::SurfaceDestroy),
         (SYS_TERM_READ, Action::TermRead),
+        (SYS_MMIO_MAP, Action::MmioMap),
     ];
     for (number, expected) in dispatched {
         match syscall::dispatch(number) {

@@ -26,7 +26,8 @@ same change that touches it.
    recorded in an ADR, so a loader and kernel built apart cannot silently
    disagree.
 4. **Cross-namespace collisions are forbidden.** Object ids in the IRQ, port,
-   service, surface, and port-broker namespaces must never collide (see
+   service, surface, port-broker, and device-memory namespaces must never
+   collide (see
    [`syscall-abi.md`](syscall-abi.md#capability-object-namespaces)); the
    `zc-abi` host tests assert this.
 5. **An interface change needs an ADR when it changes a decision**, not just a

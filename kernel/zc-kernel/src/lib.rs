@@ -24,6 +24,7 @@ pub mod irq;
 pub mod kbd;
 pub mod mouse;
 pub mod memory;
+pub mod mmio;
 pub mod pci;
 pub mod perms;
 pub mod ramfs;

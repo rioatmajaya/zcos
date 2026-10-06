@@ -10,8 +10,8 @@ use core::arch::{asm, naked_asm};
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 
 use zc_abi::{
-    BootInfo, IPC_SUPERVISE, SERVICE_KIND_EXIT, SERVICE_KIND_FAULT, SURFACE_SLOT_STRIDE,
-    SURFACE_VIRT, service_cap, supervise_event,
+    BootInfo, IPC_SUPERVISE, MMIO_SLOT_STRIDE, MMIO_VIRT, SERVICE_KIND_EXIT, SERVICE_KIND_FAULT,
+    SURFACE_SLOT_STRIDE, SURFACE_VIRT, service_cap, supervise_event,
 };
 use zc_kernel::capability::{Capability, CapabilityTable, Rights};
 use zc_kernel::gdt::{USER_CS, USER_RFLAGS, USER_SS};
@@ -164,9 +164,10 @@ static mut FB_INFO: zc_abi::FramebufferInfo = zc_abi::FramebufferInfo::UNAVAILAB
 /// written into user memory. [`super::kernel_main`] reserves each range before
 /// anything allocates.
 #[must_use]
-pub const fn reserved_windows() -> [(u64, u64); 3] {
+pub const fn reserved_windows() -> [(u64, u64); 4] {
     [
         (USER_CODE_VIRT, USER_WINDOW_END),
+        (zc_abi::MMIO_VIRT, zc_abi::MMIO_END),
         (FB_VIRT, FB_VIRT + FB_WINDOW_SIZE),
         (zc_abi::SURFACE_VIRT, zc_abi::SURFACE_END),
     ]
@@ -290,6 +291,14 @@ const USER_TIMEOUT_TICKS: u64 = 5000;
 /// Page-table entry flags for user pages: present, writable, user.
 const USER_PAGE_FLAGS: u64 = 0x7;
 
+/// Page-table entry flag: disable caching (PCD).
+///
+/// A device register must be read and written exactly once per access, so a
+/// mapping that reaches device memory is never cached. With the reset PAT this
+/// selects the uncacheable-strong (`UC-`) memory type, which is what MMIO
+/// needs; write-combining would need `IA32_PAT` programmed and is not used.
+const PTE_PCD: u64 = 1 << 4;
+
 /// User/supervisor flag shared by every level of the user path.
 const FLAG_USER: u64 = 1 << 2;
 
@@ -400,6 +409,14 @@ static mut CAPS: [CapabilityTable<8>; TASK_COUNT] = [CapabilityTable::<8>::new()
 /// capability naming one, so a task can map a surface only if it created it
 /// or had a read capability delegated to it.
 static mut SURFACES: SurfaceTable = SurfaceTable::new();
+
+/// Brokered device memory regions, indexed by MMIO slot.
+///
+/// A region is recorded only after the device manager brokers it and the
+/// kernel validates the range, so a slot always names memory a manager
+/// discovered and the kernel approved. The region is what `SYS_MMIO_MAP`
+/// resolves a capability object to.
+static mut MMIO_REGIONS: zc_kernel::mmio::MmioRegions = zc_kernel::mmio::MmioRegions::new();
 
 /// Longest single userspace buffer accepted per syscall.
 const MAX_USER_IO_LEN: u64 = 512;
@@ -1290,15 +1307,74 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 regs.set_result(u64::MAX);
                 return 0;
             }
+            // SAFETY: owned here; interrupts are masked through this arm, and
+            // the borrows below never alias.
+            let tables = unsafe { &mut *addr_of_mut!(CAPS) };
+            // Broker paths come first. Each validates a range a manager
+            // *discovered* rather than delegating an object it holds, so it
+            // needs no split borrow and may target the caller itself — a
+            // manager that also drives its own device. Each mints the target's
+            // capability and returns its object id, which is the only way a
+            // caller can learn a slot the kernel chose.
+            if object == zc_abi::PORT_BROKER_OBJECT {
+                let raw = regs.r10 as u32;
+                let start = (raw >> 16) as u16;
+                let len = (raw & 0xFFFF) as u16;
+                let use_only = Rights::READ.union(Rights::WRITE);
+                if !tables[me].holds_object(object, Rights::GRANT)
+                    || !zc_kernel::device::pci_io_window_contains(start, len)
+                    || !use_only.contains(requested)
+                {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+                let minted = zc_abi::port_cap(start, len);
+                let _ = tables[target].insert(Capability::new(minted, requested));
+                let _ = crate::serial::print(format_args!(
+                    "cap: task {me} delegated {minted:#x} to task {target}\n",
+                ));
+                regs.set_result(u64::from(minted));
+                return 0;
+            }
+            // The MMIO broker names the range as a full 64-bit base in `r10`
+            // and a length in `r8`, because a device BAR does not fit the
+            // packed port encoding. The kernel validates it against the boot
+            // memory map, records the region, and mints the driver's
+            // capability; the manager can neither widen its authority nor hand
+            // over an object it does not hold, and use-rights only mean
+            // brokering cannot chain.
+            if object == zc_abi::MMIO_BROKER_OBJECT {
+                let base = regs.r10;
+                let len = regs.r8;
+                let use_only = Rights::READ.union(Rights::WRITE);
+                if !tables[me].holds_object(object, Rights::GRANT)
+                    || !use_only.contains(requested)
+                    || !mmio_range_allowed(base, len)
+                {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+                // SAFETY: owned here; interrupts are masked through this arm.
+                let regions = unsafe { &mut *addr_of_mut!(MMIO_REGIONS) };
+                let Some(slot) = regions.insert(base, len, target as u8) else {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                };
+                let minted = zc_abi::mmio_cap(slot);
+                let _ = tables[target].insert(Capability::new(minted, requested));
+                let _ = crate::serial::print(format_args!(
+                    "mmio: task {me} delegated {minted:#x} ({base:#x}+{len:#x}) to task {target}\n",
+                ));
+                regs.set_result(u64::from(minted));
+                return 0;
+            }
+            // General delegation moves authority the caller already holds, so
+            // it needs two distinct tables and refuses self-delegation: one
+            // table cannot be borrowed as both source and destination.
             if target == me {
-                // Self-delegation would need one table borrowed twice;
-                // nothing in the bring-up needs it, so it fails closed.
                 regs.set_result(u64::MAX);
                 return 0;
             }
-            // SAFETY: owned here; interrupts are masked through this arm, and
-            // the split borrows below never alias.
-            let tables = unsafe { &mut *addr_of_mut!(CAPS) };
             let (source_table, dest_table) = if me < target {
                 let (left, right) = tables.split_at_mut(target);
                 (&left[me], &mut right[0])
@@ -1310,32 +1386,6 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 regs.set_result(u64::MAX);
                 return 0;
             };
-            // A port broker names the range it discovered as a raw
-            // `(start << 16) | len` word in `r10`: the packed port capability
-            // cannot be decoded back into a range, so the kernel validates the
-            // raw range against the broker window and mints the driver's
-            // capability itself. The manager can neither widen its authority
-            // nor hand over an object it does not hold, and use-rights only
-            // mean brokering cannot chain.
-            if object == zc_abi::PORT_BROKER_OBJECT {
-                let raw = regs.r10 as u32;
-                let start = (raw >> 16) as u16;
-                let len = (raw & 0xFFFF) as u16;
-                let use_only = Rights::READ.union(Rights::WRITE);
-                if !zc_kernel::device::pci_io_window_contains(start, len)
-                    || !use_only.contains(requested)
-                {
-                    regs.set_result(u64::MAX);
-                    return 0;
-                }
-                let minted = zc_abi::port_cap(start, len);
-                let _ = dest_table.insert(Capability::new(minted, requested));
-                let _ = crate::serial::print(format_args!(
-                    "cap: task {me} delegated {minted:#x} to task {target}\n",
-                ));
-                regs.set_result(0);
-                return 0;
-            }
             match source_table.delegate(handle, dest_table, requested) {
                 Ok(_) => {
                     // A surface delegated to the window client is the window
@@ -1657,6 +1707,63 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 index += 1;
             }
             regs.set_result(0);
+            0
+        }
+        Ok(Action::MmioMap) => {
+            let me = tasks.current();
+            let object = regs.rdi as u32;
+            let info_ptr = regs.rsi;
+            let info_len = regs.rdx;
+            // Read authority over exactly this region; anything else fails
+            // closed and leaves the tables untouched. The region itself was
+            // recorded only after a validated broker call, so a task that
+            // never received one has no slot to name either.
+            // SAFETY: owned here; interrupts are masked through this arm.
+            let allowed = unsafe {
+                (*addr_of!(CAPS))[me].holds_object(object, Rights::READ)
+            };
+            if !allowed {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            let Some(slot) = mmio_slot(object) else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            // SAFETY: owned here; mapping only rewrites this task's tables.
+            let regions = unsafe { &*addr_of!(MMIO_REGIONS) };
+            let Some(region) = regions.get(slot) else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            let Some(va) = map_mmio_into_task(tasks, slot, region) else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            if info_len != 0 {
+                const INFO_LEN: u64 = core::mem::size_of::<zc_abi::MmioInfo>() as u64;
+                if info_len != INFO_LEN {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+                match validate_user_slice_mut(tasks, info_ptr, info_len) {
+                    Some(out) => {
+                        let info = zc_abi::MmioInfo {
+                            base: region.base,
+                            len: region.len,
+                        };
+                        // SAFETY: the buffer was validated writable above.
+                        unsafe {
+                            (out.as_mut_ptr() as *mut zc_abi::MmioInfo).write(info);
+                        }
+                    }
+                    None => {
+                        regs.set_result(u64::MAX);
+                        return 0;
+                    }
+                }
+            }
+            regs.set_result(va);
             0
         }
         Ok(Action::TermRead) => {
@@ -2521,6 +2628,10 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
         // one window with GRANT only and narrows it to the BAR it discovers,
         // so the kernel never scans the bus to provision a grant.
         let _ = caps[DEVMGR_INDEX].insert(device::pci_io_broker_grant());
+        // The same manager brokers device memory too: a discovered BAR is a
+        // range the kernel cannot know, so it hands over the MMIO broker
+        // window instead of a pre-computed region, exactly as for I/O.
+        let _ = caps[DEVMGR_INDEX].insert(device::mmio_broker_grant());
         // Counts follow what was actually inserted above, so the line stays
         // honest on hardware without the device too.
         let devmgr_grants = device::DEVMGR_SETUP_GRANTS;
@@ -2701,6 +2812,23 @@ fn surface_slot(object: u32) -> Option<u32> {
     }
 }
 
+/// Decodes an MMIO capability object id into its region slot.
+///
+/// Returns `None` for anything that is not exactly a region cap, so the broker
+/// id (whose low bytes are `0xFFFF`) and foreign namespaces can never name a
+/// slot.
+fn mmio_slot(object: u32) -> Option<u32> {
+    if object & !0xFF != zc_abi::MMIO_CAP_TAG {
+        return None;
+    }
+    let slot = object & 0xFF;
+    if (slot as usize) < zc_abi::MMIO_SLOTS {
+        Some(slot)
+    } else {
+        None
+    }
+}
+
 /// Maps a surface's frames into the running task and returns its address.
 ///
 /// The kernel picks the address from the slot index, so two surfaces can never
@@ -2740,6 +2868,86 @@ fn map_surface_into_task(tasks: &TaskTable<TASK_COUNT>, slot: u32, surface: &zc_
         unsafe {
             const NO_EXECUTE: u64 = 1 << 63;
             set_table_entry(pt, pt_index, frame | USER_PAGE_FLAGS | NO_EXECUTE);
+        }
+        page += 1;
+    }
+    Some(base)
+}
+
+/// Validates a brokered MMIO range against the boot memory map.
+///
+/// The kernel cannot know a device's BAR — that is exactly why it brokers — so
+/// it checks the range is device-shaped and not kernel-owned memory instead:
+/// usable RAM and the framebuffer are refused, so a manager can never hand a
+/// driver the kernel's or another task's memory. See
+/// [`zc_kernel::device::mmio_range_allowed`] for the predicate itself.
+fn mmio_range_allowed(base: u64, len: u64) -> bool {
+    // SAFETY: `SAVED_BOOT_INFO` is written once before any task runs and
+    // points at identity-mapped loader memory for the whole boot.
+    let info = unsafe { &*(SAVED_BOOT_INFO as *const BootInfo) };
+    if info.memory_map == 0 || info.memory_map_len == 0 {
+        return false;
+    }
+    // SAFETY: the loader filled this array and it outlives the boot.
+    let regions = unsafe {
+        core::slice::from_raw_parts(
+            info.memory_map as *const zc_abi::MemoryRegion,
+            info.memory_map_len as usize,
+        )
+    };
+    let fb = info.framebuffer;
+    let fb_len = if fb.is_available() {
+        u64::from(fb.stride) * u64::from(fb.height) * 4
+    } else {
+        0
+    };
+    zc_kernel::device::mmio_range_allowed(base, len, regions, fb.address, fb_len)
+}
+
+/// Maps a brokered MMIO region into the running task and returns its address.
+///
+/// The kernel picks the address from the slot index, so two regions can never
+/// collide and a caller cannot choose an address that overlaps another
+/// mapping. Each slot spans at most one page-directory entry; the first touch
+/// installs a private page table over the identity map's large pages. The
+/// entries are uncached, because the bytes are device registers rather than
+/// memory, and non-executable, so a task can drive a device but never run code
+/// out of its registers.
+fn map_mmio_into_task(
+    tasks: &TaskTable<TASK_COUNT>,
+    slot: u32,
+    region: &zc_kernel::mmio::MmioRegion,
+) -> Option<u64> {
+    let pd = task_user_pd(tasks.current_cr3())?;
+    let base = MMIO_VIRT + u64::from(slot) * MMIO_SLOT_STRIDE;
+    let pages = region.len.div_ceil(PAGE_SIZE);
+    let mut page = 0u64;
+    while page < pages {
+        let va = base + page * PAGE_SIZE;
+        let pd_index = ((va >> 21) & 0x1FF) as usize;
+        let pt_index = ((va >> 12) & 0x1FF) as usize;
+        // SAFETY: `pd` is the running task's directory, identity-mapped.
+        let entry = unsafe { table_entry(pd, pd_index) };
+        let pt = if entry & 1 == 0 || entry & (1 << 7) != 0 {
+            // No table yet (or the identity map's large page): install a
+            // fresh, zeroed one. The allocator's reserved windows keep the
+            // new frame out of any address a task remaps.
+            let frame = crate::frames().allocate()?;
+            let pt = frame.start_address();
+            // SAFETY: fresh frame inside the identity map.
+            unsafe {
+                core::slice::from_raw_parts_mut(pt as *mut u8, PAGE_SIZE as usize).fill(0);
+                set_table_entry(pd, pd_index, pt | USER_PAGE_FLAGS);
+            }
+            pt
+        } else {
+            entry & TABLE_MASK
+        };
+        let phys = region.base + page * PAGE_SIZE;
+        // SAFETY: `pt` is identity-mapped and `pt_index` is in range.
+        unsafe {
+            const NO_EXECUTE: u64 = 1 << 63;
+            set_table_entry(pt, pt_index, phys | USER_PAGE_FLAGS | NO_EXECUTE | PTE_PCD);
         }
         page += 1;
     }

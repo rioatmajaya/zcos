@@ -14,11 +14,11 @@ pub use zc_abi::{
     FS_ID_ZCFS, FS_OP_STOP, IPC_FS, IPC_SUPERVISE, IPC_WM, IPC_WM_REPLY, KIND_CHR, KIND_DIR,
     KIND_FILE, SERVICE_KIND_EXIT, SERVICE_KIND_FAULT, SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOSE,
     SYS_CREATE, SYS_FB_INFO, SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME,
-    SYS_MOUNT, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ, SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO,
-    SYS_SERIAL_READ, SYS_SERVICE_START, SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT,
+    SYS_MMIO_MAP, SYS_MOUNT, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ, SYS_RECV, SYS_RECV_FROM, SYS_SEND,
+    SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START, SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT,
     SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TERM_READ,
-    SYS_UMOUNT, SYS_WRITE, SYS_YIELD, Stat, SurfaceInfo, SyscallError, WM_ACK, supervise_kind,
-    supervise_service,
+    SYS_UMOUNT, SYS_WRITE, SYS_YIELD, MmioInfo, Stat, SurfaceInfo, SyscallError, WM_ACK,
+    supervise_kind, supervise_service,
 };
 
 /// Issues a syscall with no arguments.
@@ -102,6 +102,27 @@ pub fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 
             in("rsi") arg1,
             in("rdx") arg2,
             in("r10") arg3,
+            options(nostack, preserves_flags),
+        );
+    }
+    result
+}
+
+/// Issues a syscall with five arguments in `rdi`, `rsi`, `rdx`, `r10`, `r8`.
+#[inline(always)]
+pub fn syscall5(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
+    let result: u64;
+    // SAFETY: as in `syscall0`; `r10` and `r8` carry the fourth and fifth
+    // arguments, matching the `SyscallRegs` block the `int 0x80` stub saves.
+    unsafe {
+        asm!(
+            "int $0x80",
+            inlateout("rax") number => result,
+            in("rdi") arg0,
+            in("rsi") arg1,
+            in("rdx") arg2,
+            in("r10") arg3,
+            in("r8") arg4,
             options(nostack, preserves_flags),
         );
     }
@@ -274,6 +295,24 @@ pub fn surface_destroy(object: u32) -> u64 {
     syscall1(SYS_SURFACE_DESTROY, u64::from(object))
 }
 
+/// Maps a brokered device memory region into this task.
+///
+/// Returns the mapped virtual address, or `u64::MAX`. The caller must hold a
+/// read capability for the region. The mapping is uncached, because the bytes
+/// are device registers; `info` receives the region's physical base and length
+/// when given, which is what a driver needs to program DMA descriptors.
+#[inline(always)]
+pub fn mmio_map(object: u32, info: Option<&mut MmioInfo>) -> u64 {
+    let (ptr, len) = match info {
+        Some(info) => (
+            core::ptr::from_mut(info) as u64,
+            core::mem::size_of::<MmioInfo>() as u64,
+        ),
+        None => (0, 0),
+    };
+    syscall3(SYS_MMIO_MAP, u64::from(object), ptr, len)
+}
+
 /// Copies the framebuffer description into `info`.
 ///
 /// Returns `true` on success; the pixels themselves live at the mapped
@@ -337,12 +376,14 @@ pub fn cap_delegate(object: u32, target: u64, rights: u8) -> u64 {
     syscall3(SYS_CAP_DELEGATE, u64::from(object), target, u64::from(rights))
 }
 
-/// Brokers an I/O port range to another task, returning 0 or `u64::MAX`.
+/// Brokers an I/O port range to another task.
 ///
-/// The caller must hold the port broker grant (see `zc_abi::PORT_BROKER_OBJECT`);
-/// `start`/`len` must lie inside the kernel's broker window. The kernel mints
-/// the target's port capability itself, so the range travels as a raw word
-/// rather than a packed capability (whose packing cannot be decoded).
+/// Returns the object id of the capability the kernel minted for the target,
+/// or `u64::MAX` on refusal. The caller must hold the port broker grant (see
+/// `zc_abi::PORT_BROKER_OBJECT`); `start`/`len` must lie inside the kernel's
+/// broker window. The kernel mints the target's port capability itself, so the
+/// range travels as a raw word rather than a packed capability (whose packing
+/// cannot be decoded). The target may be the caller itself.
 #[inline(always)]
 pub fn port_delegate(start: u16, len: u16, target: u64, rights: u8) -> u64 {
     syscall4(
@@ -351,6 +392,26 @@ pub fn port_delegate(start: u16, len: u16, target: u64, rights: u8) -> u64 {
         target,
         u64::from(rights),
         (u64::from(start) << 16) | u64::from(len),
+    )
+}
+
+/// Brokers a device memory region to another task.
+///
+/// Returns the object id of the MMIO capability the kernel minted for the
+/// target, or `u64::MAX` on refusal. The caller must hold the MMIO broker grant
+/// (see `zc_abi::MMIO_BROKER_OBJECT`); the kernel refuses a range that overlaps
+/// usable RAM or the framebuffer, is unaligned, empty, oversized, or below the
+/// low 1 MiB. The target may be the caller itself, which is how a manager that
+/// also drives its own device obtains the capability it needs to map.
+#[inline(always)]
+pub fn mmio_delegate(base: u64, len: u64, target: u64, rights: u8) -> u64 {
+    syscall5(
+        SYS_CAP_DELEGATE,
+        u64::from(zc_abi::MMIO_BROKER_OBJECT),
+        target,
+        u64::from(rights),
+        base,
+        len,
     )
 }
 

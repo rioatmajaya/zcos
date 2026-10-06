@@ -113,13 +113,25 @@ jobs:
         grep -q "task 2: cat: cannot open" build/boot.log
         grep -q "task 4: blk: zcfs stopped" build/boot.log
         grep -q "user: 9 address spaces" build/boot.log
-        grep -q "device: 3 roles, 6 grants (blk 0, kbd 4, devmgr 2)" build/boot.log
+        grep -q "device: 3 roles, 7 grants (blk 0, kbd 4, devmgr 3)" build/boot.log
         grep -q "service: 2 roles, 2 grants (initd -> blk, kbd)" build/boot.log
         grep -q "cap: task 6 delegated" build/boot.log
         grep -q "to task 4" build/boot.log
         grep -q "iomap: task 4 now holds 256 ports" build/boot.log
         grep -q "iomap: task 6 now holds 8 ports" build/boot.log
         grep -q "task 6: devmgr: blk published" build/boot.log
+        # Device memory is brokered the same way as I/O (ADR 0020): the manager
+        # discovers the AHCI BAR, the kernel validates and records a range it
+        # never knew, and the domain maps its own registers uncached. A range
+        # the kernel owns is refused, so brokering leaks no memory.
+        grep -q "task 6: devmgr: mmio ram range refused" build/boot.log
+        grep -q "task 6: devmgr: mmio oversized refused" build/boot.log
+        grep -q "mmio: task 6 delegated" build/boot.log
+        grep -q "to task 6" build/boot.log
+        grep -q "task 6: mmio: task 6 mapped ahci" build/boot.log
+        ! grep -q "devmgr: mmio ram range accepted" build/boot.log
+        ! grep -q "devmgr: mmio oversized accepted" build/boot.log
+        ! grep -q "devmgr: ahci registers unexpected" build/boot.log
         grep -q "task 4: blk: discovery received" build/boot.log
         grep -q "iomap: task 5 now holds 3 ports" build/boot.log
         grep -q "kbd: unprovided source correctly refused" build/boot.log

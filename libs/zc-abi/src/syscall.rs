@@ -17,6 +17,11 @@ pub const SYS_RECV: u64 = 2;
 /// caller's live slot holding the object with grant rights and inserts a
 /// non-amplifying subset into the target's table. Naming by object keeps
 /// handles table-internal: a caller can only hand over what it holds.
+///
+/// Two object ids take a broker form that names a range the caller discovered
+/// instead of one it holds, passing the raw range in the two registers after
+/// the rights: `r10` and `r8`. See [`crate::PORT_BROKER_OBJECT`] and
+/// [`crate::MMIO_BROKER_OBJECT`].
 pub const SYS_CAP_DELEGATE: u64 = 3;
 /// Allocates one physical frame and maps it into the caller.
 pub const SYS_MAP_FRAME: u64 = 4;
@@ -105,6 +110,12 @@ pub const SYS_SURFACE_DESTROY: u64 = 29;
 /// derive the same final screen; a real interactive terminal will block here
 /// instead.
 pub const SYS_TERM_READ: u64 = 30;
+/// Maps a brokered MMIO region into the caller: args are the region object id,
+/// a [`crate::MmioInfo`] output pointer, and its length; returns the mapped
+/// virtual address or `u64::MAX`. The caller must hold a read capability for
+/// the region. The mapping is uncached, because the bytes are device registers
+/// rather than memory. Passing a zero length skips the info copy.
+pub const SYS_MMIO_MAP: u64 = 31;
 
 /// Error codes returned by failed syscalls.
 ///
@@ -191,6 +202,7 @@ mod tests {
         assert_eq!(SYS_SURFACE_MAP, 28);
         assert_eq!(SYS_SURFACE_DESTROY, 29);
         assert_eq!(SYS_TERM_READ, 30);
+        assert_eq!(SYS_MMIO_MAP, 31);
     }
 
     #[test]

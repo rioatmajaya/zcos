@@ -9,9 +9,12 @@ The ring-3 → ring-0 call surface. Normative source of truth:
 
 - The syscall instruction is `int $0x80` (IDT vector `0x80`, DPL 3).
 - `rax` carries the syscall number on entry and the result on return.
-- `rdi`, `rsi`, `rdx`, `r10` carry arguments 0, 1, 2, 3. Only
-  `SYS_CAP_DELEGATE` uses `r10` today (the port broker's raw range); every
-  other syscall ignores it.
+- `rdi`, `rsi`, `rdx`, `r10`, `r8` carry arguments 0–4. Only `SYS_CAP_DELEGATE`
+  uses the last two today: the port broker passes its packed range in `r10`,
+  and the MMIO broker passes a 64-bit base in `r10` and a length in `r8` (a
+  device BAR does not fit the packed port encoding). Every other syscall
+  ignores them. `syscall5` in `user/zc-user` passes the fifth argument in
+  `r8`, which the `int 0x80` stub already saves.
 - The kernel preserves every register except `rax`.
 
 A syscall never returns more than one word. Bulk data moves through a pointer
@@ -20,8 +23,8 @@ filesystem exchange page (see [`server-protocol.md`](server-protocol.md)).
 
 ## Syscall table
 
-Numbers are stable and never reused. `SYS_TERM_READ` (30) is the highest
-assigned number; 31 and above are rejected.
+Numbers are stable and never reused. `SYS_MMIO_MAP` (31) is the highest
+assigned number; 32 and above are rejected.
 
 Two numbers are **declared but not yet implemented**: `SYS_YIELD` (0) and
 `SYS_MAP_FRAME` (4) are recognized by the dispatch table but have no handler, so
@@ -33,7 +36,7 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 0 | `SYS_YIELD` | — | *not implemented* | `u64::MAX` |
 | 1 | `SYS_SEND` | endpoint handle, message ptr | 0 | `u64::MAX` |
 | 2 | `SYS_RECV` | endpoint handle, buffer ptr | 0 | `u64::MAX` |
-| 3 | `SYS_CAP_DELEGATE` | object id, target task index, rights bits, broker range (`r10`) | 0 | `u64::MAX` |
+| 3 | `SYS_CAP_DELEGATE` | object id, target task index, rights bits, broker range (`r10`, `r8`) | 0 | `u64::MAX` |
 | 4 | `SYS_MAP_FRAME` | — | *not implemented* | `u64::MAX` |
 | 5 | `SYS_TASK_EXIT` | — | never returns | — |
 | 6 | `SYS_LOG_WRITE` | UTF-8 ptr, length | 0 | `u64::MAX` |
@@ -61,6 +64,7 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 28 | `SYS_SURFACE_MAP` | object id, `SurfaceInfo` out ptr, length | mapped virtual address | `u64::MAX` |
 | 29 | `SYS_SURFACE_DESTROY` | object id | 0 | `u64::MAX` |
 | 30 | `SYS_TERM_READ` | — | keystroke byte, or `u64::MAX` at end of session | — |
+| 31 | `SYS_MMIO_MAP` | object id, `MmioInfo` out ptr, length | mapped virtual address | `u64::MAX` |
 
 ### Failure convention
 
@@ -108,11 +112,14 @@ collide. `zc-abi` host tests assert the disjointness.
 | Supervised service | bit 30 | `0x4000_0000 \| (id & 0x3FFF_FFFF)` | `service_cap(0)` = `0x4000_0000` |
 | Surface | bit 29 | `0x2000_0000 \| (slot & 0xFF)` | `surface_cap(0)` = `0x2000_0000` |
 | Port broker | bit 28 | `0x1000_0001` | `PORT_BROKER_OBJECT` |
+| Device memory | bit 27 | `0x0800_0000 \| (slot & 0xFF)` | `mmio_cap(0)` = `0x0800_0000` |
 
 The surface **factory** capability is `0x2000_FFFF`; its low bytes `0xFFFF`
 cannot be produced by any valid slot, so it is never mistaken for a surface.
 `SYS_SURFACE_CREATE` requires the factory; a created surface mints
-`READ | WRITE | GRANT` for its creator.
+`READ | WRITE | GRANT` for its creator. The MMIO **broker** capability is
+`0x0800_FFFF`; its low bytes `0xFFFF` cannot be produced by any valid region
+slot (masked to eight bits), so it is never mistaken for a region.
 
 ### Port broker delegation
 
@@ -128,6 +135,23 @@ be recovered from it. The broker is therefore a pure source of authority — it
 cannot claim the ports it hands out, and it cannot re-delegate what it was
 given.
 
+### MMIO broker delegation
+
+`MMIO_BROKER_OBJECT` is the second delegation that names a range the source
+does not hold. A holder of the broker capability may call `SYS_CAP_DELEGATE`
+with the broker object, a target, use-rights, a 64-bit physical base in `r10`,
+and a length in `r8` (the port broker's packed encoding cannot carry a BAR).
+The kernel refuses any requested right beyond `READ | WRITE` and any range that
+is empty, larger than `MMIO_MAX_BYTES`, unaligned, below `MMIO_MIN_BASE`,
+overflowing, or overlapping usable RAM or the framebuffer
+(`zc_kernel::device::mmio_range_allowed`). On success it records the region in
+its slot table and mints `mmio_cap(slot)` into the target's table itself, so
+the manager can never widen its authority. The target may be the caller, which
+is how a manager that also drives its own device obtains the capability it
+needs to map. `SYS_MMIO_MAP` then maps exactly that region uncached into the
+holder and returns the virtual address, optionally filling an `MmioInfo`
+(physical base and length, for programming DMA).
+
 ## Fixed per-task virtual windows
 
 Each ring-3 task sees the same fixed layout (constants in
@@ -139,6 +163,7 @@ Addresses are virtual and per-task; the kernel maps only what a task may touch.
 | `0x10_00000`–`0x14_00000` | 4 MiB | framebuffer window (the compositor paints pixels) |
 | `0x14_00000`–`0x24_00000` | 4 × 4 MiB | surface windows, one per `SURFACE_SLOTS` slot |
 | `0x40_0000`–`0x60_0000` | 2 MiB | task image window (code, data, bss, stack) |
+| `0x60_0000`–`0xE0_0000` | 8 × 1 MiB | brokered device-memory windows, one per `MMIO_SLOTS` slot |
 | `0x45_0000`–`0x45_3000` | 3 pages | driver DMA queue area |
 | `0x45_3000`–`0x45_4000` | 1 page | driver descriptor page (`INFO_VIRT`) |
 | `0x45_4000`–`0x45_5000` | 1 page | filesystem exchange page (`FS_EXCHANGE_VIRT`) |
