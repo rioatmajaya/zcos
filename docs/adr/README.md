@@ -27,6 +27,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0018](0018-window-placement-proof.md) | Window placement proof for interactive pixels | Accepted |
 | [0019](0019-port-broker-capability.md) | Port broker capability for ring-3 PCI discovery | Accepted |
 | [0020](0020-device-memory-broker.md) | Device memory broker capability for ring-3 drivers | Accepted |
+| [0021](0021-coherent-dma-window.md) | Coherent DMA window for driver domains | Accepted |
 
 ## Adding a decision
 

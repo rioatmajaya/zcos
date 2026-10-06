@@ -201,6 +201,21 @@ pub const DEVMGR_SETUP_GRANTS: usize = 3;
 /// How many grants the keyboard domain always holds: two IRQs plus two ports.
 pub const KBD_GRANT_COUNT: usize = 4;
 
+/// Coherent DMA window a role receives at spawn, in bytes.
+///
+/// Only the device manager drives a device that needs DMA today, so it is the
+/// only role with a window; every other domain gets none. The size lives here
+/// as data so the spawn path and the host tests pin the same number, and a
+/// role that later gains a DMA device changes one line.
+#[must_use]
+pub const fn dma_window_bytes(role: usize) -> u64 {
+    if role == crate::service::DEVMGR_TASK {
+        zc_abi::DMA_WINDOW_BYTES
+    } else {
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,6 +334,20 @@ mod tests {
         // The config ports the manager also holds are outside the window, so
         // it can never broker bus access.
         assert!(!pci_io_window_contains(PCI_CONFIG_START, PCI_CONFIG_LEN));
+    }
+
+    #[test]
+    fn only_the_device_manager_gets_a_dma_window() {
+        assert_eq!(
+            dma_window_bytes(crate::service::DEVMGR_TASK),
+            zc_abi::DMA_WINDOW_BYTES
+        );
+        assert_eq!(dma_window_bytes(crate::service::BLK_TASK), 0);
+        assert_eq!(dma_window_bytes(crate::service::COMPOSITOR_TASK), 0);
+        assert_eq!(dma_window_bytes(crate::service::KBD_TASK), 0);
+        // The window is a whole number of pages, so the spawn path can map it
+        // frame by frame without a partial tail.
+        assert_eq!(zc_abi::DMA_WINDOW_BYTES % PAGE_SIZE, 0);
     }
 
     #[test]

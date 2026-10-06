@@ -68,6 +68,17 @@ still learns no address.
   uncached (`PTE_PCD`) and non-executable with the new `SYS_MMIO_MAP` (31). A
   new `syscall5` passes the 64-bit base and length in `r10` and `r8`. See
   [ADR 0020](docs/adr/0020-device-memory-broker.md).
+- **Coherent DMA window** (K8-a): a driver that programs a device to move data
+  itself now gets memory the device can address. At spawn the kernel allocates
+  64 KiB of physically contiguous frames for the roles the device table names
+  (the device manager), maps them at `DMA_VIRT`, and publishes the
+  device-visible base in a `DmaInfo` at `DMA_INFO_VIRT`, so the virtual alias
+  and the physical base are the same frames and a buffer needs no copy. A new
+  `FrameAllocator::allocate_contiguous` fails without consuming anything on a
+  fragmented heap, so the boot stops loudly rather than program a device with a
+  broken ring. The manager writes two proof words through the alias and the
+  kernel reads them back through the base (`dma: window coherent ok`). See
+  [ADR 0021](docs/adr/0021-coherent-dma-window.md).
 
 - **Frozen interface specifications**: `docs/specs/` now documents the
   normative interfaces that cross the kernel/userspace boundary — the syscall

@@ -40,7 +40,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F3** | Interrupt + Timer + SMP | ⚠️ partial | `traps: idt installed`, `timer: calibrated bus`; SMP parked |
 | **F4** | Thread + IPC | ✅ done | `task 0: producer sent 2000`, capability gates |
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
-| **F6** | Driver userspace | ✅ done | `device: 3 roles, 6 grants`, `task 6: devmgr: blk published` |
+| **F6** | Driver userspace | ✅ done | `device: 3 roles, 7 grants`, `task 6: devmgr: blk published`, `dma: window coherent ok` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
 | **F8** | Desktop | 🔄 F8f, F8d-3a–3c done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `wm: window mapped`; `wm: move ok`; `compositor: frame updated`; `wm: content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar host tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
@@ -251,10 +251,11 @@ restart without taking the kernel down.
       moved to the userspace `initd` supervisor (F7f) as services joined its
       table.
 
-**Pass criteria.** CI greps `device: 3 roles, 6 grants`, `task 6: devmgr: blk
-published`, `task 4: blk: disk magic ok`, `fault vector 13 (general
-protection)`, and `faulted; initd notified` (a ring-3 fault kills only its
-domain), and asserts `forbidden port read succeeded` is **absent**.
+**Pass criteria.** CI greps `device: 3 roles, 7 grants`, `task 6: devmgr: blk
+published`, `dma: window coherent ok`, `task 4: blk: disk magic ok`,
+`fault vector 13 (general protection)`, and `faulted; initd notified` (a ring-3
+fault kills only its domain), and asserts `forbidden port read succeeded` is
+**absent**.
 
 **References.** `25-virtio.md`, `09-usb-drivers.md`, `12-driver-lainnya.md`,
 `28-fuzzing-dan-sanitizer.md`, `29-debugging-perangkat-keras.md`.
@@ -692,6 +693,14 @@ di ADR 0014 (driver ring-0 di fase 1, framework yang belum di-port, semantik
 SMP/atomic, DMA/IOMMU). Subsystem **rootfs** Linux (menjalankan distro hasil
 unduh) adalah goal terpisah yang lebih besar, bukan bagian track ini.
 
+Kontrak device-server itu sudah mulai berdiri: capability MMIO yang di-broker
+([ADR 0020](adr/0020-device-memory-broker.md)) memberi driver ring 3 register
+device, dan window DMA koheren ([ADR 0021](adr/0021-coherent-dma-window.md))
+memberinya memori yang bisa dialamatkan perangkat — keduanya tanpa kernel
+mengetahui alamatnya, dan keduanya diproof di boot. Sisa prasyarat DDE: IRQ
+dinamis (bukan hanya sumber yang di-grant saat spawn) dan toolchain C untuk
+mem-port driver Linux.
+
 Reference: `12-driver-lainnya.md`, `25-virtio.md`.
 
 ### Track H — Hardware enablement (feeds F8/F9)
@@ -717,6 +726,13 @@ pindah ke ring 3. Tiga langkah:
    `ramfs`/`tmpfs`/`devfs`, dan `perms` ke domain `zc-vfs`; syscall FS di kernel
    menjadi shim IPC. Prasyarat: mekanisme penyerahan frame initramfs
    (`SYS_MAP_FRAME`) dan protokol VFS baru.
+4. ✅ **K8-a — memori device untuk driver ring 3.** Capability broker MMIO
+   memberi driver register device
+   ([ADR 0020](adr/0020-device-memory-broker.md)) dan window DMA koheren
+   memberi perangkat memori kontigu
+   ([ADR 0021](adr/0021-coherent-dma-window.md)); keduanya diproof di boot
+   (`mmio: task 6 mapped ahci`, `dma: window coherent ok`). Ini menutup
+   prasyarat device-server untuk DDE (Track C).
 
 Pass criteria: `cargo test --workspace` dan boot proof tetap hijau di setiap
 langkah; frame hash tidak berubah kecuali perubahan yang disengaja.

@@ -162,12 +162,29 @@ Addresses are virtual and per-task; the kernel maps only what a task may touch.
 |---|---|---|
 | `0x10_00000`–`0x14_00000` | 4 MiB | framebuffer window (the compositor paints pixels) |
 | `0x14_00000`–`0x24_00000` | 4 × 4 MiB | surface windows, one per `SURFACE_SLOTS` slot |
+| `0x24_00000`–`0x24_10000` | 64 KiB | coherent DMA window (`DMA_VIRT`, the device manager) |
 | `0x40_0000`–`0x60_0000` | 2 MiB | task image window (code, data, bss, stack) |
 | `0x60_0000`–`0xE0_0000` | 8 × 1 MiB | brokered device-memory windows, one per `MMIO_SLOTS` slot |
 | `0x45_0000`–`0x45_3000` | 3 pages | driver DMA queue area |
 | `0x45_3000`–`0x45_4000` | 1 page | driver descriptor page (`INFO_VIRT`) |
 | `0x45_4000`–`0x45_5000` | 1 page | filesystem exchange page (`FS_EXCHANGE_VIRT`) |
+| `0x45_5000` | 1 page | DMA descriptor page (`DMA_INFO_VIRT`) |
 | `0x47_0000` | 1 page | input-domain ring (`INPUT_RING_VIRT`) |
+
+### Coherent DMA window
+
+A driver that programs a device to move data itself needs memory the device can
+address: one physically contiguous run with a stable base. The kernel allocates
+`DMA_WINDOW_BYTES` (64 KiB) of contiguous frames at spawn for the roles
+`zc_kernel::device::dma_window_bytes` names, maps them at `DMA_VIRT`, and
+writes a `DmaInfo` (physical base and length) at `DMA_INFO_VIRT`. The same bytes
+are reachable both ways — the driver writes through the virtual alias and the
+device reads the physical base — so a buffer needs no copy. The run is never
+freed, so it cannot be handed to another task while a device still points at
+it. A fragmented heap makes the allocation fail loudly rather than program a
+device with a broken ring. The whole 2 MiB page-directory entry holding
+`DMA_VIRT` is reserved from the frame allocator, because the window's private
+page table replaces the identity map's large page for that entire entry.
 
 ## `Stat`
 

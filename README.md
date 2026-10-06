@@ -70,8 +70,9 @@ runtime-granted: an 8 KiB deny-by-default TSS I/O bitmap instead of blanket
 `IOPL`, per-task address spaces with `CR3` reloaded on every switch,
 capability-gated IRQ and port claims, a host-tested device grant table
 (`zc-kernel::device`), discovery over dedicated IPC channels, and runtime
-capability brokering of the block driver's BAR window — the kernel never scans
-the bus. A ring-3 fault kills
+capability brokering of the block driver's BAR window, a device's memory-mapped
+registers, and a coherent DMA window — the kernel never scans the bus and never
+learns a device address. A ring-3 fault kills
 only its domain — revoking its ports, IRQ claims, and shared ring page — and a
 budgeted domain restarts in place. A ring-0 fault is fatal, on purpose.
 

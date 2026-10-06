@@ -82,7 +82,11 @@ costs an 8 KiB fill per switch and, more importantly, cannot forget a revoke:
 a domain that exits loses its ports with it, and the next task to reuse the
 slot starts from nothing. Driver DMA
 areas are allocated by the kernel and published to one domain as a descriptor
-page of physical addresses.
+page of physical addresses; since
+[ADR 0021](adr/0021-coherent-dma-window.md) a role the device table names also
+gets a coherent window of physically contiguous frames mapped at a fixed
+address, so the device-visible base and the driver's virtual alias are the same
+memory and a buffer needs no copy.
 
 Interrupts are messages, not kernel-side device work. A handler records a
 coalesced count per source and EOIs; the domain that claimed that source
@@ -100,7 +104,11 @@ The device manager owns PCI config exclusively, enumerates bus zero, and
 brokers the winning BAR to the block driver through a `GRANT`-only port-broker
 capability before sending the base over the IPC discovery channel; the driver
 blocks for exactly that word, then claims only its window. The kernel never
-touches the bus, so its boot path carries no device knowledge. A separate data
+touches the bus, so its boot path carries no device knowledge. Since
+[ADR 0020](adr/0020-device-memory-broker.md) the same manager brokers device
+memory too: it discovers a controller's memory BAR and the kernel validates and
+maps it, so a driver can drive real hardware while ring 0 still learns no
+address. A separate data
 channel carries the producer stream, and the queues never mix — the 2000-word
 sequence proves it on every boot. The manager exits after sending, so at steady
 state no task holds config access at all — the bus cannot be reprogrammed from

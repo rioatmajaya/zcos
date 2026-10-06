@@ -155,21 +155,38 @@ const FB_WINDOW_SIZE: u64 = 0x40_0000;
 /// Firmware framebuffer description shared with userspace.
 static mut FB_INFO: zc_abi::FramebufferInfo = zc_abi::FramebufferInfo::UNAVAILABLE;
 
+/// Physical range the DMA mapping shadows in the owning task's address space.
+///
+/// A private page table replaces the identity map's 2 MiB large page for the
+/// *whole* page-directory entry holding [`zc_abi::DMA_VIRT`], so every address
+/// in that entry becomes either a DMA frame or unmapped. The allocator must
+/// therefore keep out of the entire entry, not just the 64 KiB window, or the
+/// kernel would hand out a frame it can no longer reach through the identity
+/// map while the owner's tables are loaded.
+const DMA_SHADOW_BYTES: u64 = 0x20_0000;
+
+// The shadow must be exactly one page-directory entry, so the window's base
+// has to sit on one. A future ABI move that breaks the alignment fails the
+// build instead of silently unmapping a neighbouring entry at boot.
+const _: () = assert!(zc_abi::DMA_VIRT % DMA_SHADOW_BYTES == 0);
+
 /// Virtual windows the kernel remaps in every task's address space.
 ///
 /// The frame allocator must never hand out frames inside these windows. The
 /// kernel writes a freshly allocated frame through the identity map, but while
 /// a task's page tables are loaded those addresses point at user images,
-/// stacks, the display, or a surface instead — so a frame here would be
-/// written into user memory. [`super::kernel_main`] reserves each range before
-/// anything allocates.
+/// stacks, the display, a surface, or a device instead — so a frame here would
+/// be written somewhere other than intended. Each range covers every
+/// page-directory entry a private table replaces, not just the mapped pages.
+/// [`super::kernel_main`] reserves each range before anything allocates.
 #[must_use]
-pub const fn reserved_windows() -> [(u64, u64); 4] {
+pub const fn reserved_windows() -> [(u64, u64); 5] {
     [
         (USER_CODE_VIRT, USER_WINDOW_END),
         (zc_abi::MMIO_VIRT, zc_abi::MMIO_END),
         (FB_VIRT, FB_VIRT + FB_WINDOW_SIZE),
         (zc_abi::SURFACE_VIRT, zc_abi::SURFACE_END),
+        (zc_abi::DMA_VIRT, zc_abi::DMA_VIRT + DMA_SHADOW_BYTES),
     ]
 }
 
@@ -438,6 +455,11 @@ static mut START_TICKS: u64 = 0;
 
 /// Boot-info pointer saved for the post-user boot tail.
 static mut SAVED_BOOT_INFO: u64 = 0;
+
+/// Physical base of the device manager's DMA window, or zero when none was
+/// provisioned. Written once at spawn, read by the coherence check after no
+/// task can run.
+static mut DMA_WINDOW_PHYS: u64 = 0;
 
 /// Software-interrupt entry for `int 0x80` from ring 3.
 ///
@@ -1955,10 +1977,40 @@ pub unsafe extern "C" fn user_finished() -> ! {
     if switches < MIN_SWITCHES {
         crate::fail("scheduler did not switch tasks");
     }
+    verify_dma_window();
     verify_framebuffer();
     // SAFETY: saved from the loader's valid BootInfo before entering the tasks.
     let info = unsafe { &*(SAVED_BOOT_INFO as *const BootInfo) };
     crate::boot_tail(info);
+}
+
+/// Proves the device manager's DMA window is coherent.
+///
+/// The manager wrote [`zc_abi::DMA_MAGIC0`] at the window's virtual base and
+/// [`zc_abi::DMA_MAGIC1`] one page in; the kernel reads the same words back
+/// through the window's physical address. A match proves the virtual alias and
+/// the device-visible address are the same frames, which is exactly what a
+/// driver programming a device needs to trust.
+fn verify_dma_window() {
+    // SAFETY: written once during setup before any task ran.
+    let phys = unsafe { DMA_WINDOW_PHYS };
+    if phys == 0 {
+        crate::serial::write_str("dma: window absent\n");
+        return;
+    }
+    // SAFETY: the window is a live contiguous run below the identity map; the
+    // manager wrote the proof words through its virtual alias before exiting.
+    let (first, second) = unsafe {
+        (
+            core::ptr::read_volatile(phys as *const u32),
+            core::ptr::read_volatile((phys + PAGE_SIZE) as *const u32),
+        )
+    };
+    if first == zc_abi::DMA_MAGIC0 && second == zc_abi::DMA_MAGIC1 {
+        crate::serial::write_str("dma: window coherent ok\n");
+    } else {
+        crate::fail("dma: window coherent FAILED");
+    }
 }
 
 /// Hashes the client's window surface and proves its deterministic content.
@@ -2539,6 +2591,13 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
             // a descriptor page holding their physical addresses.
             publish_driver_area(alloc, pt);
         }
+        // A role that drives a DMA device gets a coherent window. The size
+        // comes from the device table, so a role without one gets nothing and
+        // the number stays pinned by the host tests.
+        let dma_bytes = zc_kernel::device::dma_window_bytes(index);
+        if dma_bytes != 0 {
+            publish_dma_window(alloc, cr3, pt, dma_bytes);
+        }
         cr3s[index] = cr3;
         pts[index] = pt;
         index += 1;
@@ -2588,6 +2647,21 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
                 || page_present(pts[i], zc_abi::FS_EXCHANGE_VIRT) != owns_blk
             {
                 crate::fail("driver area leaked into another task");
+            }
+            // The DMA descriptor page sits in the image window, so the image
+            // table sees it; the window itself lives in its own page-directory
+            // entry, so only that entry's shape tells the two apart.
+            let owns_dma = i == DEVMGR_INDEX;
+            if page_present(pts[i], zc_abi::DMA_INFO_VIRT) != owns_dma {
+                crate::fail("dma descriptor leaked into another task");
+            }
+            let Some(pd) = task_user_pd(cr3s[i]) else {
+                crate::fail("user address space misses its page directory");
+            };
+            let dma_entry = unsafe { table_entry(pd, ((zc_abi::DMA_VIRT >> 21) & 0x1FF) as usize) };
+            let dma_private = dma_entry & 1 != 0 && dma_entry & (1 << 7) == 0;
+            if dma_private != owns_dma {
+                crate::fail("dma window leaked into another task");
             }
             if page_present(pts[i], zc_abi::INPUT_RING_VIRT) {
                 crate::fail("input ring mapped before any claim");
@@ -3452,6 +3526,66 @@ fn publish_driver_area(alloc: &mut FrameAllocator<'_>, pt_phys: u64) {
     let _ = crate::serial::print(format_args!(
         "driver: queue at {:#x}, info at {:#x}\n",
         QUEUE_VIRT, INFO_VIRT
+    ));
+}
+
+/// Maps a role's coherent DMA window and publishes its device address.
+///
+/// Allocates one physically contiguous run — the device needs a single
+/// device-visible base, so a scattered run is useless — maps it at
+/// [`zc_abi::DMA_VIRT`], and writes a [`zc_abi::DmaInfo`] naming the physical
+/// base at [`zc_abi::DMA_INFO_VIRT`]. The window is 64 KiB, far below the
+/// 2 MiB a page-directory entry covers, so one private page table holds it.
+/// Nothing frees the run for the rest of the boot, so the frames can never be
+/// handed to another task while a device still points at them.
+fn publish_dma_window(alloc: &mut FrameAllocator<'_>, cr3: u64, pt_phys: u64, bytes: u64) {
+    use zc_abi::{DMA_INFO_VIRT, DMA_VIRT, DmaInfo};
+
+    let frames = (bytes / PAGE_SIZE) as usize;
+    let Some(base) = alloc.allocate_contiguous(frames) else {
+        crate::fail("dma window needs contiguous frames");
+    };
+    let phys = base.start_address();
+    let Some(pd) = task_user_pd(cr3) else {
+        crate::fail("dma window found no page directory");
+    };
+    let Some(table) = alloc.allocate() else {
+        crate::fail("dma window found no page table");
+    };
+    let window_pt = table.start_address();
+    let Some(descriptor) = alloc.allocate() else {
+        crate::fail("dma window found no descriptor frame");
+    };
+    let descriptor_phys = descriptor.start_address();
+    // SAFETY: fresh frames inside the identity map. The user mappings only
+    // take effect at the later CR3 reload, so everything is written through
+    // physical addresses here.
+    unsafe {
+        core::slice::from_raw_parts_mut(window_pt as *mut u8, PAGE_SIZE as usize).fill(0);
+        let mut page = 0u64;
+        while page < frames as u64 {
+            let va = DMA_VIRT + page * PAGE_SIZE;
+            set_table_entry(
+                window_pt,
+                page_index(va),
+                (phys + page * PAGE_SIZE) | USER_PAGE_FLAGS,
+            );
+            page += 1;
+        }
+        set_table_entry(pd, ((DMA_VIRT >> 21) & 0x1FF) as usize, window_pt | USER_PAGE_FLAGS);
+
+        core::slice::from_raw_parts_mut(descriptor_phys as *mut u8, PAGE_SIZE as usize).fill(0);
+        set_table_entry(
+            pt_phys,
+            page_index(DMA_INFO_VIRT),
+            descriptor_phys | USER_PAGE_FLAGS,
+        );
+        (descriptor_phys as *mut DmaInfo).write_volatile(DmaInfo { phys, len: bytes });
+    }
+    // SAFETY: written once here before any task runs; read after no task can.
+    unsafe { DMA_WINDOW_PHYS = phys };
+    let _ = crate::serial::print(format_args!(
+        "dma: window {bytes} bytes at {DMA_VIRT:#x}, phys {phys:#x}\n",
     ));
 }
 

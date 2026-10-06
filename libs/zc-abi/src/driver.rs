@@ -147,6 +147,66 @@ pub const INFO_QUEUE2: usize = 16;
 /// Size of the descriptor page payload.
 pub const INFO_LEN: usize = 24;
 
+/// User address of a driver domain's coherent DMA window.
+///
+/// Starts exactly at [`crate::SURFACE_END`], so it clears the framebuffer and
+/// surface windows and stays inside the first page directory. The kernel backs
+/// it with physically contiguous frames at spawn and publishes the device
+/// address at [`DMA_INFO_VIRT`], which is what a driver hands to hardware.
+pub const DMA_VIRT: u64 = 0x24_00000;
+
+/// Size in bytes of the delegated DMA window (64 KiB, 16 frames).
+///
+/// Deliberately modest: the allocator hands out a contiguous run at spawn, and
+/// a smaller run is far less likely to fail on fragmentation. It is ample for
+/// the descriptor rings and packet buffers a bring-up driver needs.
+pub const DMA_WINDOW_BYTES: u64 = 0x1_0000;
+
+/// User address of the DMA descriptor page (one page).
+///
+/// Sits directly above the filesystem exchange page and below the keyboard
+/// image at `0x46_0000`, matching the layout of the other driver pages.
+pub const DMA_INFO_VIRT: u64 = 0x45_5000;
+
+/// Describes a delegated DMA window to its holder.
+///
+/// `phys` is the window's physical base, which a driver programs into a device
+/// as the DMA target; the same bytes are reachable through [`DMA_VIRT`]. The
+/// two are the same frames, so a buffer written through the virtual alias is
+/// what the device reads.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DmaInfo {
+    /// Physical base address of the window (device-visible).
+    pub phys: u64,
+    /// Length of the window in bytes.
+    pub len: u64,
+}
+
+impl DmaInfo {
+    /// An empty descriptor used when no window was delegated.
+    pub const UNAVAILABLE: Self = Self { phys: 0, len: 0 };
+
+    /// Returns whether this descriptor names a delegated window.
+    #[must_use]
+    pub const fn is_available(self) -> bool {
+        self.phys != 0 && self.len != 0
+    }
+}
+
+/// First word a driver writes into its DMA window for the coherence proof.
+///
+/// The driver writes it through the window's virtual alias and the kernel
+/// reads it back through the window's physical address; a match proves the
+/// alias and the device-visible address are the same frames.
+pub const DMA_MAGIC0: u32 = 0xD0A0_0001;
+
+/// Second proof word, one page into the window.
+///
+/// Written and read exactly like [`DMA_MAGIC0`] but at a different frame, so a
+/// match also proves the whole run — not just its first frame — is contiguous.
+pub const DMA_MAGIC1: u32 = 0xD0A0_0002;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,5 +307,42 @@ mod tests {
         assert_ne!(PORT_BROKER_OBJECT, port_cap(0, 1));
         assert_ne!(PORT_BROKER_OBJECT, crate::service_cap(0));
         assert_ne!(PORT_BROKER_OBJECT, crate::SURFACE_FACTORY);
+    }
+
+    #[test]
+    fn the_dma_window_clears_its_neighbours() {
+        // Starts where the surface window ends, and is page-sized.
+        assert_eq!(DMA_VIRT, crate::SURFACE_END);
+        assert_eq!(DMA_VIRT % 4096, 0);
+        assert_eq!(DMA_WINDOW_BYTES % 4096, 0);
+        assert_eq!(DMA_WINDOW_BYTES / 4096, 16);
+        // The descriptor page follows the exchange page and stays inside the
+        // image window, below the keyboard image at 0x46_0000.
+        assert_eq!(FS_EXCHANGE_VIRT + FS_EXCHANGE_LEN as u64, DMA_INFO_VIRT);
+        assert!(DMA_INFO_VIRT + 4096 <= 0x46_0000);
+    }
+
+    #[test]
+    fn dma_proof_words_are_distinct_and_nonzero() {
+        // A zero word would match a freshly zeroed window, so the proof must
+        // use non-zero words; distinct words also catch a write that lands in
+        // the wrong frame.
+        assert_ne!(DMA_MAGIC0, 0);
+        assert_ne!(DMA_MAGIC1, 0);
+        assert_ne!(DMA_MAGIC0, DMA_MAGIC1);
+    }
+
+    #[test]
+    fn dma_info_layout_is_stable() {
+        use core::mem::{offset_of, size_of};
+        assert_eq!(size_of::<DmaInfo>(), 16);
+        assert_eq!(offset_of!(DmaInfo, phys), 0);
+        assert_eq!(offset_of!(DmaInfo, len), 8);
+        assert!(!DmaInfo::UNAVAILABLE.is_available());
+        let delegated = DmaInfo {
+            phys: 0x1000,
+            len: DMA_WINDOW_BYTES,
+        };
+        assert!(delegated.is_available());
     }
 }

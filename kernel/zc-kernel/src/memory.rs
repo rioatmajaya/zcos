@@ -101,6 +101,19 @@ impl<'a> FrameAllocator<'a> {
         None
     }
 
+    /// Returns the end of the first reserved range overlapping `[start, end)`.
+    fn reserved_overlap_end(&self, start: u64, end: u64) -> Option<u64> {
+        let mut index = 0;
+        while index < self.reserved_count {
+            let (rstart, rend) = self.reserved[index];
+            if start < rend && rstart < end {
+                return Some(rend);
+            }
+            index += 1;
+        }
+        None
+    }
+
     /// Allocates one zero-uninitialized physical page, or returns `None` when
     /// all usable loader memory has been exhausted.
     ///
@@ -157,6 +170,74 @@ impl<'a> FrameAllocator<'a> {
                 return Some(frame);
             }
             self.advance_region();
+        }
+        None
+    }
+
+    /// Allocates `frames` physically contiguous frames, returning the base.
+    ///
+    /// The run must lie inside a single usable region and clear of every
+    /// reserved window. Recycled frames are never used: they were freed one at
+    /// a time, so they cannot be assumed adjacent. The search works on local
+    /// cursors and only commits them once a whole run is found, so a request
+    /// that cannot be satisfied leaves the allocator exactly as it was — a
+    /// fragmented heap fails loudly instead of stranding memory or handing the
+    /// caller a broken descriptor ring.
+    pub fn allocate_contiguous(&mut self, frames: usize) -> Option<PhysFrame> {
+        if frames == 0 {
+            return None;
+        }
+        let bytes = (frames as u64).checked_mul(PAGE_SIZE)?;
+        let mut index = self.region_index;
+        let mut address = self.next_address;
+        while index < self.regions.len() {
+            let region = self.regions[index];
+            let usable = region.kind == MemoryKind::Usable;
+            let start = if usable {
+                align_up(region.start, PAGE_SIZE)
+            } else {
+                None
+            };
+            let end = if usable {
+                region.start.checked_add(region.len)
+            } else {
+                None
+            };
+            if let (Some(start), Some(end)) = (start, end) {
+                if address < start {
+                    address = start;
+                }
+                if address == 0 {
+                    address = PAGE_SIZE;
+                }
+                // Slide forward until a whole run fits before the next
+                // obstacle: the region end or a reserved window. Every step
+                // keeps the start page-aligned, so the run is aligned too.
+                loop {
+                    let Some(run_end) = address.checked_add(bytes) else {
+                        break;
+                    };
+                    if run_end > end {
+                        break;
+                    }
+                    if let Some(reserved_end) = self.reserved_overlap_end(address, run_end) {
+                        let Some(skip) = align_up(reserved_end, PAGE_SIZE) else {
+                            break;
+                        };
+                        if skip <= address {
+                            break;
+                        }
+                        address = skip;
+                        continue;
+                    }
+                    // Found a run: commit the cursor past it and return.
+                    self.region_index = index;
+                    self.next_address = run_end;
+                    return Some(PhysFrame(address));
+                }
+            }
+            index += 1;
+            address = 0;
         }
         None
     }
@@ -336,6 +417,78 @@ mod tests {
         let mut allocator = FrameAllocator::new(&regions);
         assert!(allocator.reserve(0x1000, 0x3000));
         assert_eq!(allocator.allocate(), None);
+    }
+
+    #[test]
+    fn contiguous_run_comes_from_one_region() {
+        let regions = [region(0x1000, PAGE_SIZE * 4, MemoryKind::Usable)];
+        let mut allocator = FrameAllocator::new(&regions);
+
+        assert_eq!(allocator.allocate_contiguous(3), Some(PhysFrame(0x1000)));
+        // The run consumed three frames; the next single frame is the fourth.
+        assert_eq!(allocator.allocate(), Some(PhysFrame(0x4000)));
+        assert_eq!(allocator.allocate(), None);
+    }
+
+    #[test]
+    fn contiguous_run_skips_reserved_windows() {
+        let regions = [region(0x1000, PAGE_SIZE * 8, MemoryKind::Usable)];
+        let mut allocator = FrameAllocator::new(&regions);
+        assert!(allocator.reserve(0x2000, 0x3000));
+
+        // A two-frame run at 0x1000 would cross the reserved page, so the
+        // allocator places it entirely after the window.
+        assert_eq!(allocator.allocate_contiguous(2), Some(PhysFrame(0x3000)));
+    }
+
+    #[test]
+    fn contiguous_run_fails_on_fragmentation_without_consuming() {
+        let regions = [region(0x1000, PAGE_SIZE * 6, MemoryKind::Usable)];
+        let mut allocator = FrameAllocator::new(&regions);
+        assert!(allocator.reserve(0x3000, 0x4000));
+        assert!(allocator.reserve(0x5000, 0x6000));
+
+        // No three-frame run fits: the largest gap is two frames. Nothing is
+        // consumed, so a single frame still comes from the region start.
+        assert_eq!(allocator.allocate_contiguous(3), None);
+        assert_eq!(allocator.allocate(), Some(PhysFrame(0x1000)));
+    }
+
+    #[test]
+    fn contiguous_run_does_not_cross_regions() {
+        let regions = [
+            region(0x1000, PAGE_SIZE * 2, MemoryKind::Usable),
+            region(0x9000, PAGE_SIZE * 2, MemoryKind::Usable),
+        ];
+        let mut allocator = FrameAllocator::new(&regions);
+
+        // Two frames per region, so a three-frame run cannot be satisfied
+        // even though four frames are free in total.
+        assert_eq!(allocator.allocate_contiguous(3), None);
+        assert_eq!(allocator.allocate(), Some(PhysFrame(0x1000)));
+    }
+
+    #[test]
+    fn contiguous_run_ignores_recycled_frames() {
+        let regions = [region(0x1000, PAGE_SIZE * 4, MemoryKind::Usable)];
+        let mut allocator = FrameAllocator::new(&regions);
+        let first = allocator.allocate().expect("frame");
+        let _second = allocator.allocate().expect("frame");
+        assert!(allocator.free(first));
+        assert_eq!(allocator.recycled_count(), 1);
+
+        // A two-frame run comes from fresh memory, never from the recycle
+        // stack, whose frames are not known to be adjacent.
+        assert_eq!(allocator.allocate_contiguous(2), Some(PhysFrame(0x3000)));
+        assert_eq!(allocator.recycled_count(), 1);
+    }
+
+    #[test]
+    fn contiguous_run_rejects_zero_and_overflow() {
+        let regions = [region(0x1000, PAGE_SIZE, MemoryKind::Usable)];
+        let mut allocator = FrameAllocator::new(&regions);
+        assert_eq!(allocator.allocate_contiguous(0), None);
+        assert_eq!(allocator.allocate_contiguous(usize::MAX), None);
     }
 
     #[test]

@@ -132,6 +132,16 @@ jobs:
         ! grep -q "devmgr: mmio ram range accepted" build/boot.log
         ! grep -q "devmgr: mmio oversized accepted" build/boot.log
         ! grep -q "devmgr: ahci registers unexpected" build/boot.log
+        # A role that drives a DMA device gets a coherent window at spawn: the
+        # kernel allocates one contiguous run, maps it at a fixed address, and
+        # publishes the device-visible base; the manager writes proof words
+        # through the virtual alias and the kernel reads them back through the
+        # physical one, so a match proves the two are the same frames.
+        grep -q "dma: window 65536 bytes at 0x2400000" build/boot.log
+        grep -q "task 6: devmgr: dma window at" build/boot.log
+        grep -q "dma: window coherent ok" build/boot.log
+        ! grep -q "dma: window coherent FAILED" build/boot.log
+        ! grep -q "dma window needs contiguous frames" build/boot.log
         grep -q "task 4: blk: discovery received" build/boot.log
         grep -q "iomap: task 5 now holds 3 ports" build/boot.log
         grep -q "kbd: unprovided source correctly refused" build/boot.log

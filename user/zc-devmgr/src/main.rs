@@ -28,7 +28,10 @@
 #![no_main]
 #![allow(unsafe_code)]
 
-use zc_abi::{IPC_DISCOVERY, MMIO_MAX_BYTES, MmioInfo};
+use zc_abi::{
+    DMA_INFO_VIRT, DMA_MAGIC0, DMA_MAGIC1, DMA_VIRT, DMA_WINDOW_BYTES, DmaInfo, IPC_DISCOVERY,
+    MMIO_MAX_BYTES, MmioInfo,
+};
 use zc_kernel::capability::Rights;
 use zc_kernel::pci;
 use zc_user::{
@@ -211,6 +214,43 @@ fn mmio_proof() {
     log_ahci(info.base, info.len, cap_reg, pi);
 }
 
+/// Proves the coherent DMA window the kernel provisioned at spawn.
+///
+/// The kernel allocated one contiguous run, mapped it at `DMA_VIRT`, and wrote
+/// a [`DmaInfo`] naming the physical base at `DMA_INFO_VIRT`. Writing the proof
+/// words through the virtual alias and letting the kernel read them back
+/// through the physical address proves the two are the same frames — the
+/// property a driver programming a device depends on.
+fn dma_proof() {
+    // SAFETY: the kernel mapped the descriptor page for this task and wrote it
+    // once before the task started.
+    let info = unsafe { core::ptr::read_volatile(DMA_INFO_VIRT as *const DmaInfo) };
+    if !info.is_available() || info.len != DMA_WINDOW_BYTES {
+        log("devmgr: dma window unavailable\n");
+        return;
+    }
+    // SAFETY: the kernel mapped exactly this window writable for this task.
+    unsafe {
+        core::ptr::write_volatile(DMA_VIRT as *mut u32, DMA_MAGIC0);
+        core::ptr::write_volatile((DMA_VIRT + 4096) as *mut u32, DMA_MAGIC1);
+    }
+    log_dma(info.phys, info.len);
+}
+
+/// Logs the DMA window's device-visible base and length.
+fn log_dma(phys: u64, len: u64) {
+    let mut out = [0u8; 80];
+    let mut at = copy(&mut out, 0, b"devmgr: dma window at ");
+    at = write_hex(&mut out, at, phys);
+    at = copy(&mut out, at, b" len ");
+    at = write_hex(&mut out, at, len);
+    out[at] = b'\n';
+    at += 1;
+    // SAFETY: the buffer holds only ASCII digits and punctuation, and the
+    // slice ends inside the 80-byte buffer, so it is valid UTF-8.
+    log(unsafe { core::str::from_utf8_unchecked(&out[..at]) });
+}
+
 /// Logs the mapped ABAR and the two registers read back from it.
 fn log_ahci(base: u64, len: u64, cap: u32, pi: u32) {
     let mut out = [0u8; 128];
@@ -327,5 +367,8 @@ pub unsafe extern "C" fn _start() -> ! {
     // The rendezvous is done, so the memory broker path can run at leisure;
     // it touches no other task and cannot delay the block driver.
     mmio_proof();
+    // The DMA window was provisioned at spawn, so its proof is independent of
+    // the broker path; it runs last so a failure names the latest thing tried.
+    dma_proof();
     task_exit()
 }
