@@ -249,6 +249,12 @@ pub unsafe extern "C" fn _start() -> ! {
             width,
             height,
         );
+        // The pointer is foreground and sits on top of the window, so redraw it
+        // over the window region before flushing. Without this, every keystroke
+        // repaint (and every pointer wake) would overwrite the cursor wherever
+        // it overlaps the window, making it vanish the moment it is aimed at the
+        // terminal.
+        draw_cursor(back, surface.stride, format, width, height, cursor, moved);
         blit_rect(back, &fb, surface.stride, moved);
         if message == WM_ACK {
             log("compositor: frame updated\n");

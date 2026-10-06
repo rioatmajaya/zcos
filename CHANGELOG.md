@@ -572,6 +572,21 @@ still learns no address.
   second one only competes with the client's acks. See
   [ADR 0023](docs/adr/0023-pointer-and-mouse-read.md).
 
+- **Pointer vanished the moment it was aimed at the terminal window** (F8b-2):
+  the compositor's event loop re-composited the window over the `moved` region
+  (`blit_window` + `blit_rect`) on every wake — keystroke *or* pointer nudge —
+  but never redrew the cursor on top of that region afterward. The pointer is
+  foreground, so `blit_window` overwrote the sprite wherever it overlapped the
+  window, and the next flush sent a cursor-less window to the display. The
+  pointer therefore disappeared (and looked frozen) exactly when it sat over the
+  terminal, which also made typed input look dead because the user's on-screen
+  reference point was gone. The event loop now redraws the cursor over the window
+  region before flushing, so the pointer stays visible over the window and moves
+  normally. Keyboard input was never actually blocked: `SYS_TERM_READ` serves the
+  routed keystrokes and the client runs them (verified end-to-end through the
+  scripted session), so the fix is compositor-side only. See
+  [ADR 0023](docs/adr/0023-pointer-and-mouse-read.md).
+
 ## [0.1.0] - 2026-10-01
 
 First tracked state of the project: the full path from firmware to restartable

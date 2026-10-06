@@ -3611,6 +3611,9 @@ fn notify_mouse(tasks: &mut TaskTable<TASK_COUNT>) {
                         tasks.unblock_all();
                     }
                 }
+            } else {
+                // A nudge was skipped because the channel already holds a
+                // wakeup; the compositor drains all mouse on its next wake.
             }
         }
     }
@@ -3626,7 +3629,7 @@ fn notify_mouse(tasks: &mut TaskTable<TASK_COUNT>) {
 fn accumulate_mouse(frame: [u8; 3]) {
     // SAFETY: owned here; the drain runs with interrupts masked.
     unsafe {
-        let (buttons, dx, dy) = MOUSE_PENDING;
+        let (_buttons, dx, dy) = MOUSE_PENDING;
         MOUSE_PENDING = (
             // The latest packet holds the current button state; OR would keep a
             // released button stuck down across frames.
