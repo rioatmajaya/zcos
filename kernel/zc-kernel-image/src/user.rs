@@ -303,9 +303,20 @@ static mut TERM_CURSORS: [u64; TASK_COUNT] = [0; TASK_COUNT];
 ///
 /// Sized generously: slow emulation still finishes the scripted session
 /// two orders of magnitude below this. The deadline exists for the headless
-/// boot test, where a wedged task must fail the boot instead of hanging it;
-/// the first byte of live input from an input domain disarms it, because a
-/// human driving the desktop keeps the tasks alive indefinitely by design.
+/// boot test, where a wedged task must fail the boot instead of hanging CI.
+///
+/// It is armed **only** in a `qemu-exit` build — the one the boot test uses.
+/// In a normal build there is no CI run to protect and `qemu_exit` is a no-op,
+/// so a halt is indistinguishable from a genuine wedge and the deadline would
+/// only kill a human's session. That is not hypothetical: booting with
+/// `tools/run-qemu.sh` and touching nothing killed the machine five seconds in
+/// with `user: timed out after 5019 ticks`, which looked exactly like the
+/// interactive freeze it was supposed to prevent.
+///
+/// A live session used to be spared by the first byte of input arriving before
+/// the deadline. That is still true, but it was a five-second grace period for
+/// someone who is *watching the desktop draw itself* and has not touched the
+/// mouse yet — which is exactly what the scripted session asks of them.
 const USER_TIMEOUT_TICKS: u64 = 5000;
 
 /// Page-table entry flags for user pages: present, writable, user.
@@ -482,6 +493,24 @@ static mut DMA_WINDOW_PHYS: u64 = 0;
 
 /// Software-interrupt entry for `int 0x80` from ring 3.
 ///
+/// The tick count after which [`user_timeout`] fires, or `u64::MAX` for never.
+///
+/// Only a `qemu-exit` build — the boot test's — arms the deadline, because that
+/// is the only configuration with a harness that a wedge would hang. Every other
+/// build is a person at a machine, and there `halt()` is the *only* way this
+/// kernel stops, so a deadline that cannot report anything distinct from success
+/// would serve no purpose except ending the session early.
+///
+/// Live input still disarms an armed deadline through [`disarm_user_timeout`], so
+/// the boot test stays fast even if a future build feeds it a mouse.
+const fn user_deadline(start: u64) -> u64 {
+    if cfg!(feature = "qemu-exit") {
+        start.saturating_add(USER_TIMEOUT_TICKS)
+    } else {
+        u64::MAX
+    }
+}
+
 /// Saves every general-purpose register into a [`SyscallRegs`] block, calls
 /// the dispatcher, writes the result back into the saved `rax`, and resumes
 /// with `iretq` — unless the dispatcher returned [`EXIT_TO_KERNEL`], in
@@ -2985,7 +3014,7 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
     unsafe {
         RESUME_RSP = rsp;
         START_TICKS = start;
-        MAX_TICKS = start + USER_TIMEOUT_TICKS;
+        MAX_TICKS = user_deadline(start);
     }
 
     crate::serial::write_str("user: entered ring 3\n");

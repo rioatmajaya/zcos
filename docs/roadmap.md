@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 7 grants`, `task 6: devmgr: blk published`, `dma: window coherent ok` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–5, F8e-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `client: vfs ok`; `wm: window mapped`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed`; `compositor: window erased`; `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui host tests pass |
+| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–6, F8e-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `client: vfs ok`; `wm: window mapped`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed`; `compositor: window erased`; `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui host tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -538,6 +538,19 @@ full browser. Note them as follow-ups, do not build them here.
         by the shell exiting leaves its pixels standing, because those are what
         the placement proof compares. See
         [`adr/0026`](adr/0026-closing-a-window-ends-a-session.md).
+      - [x] F8b-6: a live session survives. Booting with `tools/run-qemu.sh` and
+        touching nothing killed the machine with `user: timed out after 5019
+        ticks`: the input driver stopped and the pointer went dead, which is the
+        exact symptom the task watchdog exists to prevent. The deadline is for
+        the *headless boot test*, the only configuration with a harness a wedge
+        could hang — everywhere else `halt()` is the only way this kernel stops,
+        so nothing could tell a real wedge from a session that is simply still
+        running. It is now armed only under the `qemu-exit` feature that
+        `build-efi.sh --test` sets, and a normal build holds it at `u64::MAX`.
+        Verified by booting a normal build, sending nothing for 45 seconds, and
+        finding it alive with no timeout in the log; CI is unchanged and still
+        fails fast. See
+        [`adr/0028`](adr/0028-boot-watchdog-only-in-test-builds.md).
 - [x] F8c: 2D renderer with a bitmap font and text overlay. `zc-abi::font`
       embeds the VGA 8x16 glyph set and exposes `glyph_row`/`glyph_bit`/
       `text_blend`/`text_width` as pure `const`-callable helpers; the window

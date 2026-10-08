@@ -172,6 +172,21 @@ cargo test --workspace
 `tools/run-qemu.sh` needs `qemu-system-x86_64` and an OVMF firmware package.
 The host verification script checks all of them.
 
+### What an interactive boot shows
+
+`run-qemu.sh` runs a **boot proof, not a session**. On start the compositor
+replays a scripted mouse session — the window drags itself, minimizes, restores
+from the taskbar, then closes and erases — while the window client types its
+scripted keystrokes. That animation is the demo, and it is why the desktop looks
+like it is acting on its own.
+
+When the scripted session ends, the desktop is bare and the serial shell waits for
+input on the QEMU terminal (`help`, `cat`, `stat`, `write`, `tmp`, `chmod`,
+`exit` — the commands are listed in `tools/boot-script.txt`). A normal build never
+arms the task watchdog, so the machine stays up indefinitely; only the `--test`
+build arms it, because a wedged task must fail CI rather than hang it. See
+[ADR 0028](docs/adr/0028-boot-watchdog-only-in-test-builds.md).
+
 ## Documentation
 
 - [Architecture](docs/architecture.md) — trust boundaries, boot protocol, and

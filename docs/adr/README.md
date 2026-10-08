@@ -34,6 +34,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0025](0025-hidden-window-is-an-empty-rectangle.md) | A hidden window is an empty rectangle | Accepted |
 | [0026](0026-closing-a-window-ends-a-session.md) | Closing a window ends a session, not just a rectangle | Accepted |
 | [0027](0027-one-input-layer.md) | One shared input layer, and the start of F8e | Accepted |
+| [0028](0028-boot-watchdog-only-in-test-builds.md) | The boot watchdog is armed only in test builds | Accepted |
 
 ## Adding a decision
 

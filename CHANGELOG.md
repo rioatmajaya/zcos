@@ -60,6 +60,26 @@ too: the same manager discovers the AHCI controller's ABAR and the kernel maps
 it into the domain, so a ring-3 driver can touch its registers while ring 0
 still learns no address.
 
+### Fixed
+
+- **An interactive boot no longer kills itself after five seconds** (F8b-6):
+  booting with `tools/run-qemu.sh` and touching nothing froze the machine with
+  `user: timed out after 5019 ticks` — the input driver stopped and the pointer
+  went dead, which is exactly the symptom the task watchdog was introduced to
+  prevent. The deadline exists so a wedged task fails the *headless boot test*
+  rather than hanging CI, and that is the only configuration with a harness behind
+  it; in every other build `halt()` is the only way this kernel stops, so there
+  is no exit code or assertion that could distinguish a genuine wedge from a
+  session that is simply still running. The deadline is now armed only under the
+  `qemu-exit` feature that `build-efi.sh --test` sets, and a normal build keeps
+  it at `u64::MAX` for good. The earlier revision disarmed it on the first byte of
+  live input, which let anyone who typed or moved the mouse survive but left a
+  five-second grace period for someone watching the desktop draw itself — exactly
+  what the scripted session asks of them. Verified by booting a normal build,
+  sending nothing for 45 seconds, and finding it still running with no timeout in
+  the log; CI is unchanged and still fails fast. See
+  [ADR 0028](docs/adr/0028-boot-watchdog-only-in-test-builds.md).
+
 ### Added
 
 - **One shared input layer, and the start of F8e** (F8e-1): the PS/2 mouse
