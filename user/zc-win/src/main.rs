@@ -23,9 +23,8 @@
 
 use zc_abi::terminal::{Term, run_command};
 use zc_abi::{IPC_WM, IPC_WM_REPLY, PixelFormat, SurfaceInfo, WM_ACK, WM_DONE};
-use zc_user::{
-    close, log, open, read, recv_from, send_to, surface_map, task_exit, term_read,
-};
+use zc_ui::Keys;
+use zc_user::{close, log, open, read, recv_from, send_to, surface_map, task_exit};
 
 /// Whether the client has logged its first successful VFS read.
 static mut VFS_LOGGED: bool = false;
@@ -54,12 +53,18 @@ pub unsafe extern "C" fn _start() -> ! {
             surface.height,
         );
         let _ = send_to(IPC_WM_REPLY as u64, WM_ACK);
+        // The keyboard stream only. The pointer is deliberately *not* read here:
+        // `SYS_MOUSE_READ` is a single global drained by whoever asks first, and
+        // the compositor owns the pointer because it places the window and draws
+        // the sprite. A client that drained it would steal reports and freeze the
+        // drag. Widgets need the compositor to forward clicks, which is an ABI
+        // change — see ADR 0030.
+        let mut keys = Keys::new();
         loop {
-            let key = term_read();
-            if key == u64::MAX {
+            let Some(key) = keys.next() else {
                 break;
-            }
-            if let Some(line) = terminal.push_key(key as u8) {
+            };
+            if let Some(line) = terminal.push_key(key) {
                 run_command(&mut terminal, line.as_bytes(), read_file);
             }
             paint(

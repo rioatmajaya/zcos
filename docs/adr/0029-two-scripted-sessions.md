@@ -65,7 +65,15 @@ degrade into the other.
 - The two variants share the whole prefix, so the close proof exercises the same
   drag, minimize and restore an interactive session does — the close is proven on
   top of a real window, not in isolation.
-- This does not make the desktop *useful*. The window still shows the terminal's
-  scripted keystrokes rather than anything typed, and there is still no way to
-  open a second window or launch an application. That is F8e's event loop and
-  F8h's apps; this only stops the demo from destroying itself.
+- **Correction.** This entry originally went on to claim the window "still shows
+  the terminal's scripted keystrokes rather than anything typed". That was wrong.
+  Typed input reaches the window: sending `a b c spc d e shift-1` through QEMU's
+  monitor, with no shift held, renders `abc de!` at the prompt — lowercase, with
+  shift applied only to `!`. So the keyboard path was already live before F8e, and
+  the ADR understated it. What is genuinely still missing is opening a second
+  window or launching an application; that remains F8e/F8h work.
+
+  The wrong claim came from reasoning about the code rather than running it, and
+  it survived review because nothing in the automated suite asserted it. The
+  recorded evidence for input now has to be an observed frame, not an inference
+  from which syscalls are wired up.

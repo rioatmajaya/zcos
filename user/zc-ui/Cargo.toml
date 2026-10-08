@@ -1,0 +1,27 @@
+[package]
+name = "zc-ui"
+description = "Syscall-facing event loop for ZC OS UI clients"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+zc-user = { path = "../zc-user" }
+zc-abi = { path = "../../libs/zc-abi" }
+
+[lints]
+workspace = true
+
+# Built standalone outside the host workspace (see zc-tasks); the
+# `*.workspace = true` references resolve to the values below there.
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rioatmajaya/zcos"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"

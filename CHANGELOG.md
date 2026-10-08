@@ -62,6 +62,18 @@ still learns no address.
 
 ### Fixed
 
+- **A false claim about the desktop was recorded as fact, and it was wrong.** The
+  ADR for F8b-7 and my own commit message asserted that the window "still shows
+  the terminal's scripted keystrokes rather than anything typed". Typed input has
+  in fact reached the window all along: sending `a b c spc d e shift-1` through
+  QEMU's monitor, with no shift held, renders `abc de!` at the prompt —
+  lowercase, with shift applied only to `!`. A user had to point this out with a
+  screenshot before I checked it myself. The claim came from reasoning about
+  which syscalls were wired up rather than running the thing and looking, and it
+  survived review because no automated check asserted it — the boot tests prove
+  the *scripted* frame, which says nothing about live input. ADR 0029's
+  consequences are corrected, and it now records that input claims need an
+  observed frame, not an inference.
 - **A CI build could leave the wrong kernel in the image a person boots** (F8b-7):
   `build-efi.sh --test-close` wrote to the same path as the default build, so the
   last build won. A CI close run therefore left `build/zcos.img` holding the
@@ -112,6 +124,30 @@ still learns no address.
   [ADR 0028](docs/adr/0028-boot-watchdog-only-in-test-builds.md).
 
 ### Added
+
+- **A live-input proof, because the boot checks never tested one** (F8e-2):
+  `tools/check-live-input.sh` boots the real image headless, checks the idle
+  desktop is byte-stable across two dumps, types `cat hello.txt` and Enter through
+  QEMU's monitor, and asserts the frame changed with the session still healthy.
+  The idle control is what makes the conclusion sound — without it, a difference
+  could just be an animation. It is deliberately not a golden image, which would
+  need editing for every layout change and would fail for reasons unrelated to
+  whether input works. Mutation-checked: with the client ignoring keystrokes it
+  fails.
+- **`user/zc-ui`, the syscall-facing input loop** (F8e-2): two types with
+  different privileges rather than one for everyone — `Keys` blocks on
+  `SYS_TERM_READ` for window clients, `Pointer` drains `SYS_MOUSE_READ` for the
+  task that owns the pointer. `Pointer::poll` turns one report into one event.
+  Adopted by the compositor, which keeps its only claim on the pointer. See
+  [ADR 0030](docs/adr/0030-the-pointer-has-one-owner.md).
+- **A recorded constraint instead of a rediscovery** (F8e-2): `SYS_MOUSE_READ` is
+  not a broadcast. The kernel keeps one pending report for the whole system and
+  hands it to whoever reads first, so a window client that reads it does not get
+  "its own" pointer — it takes reports away from the compositor, and the pointer
+  simply stops responding with nothing in the log to say why. A button drawn
+  inside a window therefore still cannot be clicked; that needs a kernel-side
+  per-window pointer queue, which is F8h's multi-window work. See
+  [ADR 0030](docs/adr/0030-the-pointer-has-one-owner.md).
 
 - **One shared input layer, and the start of F8e** (F8e-1): the PS/2 mouse
   reports the *current* button mask rather than changes, so "the button went down

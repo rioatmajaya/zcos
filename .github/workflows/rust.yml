@@ -247,3 +247,16 @@ jobs:
         ! grep -q "cursor checksum mismatch" build/boot-close.log
         ! grep -q "desktop checksum mismatch" build/boot-close.log
         grep -q "kernel reached idle state" build/boot-close.log
+
+    # The two boot checks above prove the *scripted* frame. They say nothing about
+    # input a person types, and a written claim to the contrary once survived
+    # review here precisely because nothing typed anything (ADR 0030).
+    #
+    # This needs a normal (non-`--test`) image: the watchdog is armed only in the
+    # test builds, and typing leaves the session running by design, so a machine
+    # that is *supposed* to stay up is what we are checking. It writes its own
+    # image, so it cannot disturb the two logs above.
+    - name: Build the interactive image for the live-input check
+      run: ./tools/build-efi.sh
+    - name: Prove typed input reaches the window
+      run: ./tools/check-live-input.sh

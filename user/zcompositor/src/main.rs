@@ -23,12 +23,13 @@
 
 use zc_abi::{
     Cursor, DamageList, FRAME_INITIAL, FRAME_MOVED, FramebufferInfo, IPC_WM, IPC_WM_REPLY,
-    Action, Input, PixelFormat, Rect, SurfaceInfo, WM_ACK, WM_DONE, Wm, encode, pixel_at,
-    pixel_at_with_window, unpack_report, window_rect,
+    Action, PixelFormat, Rect, SurfaceInfo, WM_ACK, WM_DONE, Wm, encode, pixel_at,
+    pixel_at_with_window, window_rect,
 };
+use zc_ui::Pointer;
 use zc_user::{
-    cap_delegate, framebuffer_info, log, mouse_read, recv_from, send_to, surface_create,
-    surface_destroy, surface_map, task_exit, window_close,
+    cap_delegate, framebuffer_info, log, recv_from, send_to, surface_create, surface_destroy,
+    surface_map, task_exit, window_close,
 };
 
 /// Damage rectangles the compositor tracks before collapsing to a full repaint.
@@ -88,10 +89,6 @@ pub unsafe extern "C" fn _start() -> ! {
     // so it knows where the window really ended up. The window starts where the
     // scripted second frame places it.
     let mut wm = Wm::new(width, height, window_rect(FRAME_INITIAL, width, height));
-    // The input layer that turns the device's current button mask into typed
-    // events. Shared with the kernel's frame verifier, so a press edge is derived
-    // from the same state machine on both sides of the syscall.
-    let mut input = Input::new();
 
     // The window is a separate surface the compositor hands to a client: it
     // creates the surface, delegates a read/write capability, and assigns the
@@ -129,6 +126,15 @@ pub unsafe extern "C" fn _start() -> ! {
     // The pointer starts where the kernel's own cursor does, so the first frame
     // already carries it and the frame proof can recompute every sprite pixel.
     let mut cursor = Cursor::new(width, height);
+    // The pointer stream, which is this task's alone: `SYS_MOUSE_READ` holds one
+    // pending report for the whole system, so whoever reads it first consumes it.
+    // The compositor must be that reader — it places the window and draws the
+    // sprite — and a client that also drained it would silently freeze the drag.
+    // `Pointer` derives the typed event through the same state machine the kernel's
+    // frame verifier runs, so a press edge is identical on both sides of the
+    // syscall. The compositor keeps its own copy of the position because the
+    // renderer needs it, but `Pointer` owns the button state edges come from.
+    let mut pointer = Pointer::new(cursor, width, height);
 
     // Frame 0: paint the whole desktop into the back buffer, overlay the
     // client's window, draw the pointer, and present it.
@@ -196,14 +202,13 @@ pub unsafe extern "C" fn _start() -> ! {
     let mut minimized = false;
     let mut restored = false;
     let mut closed = false;
-    while let Some((buttons, dx, dy)) = unpack_report(mouse_read()) {
+    while let Some(event) = pointer.poll() {
         let cursor_before = cursor.rect();
         let window_before = window;
         // Derive the event once, exactly as the kernel does over the same
         // reports, so both sides react to one event stream rather than to two
         // independent readings of the same button mask.
-        let event = input.report(buttons, dx, dy);
-        cursor.apply(dx, dy, width, height);
+        cursor = pointer.cursor();
         let action = wm.apply(cursor, event);
         minimized |= action == Action::Minimized;
         restored |= action == Action::Restored;
@@ -277,11 +282,10 @@ pub unsafe extern "C" fn _start() -> ! {
         // to its own cursor and window machine, so both the position and the
         // placement are proven, not trusted. Live input moves the pointer — and
         // drags the window — between client frames.
-        while let Some((buttons, dx, dy)) = unpack_report(mouse_read()) {
+        while let Some(event) = pointer.poll() {
             let cursor_before = cursor.rect();
             let window_before = window;
-            let event = input.report(buttons, dx, dy);
-            cursor.apply(dx, dy, width, height);
+            cursor = pointer.cursor();
             let action = wm.apply(cursor, event);
             if action == Action::Closed {
                 wm.close();

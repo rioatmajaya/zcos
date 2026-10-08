@@ -7,12 +7,21 @@ name = "win"
 version = "0.1.0"
 dependencies = [
  "zc-abi",
+ "zc-ui",
  "zc-user",
 ]
 
 [[package]]
 name = "zc-abi"
 version = "0.1.0"
+
+[[package]]
+name = "zc-ui"
+version = "0.1.0"
+dependencies = [
+ "zc-abi",
+ "zc-user",
+]
 
 [[package]]
 name = "zc-user"

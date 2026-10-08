@@ -680,9 +680,35 @@ full browser. Note them as follow-ups, do not build them here.
         its ASCII output — inventing key-ups nobody emits would be worse. The boot
         checksum is unchanged, which is the evidence this is a refactor and not a
         feature. See [`adr/0027`](adr/0027-one-input-layer.md).
-      - [ ] *(follow-up)* widgets and layout on top of it.
-      - [ ] *(follow-up)* the syscall-facing event loop that pumps
-        `SYS_TERM_READ`/`SYS_MOUSE_READ` into `Input`.
+      - [x] F8e-2: the syscall-facing input loop, `user/zc-ui`. Two types with
+        *different privileges* rather than one for everyone, because the two
+        device syscalls are not symmetric and that is now written down: `Keys`
+        blocks on `SYS_TERM_READ`, a queue, so a client can take bytes from it;
+        `Pointer` drains `SYS_MOUSE_READ`, which holds **one** pending report for
+        the whole system and hands it to whoever reads first. A single
+        `EventLoop` for every task was the obvious design and it was wrong twice
+        — it coalesced pointer moves and so lost deltas, and it let the window
+        client read the pointer, which stole reports from the compositor and
+        silently froze the drag. Both were caught by the desktop checksum, not by
+        review. `Pointer::poll` now turns exactly one report into exactly one
+        event. Both boot checksums are unchanged (`0x3a43f97916fcc691`,
+        `0x6d66e82d0f2d6fb8`), which is the evidence this is a refactor.
+        See [`adr/0030`](adr/0030-the-pointer-has-one-owner.md).
+      - [ ] *(follow-up)* widgets and layout on top of it. **Blocked on the
+        pointer having one owner**: a button drawn inside a window cannot be
+        clicked, because the client may not read the pointer and the compositor
+        does not forward presses. Needs a kernel-side per-window pointer queue, or
+        the compositor forwarding presses — and focus has to be a kernel decision
+        before it can be a window-manager one, since two windows can both claim a
+        press. Recorded in [`adr/0030`](adr/0030-the-pointer-has-one-owner.md)
+        rather than worked around.
+      - [ ] *(follow-up)* prove live input, not just the scripted frame.
+        **Done** as `tools/check-live-input.sh`: it boots the real image, checks
+        the idle desktop is byte-stable, types `cat hello.txt` + Enter through
+        QEMU's monitor, and asserts the frame changed. Mutation-checked — with the
+        client ignoring keystrokes the check fails. It exists because a written
+        claim that the window "shows scripted keystrokes rather than anything
+        typed" survived review while no test typed anything; the claim was false.
 - [x] F8f: window decorations, focus, and a taskbar. The top panel is now a
       taskbar — a launcher button (`ZC`), a task button for the focused window
       (`Terminal`), and a clock — in `zc_abi::desktop::panel_color_at`; the

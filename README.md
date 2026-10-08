@@ -193,11 +193,25 @@ A normal build never arms the task watchdog, so the machine stays up
 indefinitely; only the `--test` builds arm it, because a wedged task must fail CI
 rather than hang it. See [ADR 0028](docs/adr/0028-boot-watchdog-only-in-test-builds.md).
 
+Type `cat hello.txt` and press Enter, and the window reads that file back through
+the F7 VFS. That is not a scripted line — it is your keystrokes — and
+`tools/check-live-input.sh` proves it by typing into a running desktop and
+asserting the frame changed. Backspace works too.
+
+One thing that does **not** work, so you are not left hunting for it: a button
+drawn *inside* a window cannot be clicked. `SYS_MOUSE_READ` holds a single pending
+report for the whole system and the compositor owns it, because it is what places
+the window and draws the pointer. A window client has no legal way to read it, and
+the compositor does not forward presses yet. See
+[ADR 0030](docs/adr/0030-the-pointer-has-one-owner.md).
+
 CI runs the boot twice, because the two frame proofs need different final frames:
 `--test` leaves a window up (proving the compositor placed the client's pixels,
 [ADR 0018](docs/adr/0018-window-placement-proof.md)) and `--test-close` closes it
 (proving the erase, [ADR 0026](docs/adr/0026-closing-a-window-ends-a-session.md)).
-See [ADR 0029](docs/adr/0029-two-scripted-sessions.md).
+See [ADR 0029](docs/adr/0029-two-scripted-sessions.md). Those two prove the
+*scripted* frame, which says nothing about live input — hence the separate live
+check above.
 
 ## Documentation
 

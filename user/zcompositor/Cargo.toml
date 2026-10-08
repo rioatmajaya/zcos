@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 zc-user = { path = "../zc-user" }
+zc-ui = { path = "../zc-ui" }
 zc-abi = { path = "../../libs/zc-abi" }
 
 [lints]
