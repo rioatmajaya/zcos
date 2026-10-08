@@ -62,6 +62,24 @@ still learns no address.
 
 ### Added
 
+- **Clicking the title bar drags the window** (F8b-3): the mouse button bitmask
+  crossed `SYS_MOUSE_READ` with nothing acting on it, so a click moved the
+  pointer and nothing else. `zc_abi::wm` adds a shared placement machine — a
+  left-button press inside the window's title bar arms a drag, the window follows
+  the pointer with the grab offset preserved, and the release ends it. Presses
+  on the window body, on the minimize/close glyphs, or off the window move
+  nothing, and `clamp_window` keeps a dragged window on screen and clear of the
+  taskbar. The kernel runs the *same* machine over the same reports it already
+  applied to the pointer, so it derives the window's rectangle instead of being
+  told it, and the frame verifier recomputes the desktop against that exact
+  rectangle via `pixel_at_with_window` — so `fb: desktop checksum ok` stays an
+  exact check after a drag instead of becoming a claim. Damage now covers the
+  window's old *and* new rectangle, so the area a drag vacates is repainted
+  rather than left stale. The scripted mouse session carries button bits and
+  ends with a full press-drag-release, so CI proves the interaction
+  (`compositor: window dragged`) rather than only the pointer motion. The boot
+  checksum changes, because the window ends where the script dragged it. See
+  [ADR 0024](docs/adr/0024-window-dragging-and-hit-testing.md).
 - **Pointer and mouse-read syscall** (F8b-2): the desktop now draws and moves a
   mouse pointer. `zc-abi::cursor` holds the 8x12 arrow sprite, a screen-clamped
   `Cursor`, and the report codec, and the new `SYS_MOUSE_READ` (32) serves the
@@ -70,7 +88,9 @@ still learns no address.
   report to its own cursor as it serves it, and the compositor draws the sprite
   topmost and repaints only the union of its old and new rectangles, so the
   pointer moves with damage tracking and `fb: cursor ok` proves every sprite
-  pixel. See [ADR 0023](docs/adr/0023-pointer-and-mouse-read.md).
+  pixel. `MOUSE_SCRIPT` entries became `MouseStep { buttons, dx, dy }` when
+  F8b-3 added the click; the report packing itself is unchanged. See
+  [ADR 0023](docs/adr/0023-pointer-and-mouse-read.md).
 - **Terminal commands over the VFS** (F8d-3d): the graphical terminal's
   commands now act on the F7 filesystem. `zc_abi::terminal::Term` became a pure
   editor — Enter returns the submitted `Line` — and one shared `run_command`

@@ -23,6 +23,7 @@ pub mod surface;
 pub mod syscall;
 pub mod terminal;
 pub mod vfs;
+pub mod wm;
 
 pub use driver::{
     DMA_INFO_VIRT, DMA_MAGIC0, DMA_MAGIC1, DMA_VIRT, DMA_WINDOW_BYTES, DmaInfo, FS_EXCHANGE_DATA,
@@ -37,12 +38,13 @@ pub use driver::{
 };
 pub use fb::encode;
 pub use cursor::{
-    Cursor, MOUSE_NO_REPORT, MOUSE_SCRIPT, SPRITE_H, SPRITE_W, pack_report, unpack_report,
+    BUTTON_LEFT, BUTTON_MIDDLE, BUTTON_RIGHT, Cursor, MOUSE_NO_REPORT, MOUSE_SCRIPT, MouseStep,
+    SPRITE_H, SPRITE_W, pack_report, unpack_report,
 };
 pub use desktop::{
     DamageList, FRAME_INITIAL, FRAME_MOVED, HASH_OFFSET, HASH_PRIME, PANEL_HEIGHT, Rect,
-    TITLE_HEIGHT, color_at, hash_step, panel_height, pixel_at, window_color_at, window_pixel_at,
-    window_rect,
+    TITLE_HEIGHT, color_at, color_at_with_window, hash_step, panel_height, pixel_at,
+    pixel_at_with_window, window_color_at, window_pixel_at, window_rect,
 };
 pub use font::{GLYPH_H, GLYPH_W, glyph_bit, glyph_row, text_blend, text_width};
 pub use ipc::{
@@ -71,6 +73,7 @@ pub use syscall::{
     SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TERM_READ, SYS_UMOUNT, SYS_WRITE, SYS_YIELD, SyscallError,
 };
 pub use vfs::{KIND_CHR, KIND_DIR, KIND_FILE, STAT_LEN, Stat};
+pub use wm::{Wm, decorations, hit, title_bar};
 
 /// Current version of the loader-to-kernel boot protocol.
 pub const BOOT_PROTOCOL_VERSION: u32 = 2;

@@ -49,14 +49,63 @@ const SPRITE: [u8; (SPRITE_W * SPRITE_H) as usize] = [
     TRANSPARENT, TRANSPARENT, TRANSPARENT, TRANSPARENT, EDGE, EDGE, TRANSPARENT, TRANSPARENT,
 ];
 
-/// The keystrokes the boot proof feeds the pointer, in order.
+/// Left mouse button bit in a report's button mask.
 ///
-/// Each entry is one `(dx, dy)` mouse report. The kernel serves these through
-/// `SYS_MOUSE_READ` and applies them itself, so the compositor and the frame
-/// verifier derive the same final pointer position from one script. The path
-/// stays clear of the window so the boot exercises the plain desktop, but the
-/// proof handles overlap too.
-pub const MOUSE_SCRIPT: &[(i8, i8)] = &[(40, 24), (24, 18), (-12, 30), (28, -16)];
+/// Matches the PS/2 flags byte the driver assembles
+/// (`zc_kernel::mouse::BUTTON_LEFT`), republished here so the shared window
+/// machine can name it without depending on the kernel crate. Only
+/// [`BUTTON_LEFT`] acts on the desktop today; the others cross the syscall so a
+/// consumer can read them without the ABI growing again.
+pub const BUTTON_LEFT: u8 = 0x01;
+/// Right mouse button bit in a report's button mask.
+pub const BUTTON_RIGHT: u8 = 0x02;
+/// Middle mouse button bit in a report's button mask.
+pub const BUTTON_MIDDLE: u8 = 0x04;
+
+/// One report of the scripted mouse session.
+///
+/// The kernel serves these through `SYS_MOUSE_READ` and applies each to its own
+/// [`Cursor`] *and* its own [`crate::wm::Wm`], so the compositor and the frame
+/// verifier derive the same final pointer position and window placement from one
+/// script.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MouseStep {
+    /// Button bits held during this report.
+    pub buttons: u8,
+    /// Horizontal delta.
+    pub dx: i8,
+    /// Vertical delta.
+    pub dy: i8,
+}
+
+const fn step(buttons: u8, dx: i8, dy: i8) -> MouseStep {
+    MouseStep { buttons, dx, dy }
+}
+
+/// The reports the boot proof feeds the pointer, in order.
+///
+/// The first four walk the pointer across the plain desktop. The rest drive a
+/// complete interaction: the pointer climbs to the window's title bar, presses
+/// the left button, drags the window away from its scripted frame position, and
+/// releases. A session that only moved the pointer would leave the
+/// window-management path unproven in CI, and the button bitmask would cross the
+/// syscall without anything acting on it.
+///
+/// The run ends with the pointer over the window it dragged, so the proof also
+/// exercises the pointer-over-window path rather than steering clear of it.
+pub const MOUSE_SCRIPT: &[MouseStep] = &[
+    step(0, 40, 24),
+    step(0, 24, 18),
+    step(0, -12, 30),
+    step(0, 28, -16),
+    step(0, 127, -127),
+    step(0, 127, -127),
+    step(0, 46, -26),
+    step(BUTTON_LEFT, 0, 0),
+    step(BUTTON_LEFT, -80, 60),
+    step(BUTTON_LEFT, -40, 20),
+    step(0, 0, 0),
+];
 
 /// The value `SYS_MOUSE_READ` returns when no report is waiting.
 ///
@@ -204,12 +253,24 @@ mod tests {
     fn the_script_ends_at_a_known_position() {
         let (w, h) = (1280u32, 800u32);
         let mut cursor = Cursor::new(w, h);
-        for &(dx, dy) in MOUSE_SCRIPT {
-            cursor.apply(dx, dy, w, h);
+        for entry in MOUSE_SCRIPT {
+            cursor.apply(entry.dx, entry.dy, w, h);
         }
-        assert_eq!((cursor.x, cursor.y), (400, 456));
-        // The proof path stays clear of the moved window (x >= 640).
-        assert!(cursor.rect().right() <= 640);
+        assert_eq!((cursor.x, cursor.y), (580, 256));
+        // The session drags the window out from under the pointer and ends on
+        // top of it, so the boot proof exercises pointer-over-window instead of
+        // steering clear of it.
+        let mut wm = crate::wm::Wm::new(
+            w,
+            h,
+            crate::desktop::window_rect(crate::desktop::FRAME_MOVED, w, h),
+        );
+        let mut at = Cursor::new(w, h);
+        for entry in MOUSE_SCRIPT {
+            at.apply(entry.dx, entry.dy, w, h);
+            let _ = wm.apply(at, entry.buttons);
+        }
+        assert!(wm.window().contains(cursor.x, cursor.y));
     }
 
     #[test]

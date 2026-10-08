@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 7 grants`, `task 6: devmgr: blk published`, `dma: window coherent ok` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `client: vfs ok`; `wm: window mapped`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor host tests pass |
+| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–3 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `client: vfs ok`; `wm: window mapped`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm host tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -495,6 +495,20 @@ full browser. Note them as follow-ups, do not build them here.
         and new rectangles — and the kernel recomputes every sprite pixel, so
         `fb: cursor ok` proves the pointer rather than trusting the compositor.
         See [`adr/0023`](adr/0023-pointer-and-mouse-read.md).
+      - [x] F8b-3: hit-testing and window dragging. The button bitmask crossed the
+        syscall with nothing acting on it, so clicks did nothing. `zc-abi::wm`
+        adds a shared placement machine: a left-button press inside
+        `title_bar` (which excludes the decoration strip, so grabbing a window by
+        its close button never moves it) arms a drag, the window follows the
+        pointer with the grab offset preserved, and the release ends it;
+        `clamp_window` keeps it on screen and below the taskbar. The kernel runs
+        the *same* machine over the same reports it already applies to `Cursor`,
+        so it derives the placement instead of being told it, and
+        `pixel_at_with_window` recomputes the desktop against the real rectangle —
+        a drag moves the expected region instead of weakening the check. The
+        scripted session now carries button bits and ends with a full press-drag-
+        release, so CI proves the interaction rather than only the motion. See
+        [`adr/0024`](adr/0024-window-dragging-and-hit-testing.md).
 - [x] F8c: 2D renderer with a bitmap font and text overlay. `zc-abi::font`
       embeds the VGA 8x16 glyph set and exposes `glyph_row`/`glyph_bit`/
       `text_blend`/`text_width` as pure `const`-callable helpers; the window
@@ -642,6 +656,14 @@ full browser. Note them as follow-ups, do not build them here.
   `compositor: cursor moved` after moving the sprite with damage tracking, and
   the kernel recomputes every sprite pixel from the same reports, logging
   `fb: cursor ok`. The `zc-abi` cursor host tests pass.
+- The window is dragged by the pointer, and the desktop proof survives it
+  (F8b-3): the compositor logs `compositor: window dragged` after the scripted
+  session presses the title bar and moves the window off its scripted frame
+  position, and `fb: desktop checksum ok` still passes — the kernel derives the
+  window's rectangle from the same reports through the same `zc_abi::wm` machine,
+  so it recomputes the desktop around wherever the window ended up. The `zc-abi`
+  `wm` host tests pass, covering the grab offset, the release, the clamp, and
+  two independent replays agreeing.
 - Clean shutdown: `power: halt clean`.
 - Audio plays a known tone and the driver reports no XRUN under a stress
   buffer: `snd: playback ok`.

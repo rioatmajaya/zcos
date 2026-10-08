@@ -1858,10 +1858,12 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             // SAFETY: owned here; interrupts are masked through this arm.
             let index = unsafe { &mut *addr_of_mut!(MOUSE_SCRIPT_INDEX) };
             if *index < MOUSE_SCRIPT.len() {
-                let (dx, dy) = MOUSE_SCRIPT[*index];
+                let step = MOUSE_SCRIPT[*index];
                 *index += 1;
-                apply_cursor(dx, dy);
-                regs.set_result(pack_report(0, dx, dy));
+                // The scripted reports carry button bits, so the boot proof
+                // drives the window machine exactly as live input does.
+                apply_report(step.buttons, step.dx, step.dy);
+                regs.set_result(pack_report(step.buttons, step.dx, step.dy));
                 0
             } else {
                 // SAFETY: owned here; interrupts are masked through this arm.
@@ -1881,7 +1883,7 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 };
                 match pending {
                     Some((buttons, dx, dy)) => {
-                        apply_cursor(dx, dy);
+                        apply_report(buttons, dx, dy);
                         regs.set_result(pack_report(buttons, dx, dy));
                         0
                     }
@@ -2099,7 +2101,7 @@ fn verify_dma_window() {
 /// dropped a key or painted the wrong pixels fails here.
 fn snapshot_window_surface(surface: &zc_kernel::surface::Surface) {
     use zc_abi::terminal::{SCRIPT, Term, run_command};
-    use zc_abi::{FRAME_MOVED, HASH_OFFSET, PixelFormat, hash_step, window_rect};
+    use zc_abi::{HASH_OFFSET, PixelFormat, hash_step};
 
     // SAFETY: published once during setup before any task ran.
     let info = unsafe { core::ptr::addr_of!(FB_INFO).read() };
@@ -2109,8 +2111,9 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface) {
     let Some(format) = PixelFormat::from_raw(surface.format) else {
         crate::fail("unsupported window format");
     };
-    // The window surface must cover exactly the window the compositor places.
-    let window = window_rect(FRAME_MOVED, info.width, info.height);
+    // The window's *current* rectangle: the surface carries window-local pixels,
+    // so this is the origin the snapshot's placement hash must be compared at.
+    let window = expected_window();
     if surface.width != window.w || surface.height != window.h {
         crate::fail("window surface geometry mismatch");
     }
@@ -2192,17 +2195,19 @@ fn kernel_read_file(path: &[u8], out: &mut [u8]) -> Option<usize> {
 /// placement-checked where it is not.
 ///
 /// Reads every pixel back through the identity map. Outside the window the
-/// expected pixel is recomputed from the shared layout, so a compositor that
-/// forgot to repaint the window's old position leaves stale pixels and fails
-/// the hash — the proof that damage tracking is correct, not just that some
-/// colors changed. Inside the window the client's pixels are unknowable (they
-/// are whatever the user typed), so that region is checked for *placement*: it
-/// must equal the client's own window surface, hashed by
-/// [`snapshot_window_surface`] when the compositor released it. The desktop
-/// and window regions are hashed separately and combined; either mismatch
-/// fails.
+/// expected pixel is recomputed from the shared layout against
+/// [`expected_window`], so a compositor that forgot to repaint a window's old
+/// position leaves stale pixels and fails the hash — the proof that damage
+/// tracking is correct, not just that some colors changed. That rectangle is
+/// the one the kernel's own window machine derived from the reports it served,
+/// so a drag moves the expected region instead of weakening the check. Inside
+/// the window the client's pixels are unknowable (they are whatever the user
+/// typed), so that region is checked for *placement*: it must equal the client's
+/// own window surface, hashed by [`snapshot_window_surface`] when the compositor
+/// released it. The desktop and window regions are hashed separately and
+/// combined; either mismatch fails.
 fn verify_framebuffer() {
-    use zc_abi::{FRAME_MOVED, HASH_OFFSET, encode, hash_step, pixel_at, window_rect};
+    use zc_abi::{HASH_OFFSET, encode, hash_step, pixel_at_with_window};
 
     // SAFETY: published once during setup before any task ran.
     let info = unsafe { core::ptr::addr_of!(FB_INFO).read() };
@@ -2210,7 +2215,10 @@ fn verify_framebuffer() {
         crate::serial::write_str("fb: unavailable, skipped\n");
         return;
     }
-    let window = window_rect(FRAME_MOVED, info.width, info.height);
+    // The window's real placement, derived from the reports the kernel served.
+    // Recomputing the desktop against a rectangle the compositor may have moved
+    // is what makes the desktop half of the check exact after a drag.
+    let window = expected_window();
 
     let width = u64::from(info.width);
     let height = u64::from(info.height);
@@ -2240,13 +2248,13 @@ fn verify_framebuffer() {
             } else if window.contains(x as u32, y as u32) {
                 actual_window = hash_step(actual_window, seen);
             } else {
-                let Some(expected) = pixel_at(
+                let Some(expected) = pixel_at_with_window(
                     info.pixel_format,
                     x as u32,
                     y as u32,
                     info.width,
                     info.height,
-                    FRAME_MOVED,
+                    window,
                 ) else {
                     crate::fail("unsupported fb format");
                 };
@@ -2546,6 +2554,10 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
         // The pointer starts at its fixed spot; the compositor and the frame
         // verifier both derive every later position from this one value.
         addr_of_mut!(CURSOR).write(zc_abi::cursor::Cursor::new(fb.width, fb.height));
+        // The window machine starts empty: it has no display size until the
+        // framebuffer is known, and its first real placement is the scripted
+        // second proof frame the compositor paints.
+        addr_of_mut!(WM).write(zc_abi::wm::Wm::EMPTY);
     }
 
     // Shared framebuffer tables, linked into every task below.
@@ -3478,6 +3490,25 @@ static mut MOUSE_FRAME_COUNT: u64 = 0;
 /// the fixed start position once the framebuffer is published.
 static mut CURSOR: zc_abi::cursor::Cursor = zc_abi::cursor::Cursor::at(0, 0);
 
+/// The window's authoritative placement.
+///
+/// The kernel cannot ask the compositor where the window ended up — that would
+/// make the desktop proof a claim — so it runs the *same* [`zc_abi::wm::Wm`]
+/// machine the compositor runs, over the same reports it served. Both derive the
+/// placement from one stream, so the verifier can recompute the desktop against
+/// the rectangle the window really occupies, including after a drag.
+///
+/// Starts empty because the display size is only known once the framebuffer is
+/// published; [`apply_report`] seeds it from the scripted frame position before
+/// any task can act on a report.
+static mut WM: zc_abi::wm::Wm = zc_abi::wm::Wm::EMPTY;
+
+/// Returns the window rectangle the compositor should have painted.
+fn expected_window() -> zc_abi::desktop::Rect {
+    // SAFETY: read-only; written only through the mouse syscall.
+    unsafe { addr_of!(WM).read() }.window()
+}
+
 /// How many reports of the scripted mouse session have been served.
 static mut MOUSE_SCRIPT_INDEX: usize = 0;
 
@@ -3672,14 +3703,38 @@ fn accumulate_mouse(frame: [u8; 3]) {
     }
 }
 
-/// Applies one mouse report to the authoritative pointer position.
-fn apply_cursor(dx: i8, dy: i8) {
+/// Applies one mouse report to the authoritative pointer and window state.
+///
+/// The kernel is the only party that sees every report — scripted and live — so
+/// applying each one to its own [`zc_abi::cursor::Cursor`] and
+/// [`zc_abi::wm::Wm`] is what keeps the desktop a proof: the frame verifier
+/// recomputes the pointer and the window placement from the same stream the
+/// compositor acted on, instead of trusting either.
+///
+/// The placement phase runs first, so the machine starts from the same
+/// rectangle the compositor's scripted move painted. It is recorded rather than
+/// recomputed because that move was a compositor decision, not a report.
+fn apply_report(buttons: u8, dx: i8, dy: i8) {
     // SAFETY: published during setup before any task ran.
     let info = unsafe { core::ptr::addr_of!(FB_INFO).read() };
     // SAFETY: owned here; the mouse syscall runs with interrupts masked.
     unsafe {
         let cursor = &mut *addr_of_mut!(CURSOR);
         cursor.apply(dx, dy, info.width, info.height);
+        // Seed the machine from the compositor's scripted placement before the
+        // first report acts on it, so a drag starts from the rectangle it
+        // actually painted. `WM_PLACED` records that the seed happened; the
+        // seeded rectangle comes from the shared layout the compositor used.
+        let wm = &mut *addr_of_mut!(WM);
+        if !wm.is_placed() {
+            *wm = zc_abi::wm::Wm::new(
+                info.width,
+                info.height,
+                zc_abi::window_rect(zc_abi::FRAME_MOVED, info.width, info.height),
+            );
+        }
+        let after = *addr_of!(CURSOR);
+        let _ = wm.apply(after, buttons);
     }
 }
 

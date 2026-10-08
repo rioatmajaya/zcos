@@ -379,13 +379,22 @@ const fn button_label(
     text_blend(label, tx, ty, px, py, fill, BUTTON_FG)
 }
 
-/// Returns the `(red, green, blue)` channels of one desktop pixel.
+/// Returns the `(red, green, blue)` channels of one desktop pixel, given the
+/// window's actual rectangle.
 ///
-/// The layout is a background gradient, a top taskbar, and one window with a
-/// border, a title bar, and a body.
+/// [`color_at`] is the fixed-frame wrapper around this function, for the boot
+/// proof's two deterministic frames. A desktop whose window has since been
+/// dragged must be recomputed against the rectangle it really occupies, or the
+/// verifier would compare the screen against a window that is no longer there —
+/// so painter and verifier call this with the placement they agree on.
 #[must_use]
-pub const fn color_at(x: u32, y: u32, width: u32, height: u32, frame: u32) -> (u8, u8, u8) {
-    let window = window_rect(frame, width, height);
+pub const fn color_at_with_window(
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    window: Rect,
+) -> (u8, u8, u8) {
     if window.contains(x, y) {
         return window_color_at(x - window.x, y - window.y, window.w, window.h);
     }
@@ -409,6 +418,30 @@ pub const fn color_at(x: u32, y: u32, width: u32, height: u32, frame: u32) -> (u
         96 + ((y as u64) * 120 / (height as u64)) as u8
     };
     (r, g, b)
+}
+
+/// Returns the `(red, green, blue)` channels of one desktop pixel.
+///
+/// The layout is a background gradient, a top taskbar, and one window with a
+/// border, a title bar, and a body.
+#[must_use]
+pub const fn color_at(x: u32, y: u32, width: u32, height: u32, frame: u32) -> (u8, u8, u8) {
+    color_at_with_window(x, y, width, height, window_rect(frame, width, height))
+}
+
+/// Encodes one desktop pixel for `format` against a specific window rectangle,
+/// or `None` when the format has no direct 32-bit encoding.
+#[must_use]
+pub const fn pixel_at_with_window(
+    format: PixelFormat,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    window: Rect,
+) -> Option<u32> {
+    let (r, g, b) = color_at_with_window(x, y, width, height, window);
+    encode(format, r, g, b)
 }
 
 /// Encodes one desktop pixel for `format`, or `None` when the format has no
@@ -586,6 +619,64 @@ mod tests {
         assert!(bgr.is_some());
         assert_ne!(rgb, bgr);
         assert_eq!(pixel_at(PixelFormat::Bitmask, 0, 0, 64, 64, 0), None);
+    }
+
+    #[test]
+    fn the_frame_wrapper_agrees_with_the_explicit_rectangle() {
+        // The verifier recomputes the desktop against the window's real
+        // rectangle; with the scripted one it must equal the frame-based path,
+        // or the two would disagree about a frame the boot proof still uses.
+        for frame in [FRAME_INITIAL, FRAME_MOVED] {
+            let window = window_rect(frame, 1280, 800);
+            let mut y = 0;
+            while y < 800 {
+                let mut x = 0;
+                while x < 1280 {
+                    assert_eq!(
+                        color_at(x, y, 1280, 800, frame),
+                        color_at_with_window(x, y, 1280, 800, window)
+                    );
+                    x += 64;
+                }
+                y += 64;
+            }
+        }
+    }
+
+    #[test]
+    fn a_moved_window_recolors_only_where_it_actually_sits() {
+        let from = window_rect(FRAME_INITIAL, 1280, 800);
+        let to = Rect::new(from.x + 96, from.y + 48, from.w, from.h);
+        // Where both layouts agree (neither window covers the pixel), the colors
+        // must match; that is what makes the verifier's desktop check exact for
+        // any placement both sides agree on.
+        let mut compared = 0;
+        let mut y = 0;
+        while y < 800 {
+            let mut x = 0;
+            while x < 1280 {
+                if !from.contains(x, y) && !to.contains(x, y) {
+                    assert_eq!(
+                        color_at_with_window(x, y, 1280, 800, from),
+                        color_at_with_window(x, y, 1280, 800, to)
+                    );
+                    compared += 1;
+                }
+                x += 8;
+            }
+            y += 8;
+        }
+        assert!(compared > 1000, "too few shared pixels to be meaningful");
+        // A pixel the old window covered but the new one does not shows the
+        // desktop again, which is exactly the stale-pixel case the damage
+        // tracking has to handle.
+        let vacated = from.x + from.w - 8;
+        assert!(from.contains(vacated, from.y + 40));
+        assert!(!to.contains(vacated, from.y + 40));
+        assert_eq!(
+            color_at_with_window(vacated, from.y + 40, 1280, 800, to),
+            color_at_with_window(vacated, from.y + 40, 1280, 800, Rect::EMPTY)
+        );
     }
 
     #[test]

@@ -30,6 +30,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0021](0021-coherent-dma-window.md) | Coherent DMA window for driver domains | Accepted |
 | [0022](0022-terminal-commands-over-the-vfs.md) | Terminal commands execute over the VFS | Accepted |
 | [0023](0023-pointer-and-mouse-read.md) | Pointer state and the mouse-read syscall | Accepted |
+| [0024](0024-window-dragging-and-hit-testing.md) | Shared window placement for hit-testing and dragging | Accepted |
 
 ## Adding a decision
 

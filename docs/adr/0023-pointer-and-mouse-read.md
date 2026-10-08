@@ -63,3 +63,13 @@ fired and clears every owned count at once, so the domain waits on *any* of its
 claimed lines and drains the 8042 wholesale. The per-line `irq_wait(source)`
 semantics the bring-up proofs rely on are unchanged. Documented in
 [`../specs/syscall-abi.md`](../specs/syscall-abi.md) under `SYS_IRQ_WAIT`.
+
+## Revision — 2026-10-08 (the button mask is now acted on)
+
+The "follow-ups" note above is closed by
+[ADR 0024](0024-window-dragging-and-hit-testing.md): `zc_abi::wm::Wm` is a
+shared placement machine that both the compositor and the kernel run over the
+same reports, so a left-button press on the title bar drags the window and the
+frame verifier still recomputes the desktop exactly around wherever it landed.
+`MOUSE_SCRIPT` now carries button bits, so CI exercises the interaction path
+rather than only pointer motion.

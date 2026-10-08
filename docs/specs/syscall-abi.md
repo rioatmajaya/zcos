@@ -79,6 +79,28 @@ codec. The kernel serves a fixed scripted session first, then the movement the
 input drain accumulated, so the compositor and the kernel's frame verifier
 derive the same pointer position from one source.
 
+Button bits are `BUTTON_LEFT` = 1, `BUTTON_RIGHT` = 2, `BUTTON_MIDDLE` = 4,
+matching the PS/2 flags byte the driver assembles. The scripted session
+(`cursor::MOUSE_SCRIPT`) carries them too, as `MouseStep { buttons, dx, dy }`,
+so the boot proof drives the same interaction paths as live input.
+
+### Pointer-derived window placement
+
+The kernel applies **every** report it serves — scripted or live — to its own
+`cursor::Cursor` *and* its own `wm::Wm`, a shared placement machine
+(`libs/zc-abi/src/wm.rs`). A left-button press inside the window's title bar
+(`wm::title_bar`, which excludes the decoration strip) arms a drag; while the
+button is held the window follows the pointer with the grab offset preserved,
+clamped to the screen and below the taskbar; the release ends the drag.
+
+Because both the compositor and the kernel run this machine over one report
+stream, the kernel knows the window's real rectangle without being told it.
+`pixel_at_with_window` (`libs/zc-abi/src/desktop.rs`) then recomputes the desktop
+against that exact rectangle, so `fb: desktop checksum ok` stays an exact check
+after a drag rather than becoming a claim. The frame-numbered `color_at` and
+`pixel_at` remain as the two deterministic proof frames. See
+[ADR 0024](../adr/0024-window-dragging-and-hit-testing.md).
+
 ### `SYS_IRQ_WAIT` and `IRQ_ANY`
 
 `SYS_IRQ_WAIT` (13) blocks the caller until an interrupt arrives on a source it

@@ -139,9 +139,13 @@ keystroke (`WM_ACK`) and stops when the session closes (`WM_DONE`). F8d-3c
 makes that dynamic window provable: the frame checksum's window region becomes
 a placement proof against the client's own surface, which the kernel owns and
 hashes before the compositor frees it, while a separate boot check keeps
-proving the scripted content exactly. See
-[ADR 0016](docs/adr/0016-window-client-delegation.md) and
-[ADR 0018](docs/adr/0018-window-placement-proof.md).
+proving the scripted content exactly. Clicking the window's title bar drags it: a
+shared `zc-abi::wm` placement machine runs on both sides over the same reports, so
+the kernel derives where the window ended up and still recomputes the desktop
+around it exactly. See
+[ADR 0016](docs/adr/0016-window-client-delegation.md),
+[ADR 0018](docs/adr/0018-window-placement-proof.md), and
+[ADR 0024](docs/adr/0024-window-dragging-and-hit-testing.md).
 
 ## Development
 

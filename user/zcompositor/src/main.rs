@@ -4,14 +4,17 @@
 //! It creates a full-screen back buffer through the capability-gated surface
 //! syscall and a separate window surface it delegates to a client task. The
 //! client paints the window; the compositor composites it, moves it between two
-//! proof frames, and flushes only the damaged regions. It then polls the mouse
-//! and repaints just the pointer's old and new rectangles, so the pointer moves
-//! with damage tracking rather than a full repaint. After the move it runs an
-//! event loop: every [`WM_ACK`] from the client re-composites the window at its
-//! new position and flushes just that rectangle, and [`WM_DONE`] ends the
-//! session. The kernel's frame checksum recomputes the expected final frame —
-//! desktop, window placement, and pointer sprite — so all three are proven
-//! rather than assumed.
+//! proof frames, and flushes only the damaged regions. It then polls the mouse and
+//! feeds every report to a shared [`Wm`] placement machine: the pointer moves with
+//! damage tracking rather than a full repaint, and a left-button press on the
+//! title bar drags the window, damaging both its old and its new rectangle so the
+//! area it vacates is repainted. After the scripted session it runs an event loop:
+//! every [`WM_ACK`] from the client re-composites the window at its current
+//! position and flushes just that rectangle, and [`WM_DONE`] ends the session.
+//! The kernel runs the same machine over the same reports, so the frame checksum
+//! recomputes the expected final frame — desktop, window placement, and pointer
+//! sprite — against positions it derived itself rather than positions it was
+//! handed, and all three stay proven rather than assumed.
 
 #![no_std]
 #![no_main]
@@ -19,7 +22,8 @@
 
 use zc_abi::{
     Cursor, DamageList, FRAME_INITIAL, FRAME_MOVED, FramebufferInfo, IPC_WM, IPC_WM_REPLY,
-    PixelFormat, Rect, SurfaceInfo, WM_ACK, WM_DONE, encode, pixel_at, unpack_report, window_rect,
+    PixelFormat, Rect, SurfaceInfo, WM_ACK, WM_DONE, Wm, encode, pixel_at, pixel_at_with_window,
+    unpack_report, window_rect,
 };
 use zc_user::{
     cap_delegate, framebuffer_info, log, mouse_read, recv_from, send_to, surface_create,
@@ -78,6 +82,12 @@ pub unsafe extern "C" fn _start() -> ! {
     let full = Rect::new(0, 0, width, height);
     let moved = window_rect(FRAME_MOVED, width, height);
 
+    // The window manager state machine: the compositor acts on it, and the
+    // kernel's frame verifier runs the identical machine over the same reports
+    // so it knows where the window really ended up. The window starts where the
+    // scripted second frame places it.
+    let mut wm = Wm::new(width, height, window_rect(FRAME_INITIAL, width, height));
+
     // The window is a separate surface the compositor hands to a client: it
     // creates the surface, delegates a read/write capability, and assigns the
     // object id over the window channel. The client paints into it and
@@ -126,10 +136,9 @@ pub unsafe extern "C" fn _start() -> ! {
         surface.stride,
         window_pixels,
         window_surface.stride,
-        window_rect(FRAME_INITIAL, width, height),
+        wm.window(),
         cursor,
         full,
-        FRAME_INITIAL,
     );
     log("compositor: frame 0 painted\n");
     log("wm: window mapped\n");
@@ -138,7 +147,9 @@ pub unsafe extern "C" fn _start() -> ! {
     // repainting, and only those rectangles are flushed to the display.
     let mut damage = DamageList::<DAMAGE_SLOTS>::new();
     damage.add(window_rect(FRAME_INITIAL, width, height));
-    damage.add(window_rect(FRAME_MOVED, width, height));
+    wm.place(moved);
+    let window = wm.window();
+    damage.add(window);
     // Composite each damaged rectangle: repaint the desktop, overlay the
     // client's window where it covers the rectangle, redraw the pointer, and
     // flush only that rectangle to the display.
@@ -154,10 +165,9 @@ pub unsafe extern "C" fn _start() -> ! {
             surface.stride,
             window_pixels,
             window_surface.stride,
-            moved,
+            window,
             cursor,
             rect,
-            FRAME_MOVED,
         );
         index += 1;
     }
@@ -168,18 +178,31 @@ pub unsafe extern "C" fn _start() -> ! {
     }
     log("wm: move ok\n");
 
-    // Cursor session: poll the scripted mouse reports and move the pointer,
-    // repainting only the union of its old and new rectangles. The kernel
-    // serves the same reports to its own cursor, so the frame proof recomputes
-    // the pointer exactly instead of trusting the compositor's position.
-    let mut cursor_moved = false;
-    loop {
-        let Some((_buttons, dx, dy)) = unpack_report(mouse_read()) else {
-            break;
-        };
-        let before = cursor.rect();
+    // Cursor session: poll the scripted mouse reports, move the pointer, and
+    // feed the same reports to the window manager so a click on the title bar
+    // drags the window. Damage is the union of the pointer's old and new
+    // rectangles *and* the window's old and new rectangles, so a drag repaints
+    // what it vacates as well as what it covers — a stale window left behind is
+    // exactly what the kernel's recomputed desktop catches. The kernel serves the
+    // same reports to its own cursor and window machine, so both positions stay
+    // proofs rather than claims.
+    let mut window = wm.window();
+    let mut dragged = false;
+    while let Some((buttons, dx, dy)) = unpack_report(mouse_read()) {
+        let cursor_before = cursor.rect();
+        let window_before = window;
         cursor.apply(dx, dy, width, height);
-        let rect = before.union(cursor.rect());
+        let moved = wm.apply(cursor, buttons);
+        window = if moved { wm.window() } else { window_before };
+        dragged |= moved;
+        // A press that arms a drag moves nothing yet, but the pointer's own old
+        // and new rectangles are always damaged; a move that displaces the window
+        // also damages both window rectangles, so the area it vacates is
+        // repainted rather than left holding stale pixels.
+        let mut rect = cursor_before.union(cursor.rect());
+        if moved {
+            rect = rect.union(window_before).union(window);
+        }
         composite(
             back,
             &fb,
@@ -189,15 +212,17 @@ pub unsafe extern "C" fn _start() -> ! {
             surface.stride,
             window_pixels,
             window_surface.stride,
-            moved,
+            window,
             cursor,
             rect,
-            FRAME_MOVED,
         );
-        cursor_moved = true;
     }
-    if cursor_moved {
-        log("compositor: cursor moved\n");
+    log("compositor: cursor moved\n");
+    // The scripted session ends with a full press-drag-release, so this is the
+    // marker that CI uses to prove the interaction path ran at all — a session
+    // that only moved the pointer would leave `buttons` unexercised.
+    if dragged {
+        log("compositor: window dragged\n");
     }
     log("compositor: cursor ok\n");
 
@@ -209,16 +234,23 @@ pub unsafe extern "C" fn _start() -> ! {
     // means the client's session closed; composite the final frame and stop.
     loop {
         let message = recv_from(IPC_WM_REPLY as u64);
-        // Poll the pointer first: the kernel applies the same reports it serves,
-        // so the position is proven, not trusted. Live input moves it between
-        // client frames, and the boot script already placed it here.
-        loop {
-            let Some((_buttons, dx, dy)) = unpack_report(mouse_read()) else {
-                break;
-            };
-            let before = cursor.rect();
+        // Poll the pointer first: the kernel applies the same reports it serves
+        // to its own cursor and window machine, so both the position and the
+        // placement are proven, not trusted. Live input moves the pointer — and
+        // drags the window — between client frames.
+        while let Some((buttons, dx, dy)) = unpack_report(mouse_read()) {
+            let cursor_before = cursor.rect();
+            let window_before = window;
             cursor.apply(dx, dy, width, height);
-            let rect = before.union(cursor.rect());
+            window = if wm.apply(cursor, buttons) {
+                wm.window()
+            } else {
+                window_before
+            };
+            let rect = cursor_before
+                .union(cursor.rect())
+                .union(window_before)
+                .union(window);
             composite(
                 back,
                 &fb,
@@ -228,34 +260,29 @@ pub unsafe extern "C" fn _start() -> ! {
                 surface.stride,
                 window_pixels,
                 window_surface.stride,
-                moved,
+                window,
                 cursor,
                 rect,
-                FRAME_MOVED,
             );
         }
         if message == WM_DONE {
             break;
         }
-        // The client repainted; overlay the window at its moved position and
+        // The client repainted; overlay the window at its current position and
         // flush. A `WM_MOUSE` nudge carries no window change of its own.
-        blit_window(
+        composite(
             back,
+            &fb,
+            format,
+            width,
+            height,
             surface.stride,
             window_pixels,
             window_surface.stride,
-            moved,
-            moved,
-            width,
-            height,
+            window,
+            cursor,
+            window,
         );
-        // The pointer is foreground and sits on top of the window, so redraw it
-        // over the window region before flushing. Without this, every keystroke
-        // repaint (and every pointer wake) would overwrite the cursor wherever
-        // it overlaps the window, making it vanish the moment it is aimed at the
-        // terminal.
-        draw_cursor(back, surface.stride, format, width, height, cursor, moved);
-        blit_rect(back, &fb, surface.stride, moved);
         if message == WM_ACK {
             log("compositor: frame updated\n");
         }
@@ -269,7 +296,12 @@ pub unsafe extern "C" fn _start() -> ! {
     task_exit()
 }
 
-/// Paints `rect` of the desktop into the back buffer for `frame`.
+/// Paints `rect` of the desktop into the back buffer for a window at `window`.
+///
+/// The window rectangle is passed rather than a frame number because a drag can
+/// move the window anywhere; `zc_abi::desktop::pixel_at_with_window` recomputes
+/// the same pixels the kernel's verifier does for that exact rectangle, so the
+/// two cannot drift.
 fn paint_rect(
     back: *mut u32,
     stride: u32,
@@ -277,7 +309,7 @@ fn paint_rect(
     width: u32,
     height: u32,
     rect: Rect,
-    frame: u32,
+    window: Rect,
 ) {
     let right = if rect.right() > width { width } else { rect.right() };
     let bottom = if rect.bottom() > height {
@@ -289,7 +321,7 @@ fn paint_rect(
     while y < bottom {
         let mut x = rect.x;
         while x < right {
-            if let Some(pixel) = pixel_at(format, x, y, width, height, frame) {
+            if let Some(pixel) = pixel_at_with_window(format, x, y, width, height, window) {
                 // SAFETY: the kernel mapped `stride * height` pixels at `back`
                 // with user permissions and `rect` stays inside them.
                 unsafe {
@@ -430,9 +462,10 @@ fn draw_cursor(
 
 /// Composites `rect` into the back buffer and flushes it to the display.
 ///
-/// The layers are painted bottom-up — desktop, then the client's window where
-/// it covers the rectangle, then the pointer — and only `rect` is copied to the
-/// display, so the caller can pass any damaged region.
+/// The layers are painted bottom-up — desktop (with the window's *current*
+/// rectangle, so the vacated area of a drag is repainted as bare desktop), then
+/// the client's window where it covers the rectangle, then the pointer — and only
+/// `rect` is copied to the display, so the caller can pass any damaged region.
 fn composite(
     back: *mut u32,
     fb: &FramebufferInfo,
@@ -440,20 +473,19 @@ fn composite(
     width: u32,
     height: u32,
     stride: u32,
-    window: *const u32,
+    window_pixels: *const u32,
     window_stride: u32,
-    window_origin: Rect,
+    window: Rect,
     cursor: Cursor,
     rect: Rect,
-    frame: u32,
 ) {
-    paint_rect(back, stride, format, width, height, rect, frame);
+    paint_rect(back, stride, format, width, height, rect, window);
     blit_window(
         back,
         stride,
-        window,
+        window_pixels,
         window_stride,
-        window_origin,
+        window,
         rect,
         width,
         height,
