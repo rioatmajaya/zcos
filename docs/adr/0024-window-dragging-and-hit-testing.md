@@ -64,3 +64,11 @@ delegating to the explicit-rectangle versions.
   that is a separate decision.
 - The kernel holds placement state it derives rather than receives. That is the
   same trade as `Cursor`, and it costs one small pure struct in `zc-abi`.
+
+## Revision — 2026-10-08 (the decorations act)
+
+The deferred decoration work landed as
+[ADR 0025](0025-hidden-window-is-an-empty-rectangle.md): a minimized window's
+rectangle becomes `Rect::EMPTY`, so the existing paint and verify paths need no
+"is it visible" branch at all. `Action` replaced the `bool` this module's `apply`
+returned, so callers can tell a grab from a move from a hide.

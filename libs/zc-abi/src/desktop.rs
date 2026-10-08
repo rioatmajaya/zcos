@@ -328,29 +328,71 @@ const TASK_LABEL: &str = "Terminal";
 /// panel deterministic so the frame checksum covers it.
 const CLOCK_LABEL: &str = "12:00";
 
+/// Vertical margin above and below the taskbar button band, clamped for short
+/// panels.
+const fn button_margin(panel: u32) -> u32 {
+    if panel > BUTTON_H { (panel - BUTTON_H) / 2 } else { 0 }
+}
+
+/// The launcher button's rectangle on a `height`-tall display.
+///
+/// Exported so the window machine can hit-test the same region
+/// [`panel_color_at`] paints, instead of a second copy of these offsets.
+#[must_use]
+pub const fn launcher_button_rect(height: u32) -> Rect {
+    Rect::new(
+        LAUNCHER_X,
+        button_margin(panel_height(height)),
+        LAUNCHER_W,
+        BUTTON_H,
+    )
+}
+
+/// The running window's task button's rectangle on a `height`-tall display.
+///
+/// This is the restore target: clicking it brings a minimized window back.
+#[must_use]
+pub const fn task_button_rect(height: u32) -> Rect {
+    Rect::new(
+        TASK_X,
+        button_margin(panel_height(height)),
+        TASK_W,
+        BUTTON_H,
+    )
+}
+
 /// Returns the `(red, green, blue)` channels of one top-panel (taskbar) pixel.
 ///
 /// The panel is the taskbar: a launcher button, one task button for the
 /// focused window, and a clock. It is fully deterministic and drawn with the
 /// shared bitmap font, so the kernel's frame verifier recomputes it and the
-/// checksum proves it renders.
+/// checksum proves it renders. The buttons go through
+/// [`launcher_button_rect`] and [`task_button_rect`] so the painted region and
+/// the clickable region cannot drift apart.
 #[must_use]
 pub const fn panel_color_at(x: u32, y: u32, width: u32, height: u32) -> (u8, u8, u8) {
     let panel = panel_height(height);
     if panel == 0 {
         return PANEL_BG;
     }
-    // Buttons sit in a band with a small vertical margin, clamped for short
-    // panels; the label is centered against a 16px cell.
-    let margin = if panel > BUTTON_H { (panel - BUTTON_H) / 2 } else { 0 };
-    let in_band = y >= margin && y < margin + BUTTON_H;
+    // The label is centered against a 16px cell.
     let ty = if panel > GLYPH_H { (panel - GLYPH_H) / 2 } else { 0 };
 
-    if in_band && x >= LAUNCHER_X && x < LAUNCHER_X + LAUNCHER_W {
-        return button_label(LAUNCHER_LABEL, LAUNCHER_X, LAUNCHER_W, x, y, ty, LAUNCHER_BG);
+    let launcher = launcher_button_rect(height);
+    if launcher.contains(x, y) {
+        return button_label(
+            LAUNCHER_LABEL,
+            launcher.x,
+            launcher.w,
+            x,
+            y,
+            ty,
+            LAUNCHER_BG,
+        );
     }
-    if in_band && x >= TASK_X && x < TASK_X + TASK_W {
-        return button_label(TASK_LABEL, TASK_X, TASK_W, x, y, ty, TASK_BG);
+    let task = task_button_rect(height);
+    if task.contains(x, y) {
+        return button_label(TASK_LABEL, task.x, task.w, x, y, ty, TASK_BG);
     }
     // Clock, right-aligned with an 8px margin.
     let clock_w = text_width(CLOCK_LABEL);

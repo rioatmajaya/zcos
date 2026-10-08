@@ -91,15 +91,32 @@ The kernel applies **every** report it serves — scripted or live — to its ow
 (`libs/zc-abi/src/wm.rs`). A left-button press inside the window's title bar
 (`wm::title_bar`, which excludes the decoration strip) arms a drag; while the
 button is held the window follows the pointer with the grab offset preserved,
-clamped to the screen and below the taskbar; the release ends the drag.
+clamped to the screen and below the taskbar; the release ends the drag. A press
+on the left half of the decoration strip minimizes the window and a press on the
+taskbar's task button restores it; `wm::apply` returns a `wm::Action` so the
+caller can tell a grab from a move from a hide.
+
+**A hidden window's rectangle is `Rect::EMPTY`** (`wm::Wm::rect`), while
+`wm::Wm::window` keeps returning the remembered placement. Because an empty
+rectangle contains no pixel, `pixel_at_with_window` recomputes the entire frame
+as bare desktop and the compositor's blit is rejected by its clip bounds — no
+consumer needs a separate visibility flag. `verify_framebuffer` therefore skips
+only the placement comparison when the rectangle is empty, and logs
+`fb: window minimized ok`; the surface snapshot is still required, because it is
+what proves the client painted correctly while hidden.
+
+Hit regions are derived from the renderers, never open-coded beside them:
+`terminal::close_rect` / `minimize_rect` (used by `Term::render`) and
+`desktop::launcher_button_rect` / `task_button_rect` (used by `panel_color_at`).
 
 Because both the compositor and the kernel run this machine over one report
 stream, the kernel knows the window's real rectangle without being told it.
-`pixel_at_with_window` (`libs/zc-abi/src/desktop.rs`) then recomputes the desktop
-against that exact rectangle, so `fb: desktop checksum ok` stays an exact check
-after a drag rather than becoming a claim. The frame-numbered `color_at` and
-`pixel_at` remain as the two deterministic proof frames. See
-[ADR 0024](../adr/0024-window-dragging-and-hit-testing.md).
+`pixel_at_with_window` then recomputes the desktop against that exact rectangle,
+so `fb: desktop checksum ok` stays an exact check after a drag or a minimize
+rather than becoming a claim. The frame-numbered `color_at` and `pixel_at`
+remain as the two deterministic proof frames. See
+[ADR 0024](../adr/0024-window-dragging-and-hit-testing.md) and
+[ADR 0025](../adr/0025-hidden-window-is-an-empty-rectangle.md).
 
 ### `SYS_IRQ_WAIT` and `IRQ_ANY`
 

@@ -43,8 +43,8 @@ pub use cursor::{
 };
 pub use desktop::{
     DamageList, FRAME_INITIAL, FRAME_MOVED, HASH_OFFSET, HASH_PRIME, PANEL_HEIGHT, Rect,
-    TITLE_HEIGHT, color_at, color_at_with_window, hash_step, panel_height, pixel_at,
-    pixel_at_with_window, window_color_at, window_pixel_at, window_rect,
+    TITLE_HEIGHT, color_at, color_at_with_window, hash_step, launcher_button_rect, panel_height,
+    pixel_at, pixel_at_with_window, task_button_rect, window_color_at, window_pixel_at, window_rect,
 };
 pub use font::{GLYPH_H, GLYPH_W, glyph_bit, glyph_row, text_blend, text_width};
 pub use ipc::{
@@ -73,7 +73,7 @@ pub use syscall::{
     SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TERM_READ, SYS_UMOUNT, SYS_WRITE, SYS_YIELD, SyscallError,
 };
 pub use vfs::{KIND_CHR, KIND_DIR, KIND_FILE, STAT_LEN, Stat};
-pub use wm::{Wm, decorations, hit, title_bar};
+pub use wm::{Action, Wm, decorations, hit, title_bar};
 
 /// Current version of the loader-to-kernel boot protocol.
 pub const BOOT_PROTOCOL_VERSION: u32 = 2;

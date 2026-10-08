@@ -6,15 +6,16 @@
 //! client paints the window; the compositor composites it, moves it between two
 //! proof frames, and flushes only the damaged regions. It then polls the mouse and
 //! feeds every report to a shared [`Wm`] placement machine: the pointer moves with
-//! damage tracking rather than a full repaint, and a left-button press on the
-//! title bar drags the window, damaging both its old and its new rectangle so the
-//! area it vacates is repainted. After the scripted session it runs an event loop:
-//! every [`WM_ACK`] from the client re-composites the window at its current
-//! position and flushes just that rectangle, and [`WM_DONE`] ends the session.
-//! The kernel runs the same machine over the same reports, so the frame checksum
-//! recomputes the expected final frame — desktop, window placement, and pointer
-//! sprite — against positions it derived itself rather than positions it was
-//! handed, and all three stay proven rather than assumed.
+//! damage tracking rather than a full repaint, a left-button press on the title bar
+//! drags the window, the `-` glyph hides it, and the taskbar's task button brings it
+//! back. Any report that changes the window's rectangle damages both the old and the
+//! new one, so the area a drag or a minimize vacates is repainted. After the scripted
+//! session it runs an event loop: every [`WM_ACK`] from the client re-composites
+//! the window at its current position and flushes just that rectangle, and
+//! [`WM_DONE`] ends the session. The kernel runs the same machine over the same
+//! reports, so the frame checksum recomputes the expected final frame — desktop,
+//! window placement, and pointer sprite — against positions it derived itself rather
+//! than positions it was handed, and all three stay proven rather than assumed.
 
 #![no_std]
 #![no_main]
@@ -22,8 +23,8 @@
 
 use zc_abi::{
     Cursor, DamageList, FRAME_INITIAL, FRAME_MOVED, FramebufferInfo, IPC_WM, IPC_WM_REPLY,
-    PixelFormat, Rect, SurfaceInfo, WM_ACK, WM_DONE, Wm, encode, pixel_at, pixel_at_with_window,
-    unpack_report, window_rect,
+    Action, PixelFormat, Rect, SurfaceInfo, WM_ACK, WM_DONE, Wm, encode, pixel_at,
+    pixel_at_with_window, unpack_report, window_rect,
 };
 use zc_user::{
     cap_delegate, framebuffer_info, log, mouse_read, recv_from, send_to, surface_create,
@@ -186,21 +187,27 @@ pub unsafe extern "C" fn _start() -> ! {
     // exactly what the kernel's recomputed desktop catches. The kernel serves the
     // same reports to its own cursor and window machine, so both positions stay
     // proofs rather than claims.
-    let mut window = wm.window();
+    let mut window = wm.rect();
     let mut dragged = false;
+    let mut minimized = false;
+    let mut restored = false;
     while let Some((buttons, dx, dy)) = unpack_report(mouse_read()) {
         let cursor_before = cursor.rect();
         let window_before = window;
         cursor.apply(dx, dy, width, height);
-        let moved = wm.apply(cursor, buttons);
-        window = if moved { wm.window() } else { window_before };
-        dragged |= moved;
+        let action = wm.apply(cursor, buttons);
+        minimized |= action == Action::Minimized;
+        restored |= action == Action::Restored;
+        window = wm.rect();
+        dragged |= action == Action::Moved;
         // A press that arms a drag moves nothing yet, but the pointer's own old
-        // and new rectangles are always damaged; a move that displaces the window
-        // also damages both window rectangles, so the area it vacates is
-        // repainted rather than left holding stale pixels.
+        // and new rectangles are always damaged. A report that changes the window
+        // — a move, or a hide/restore — damages both the old and the new
+        // rectangle, so the area it vacates is repainted rather than left
+        // holding stale pixels. A minimized window's `rect` is empty, so its
+        // union covers exactly the region the window just left.
         let mut rect = cursor_before.union(cursor.rect());
-        if moved {
+        if window_before != window {
             rect = rect.union(window_before).union(window);
         }
         composite(
@@ -218,11 +225,18 @@ pub unsafe extern "C" fn _start() -> ! {
         );
     }
     log("compositor: cursor moved\n");
-    // The scripted session ends with a full press-drag-release, so this is the
-    // marker that CI uses to prove the interaction path ran at all — a session
-    // that only moved the pointer would leave `buttons` unexercised.
+    // The scripted session ends with a full press-drag-release plus a minimize
+    // and a restore, so these are the markers CI uses to prove the interaction
+    // path ran at all — a session that only moved the pointer would leave
+    // `buttons` unexercised.
     if dragged {
         log("compositor: window dragged\n");
+    }
+    if minimized {
+        log("compositor: window minimized\n");
+    }
+    if restored {
+        log("compositor: window restored\n");
     }
     log("compositor: cursor ok\n");
 
@@ -242,15 +256,12 @@ pub unsafe extern "C" fn _start() -> ! {
             let cursor_before = cursor.rect();
             let window_before = window;
             cursor.apply(dx, dy, width, height);
-            window = if wm.apply(cursor, buttons) {
-                wm.window()
-            } else {
-                window_before
-            };
-            let rect = cursor_before
-                .union(cursor.rect())
-                .union(window_before)
-                .union(window);
+            let _ = wm.apply(cursor, buttons);
+            window = wm.rect();
+            let mut rect = cursor_before.union(cursor.rect());
+            if window_before != window {
+                rect = rect.union(window_before).union(window);
+            }
             composite(
                 back,
                 &fb,

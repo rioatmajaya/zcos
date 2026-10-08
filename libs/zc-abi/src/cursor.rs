@@ -84,27 +84,48 @@ const fn step(buttons: u8, dx: i8, dy: i8) -> MouseStep {
 
 /// The reports the boot proof feeds the pointer, in order.
 ///
-/// The first four walk the pointer across the plain desktop. The rest drive a
-/// complete interaction: the pointer climbs to the window's title bar, presses
-/// the left button, drags the window away from its scripted frame position, and
-/// releases. A session that only moved the pointer would leave the
-/// window-management path unproven in CI, and the button bitmask would cross the
-/// syscall without anything acting on it.
+/// The script is a whole interaction, not just pointer motion:
+///
+/// 1. walk across the plain desktop,
+/// 2. climb to the window's title bar, press, drag it to the left edge, release,
+/// 3. click the minimize glyph, so the window leaves the screen entirely,
+/// 4. click the taskbar's task button, so the window comes back exactly where it
+///    was.
+///
+/// A session that only moved the pointer would leave the window-management path
+/// unproven in CI, and the button bitmask would cross the syscall with nothing
+/// acting on it. Ending on a *restored* window keeps the placement proof — the
+/// half of the frame check ADR 0018 is about — running on the final frame.
 ///
 /// The run ends with the pointer over the window it dragged, so the proof also
 /// exercises the pointer-over-window path rather than steering clear of it.
+///
+/// Coordinates are tuned for the 1280x800 boot display: the drag lands the
+/// window near the left edge so its minimize glyph is a short walk from the
+/// pointer, and the pointer then climbs to the task button on the far left.
 pub const MOUSE_SCRIPT: &[MouseStep] = &[
-    step(0, 40, 24),
-    step(0, 24, 18),
-    step(0, -12, 30),
-    step(0, 28, -16),
     step(0, 127, -127),
-    step(0, 127, -127),
-    step(0, 46, -26),
+    step(0, 127, -97),
+    step(0, 126, 0),
     step(BUTTON_LEFT, 0, 0),
-    step(BUTTON_LEFT, -80, 60),
-    step(BUTTON_LEFT, -40, 20),
+    step(BUTTON_LEFT, -127, -125),
+    step(BUTTON_LEFT, -127, 0),
+    step(BUTTON_LEFT, -127, 0),
+    step(BUTTON_LEFT, -127, 0),
+    step(BUTTON_LEFT, -32, 0),
     step(0, 0, 0),
+    step(0, 127, 0),
+    step(0, 127, 0),
+    step(0, 90, 0),
+    step(BUTTON_LEFT, 0, 0),
+    step(0, 0, 0),
+    step(0, -127, -35),
+    step(0, -127, 0),
+    step(0, -127, 0),
+    step(BUTTON_LEFT, 0, 0),
+    step(0, 0, 0),
+    step(0, 127, 127),
+    step(0, 50, 7),
 ];
 
 /// The value `SYS_MOUSE_READ` returns when no report is waiting.
@@ -256,7 +277,7 @@ mod tests {
         for entry in MOUSE_SCRIPT {
             cursor.apply(entry.dx, entry.dy, w, h);
         }
-        assert_eq!((cursor.x, cursor.y), (580, 256));
+        assert_eq!((cursor.x, cursor.y), (300, 150));
         // The session drags the window out from under the pointer and ends on
         // top of it, so the boot proof exercises pointer-over-window instead of
         // steering clear of it.

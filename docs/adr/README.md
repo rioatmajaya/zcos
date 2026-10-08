@@ -31,6 +31,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0022](0022-terminal-commands-over-the-vfs.md) | Terminal commands execute over the VFS | Accepted |
 | [0023](0023-pointer-and-mouse-read.md) | Pointer state and the mouse-read syscall | Accepted |
 | [0024](0024-window-dragging-and-hit-testing.md) | Shared window placement for hit-testing and dragging | Accepted |
+| [0025](0025-hidden-window-is-an-empty-rectangle.md) | A hidden window is an empty rectangle | Accepted |
 
 ## Adding a decision
 

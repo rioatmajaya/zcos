@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 7 grants`, `task 6: devmgr: blk published`, `dma: window coherent ok` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–3 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `client: vfs ok`; `wm: window mapped`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm host tests pass |
+| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–4 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `client: vfs ok`; `wm: window mapped`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm host tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -509,6 +509,22 @@ full browser. Note them as follow-ups, do not build them here.
         scripted session now carries button bits and ends with a full press-drag-
         release, so CI proves the interaction rather than only the motion. See
         [`adr/0024`](adr/0024-window-dragging-and-hit-testing.md).
+      - [x] F8b-4: window visibility. Clicking the minimize glyph hides the window
+        and the taskbar's task button brings it back. The representation is one
+        line of thought: a hidden window's rectangle *is* `Rect::EMPTY`, so
+        `pixel_at_with_window` recomputes the whole frame as bare desktop and the
+        compositor's clip bounds reject the blit — the paint path needs no
+        "is it visible" branch, and the area a minimize vacates is covered by the
+        exact desktop check rather than merely going unobserved. `Wm::apply` now
+        returns an `Action` (grab / move / release / minimize / restore) so a
+        caller can tell them apart, and the remembered placement survives the hide
+        so a restore is exact. Hit regions are derived from the renderers —
+        `terminal::close_rect`/`minimize_rect` and
+        `desktop::launcher_button_rect`/`task_button_rect` are public and
+        `Term::render` and `panel_color_at` call them — so a click can never land
+        beside a glyph the user can see. Close is drawn but still inert: it ends
+        the window session, which needs its own protocol. See
+        [`adr/0025`](adr/0025-hidden-window-is-an-empty-rectangle.md).
 - [x] F8c: 2D renderer with a bitmap font and text overlay. `zc-abi::font`
       embeds the VGA 8x16 glyph set and exposes `glyph_row`/`glyph_bit`/
       `text_blend`/`text_width` as pure `const`-callable helpers; the window
@@ -664,6 +680,14 @@ full browser. Note them as follow-ups, do not build them here.
   so it recomputes the desktop around wherever the window ended up. The `zc-abi`
   `wm` host tests pass, covering the grab offset, the release, the clamp, and
   two independent replays agreeing.
+- The window can be hidden and brought back, and the proof survives it (F8b-4):
+  the compositor logs `compositor: window minimized` and
+  `compositor: window restored` for the scripted session's two clicks, and
+  `fb: desktop checksum ok` still passes. Because a hidden window's rectangle is
+  empty, the verifier recomputes every pixel it vacated as bare desktop — the
+  exact check covers the minimize, not just the restore. The `zc-abi` host tests
+  pass, including that each decoration glyph really paints inside the rectangle
+  hit-testing claims for it.
 - Clean shutdown: `power: halt clean`.
 - Audio plays a known tone and the driver reports no XRUN under a stress
   buffer: `snd: playback ok`.

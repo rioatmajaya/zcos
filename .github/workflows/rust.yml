@@ -184,10 +184,13 @@ jobs:
         grep -q "fb: cursor ok" build/boot.log
         # The pointer is not just drawn, it is driven: the scripted mouse session
         # presses the left button on the window's title bar, drags the window off
-        # its scripted frame position, and releases. The window machine runs on
-        # both sides (ADR 0024), so the desktop checksum still recomputes the
-        # desktop exactly around wherever the window ended up.
+        # its scripted frame position, releases, clicks the minimize glyph, and
+        # clicks the taskbar's task button to bring it back. The window machine
+        # runs on both sides (ADR 0024), so the desktop checksum still recomputes
+        # the desktop exactly around wherever the window ended up.
         grep -q "compositor: window dragged" build/boot.log
+        grep -q "compositor: window minimized" build/boot.log
+        grep -q "compositor: window restored" build/boot.log
         ! grep -q "cursor checksum mismatch" build/boot.log
         ! grep -q "desktop checksum mismatch" build/boot.log
         ! grep -q "window placement mismatch" build/boot.log

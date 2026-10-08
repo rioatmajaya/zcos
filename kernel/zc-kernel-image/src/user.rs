@@ -2111,9 +2111,12 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface) {
     let Some(format) = PixelFormat::from_raw(surface.format) else {
         crate::fail("unsupported window format");
     };
-    // The window's *current* rectangle: the surface carries window-local pixels,
-    // so this is the origin the snapshot's placement hash must be compared at.
-    let window = expected_window();
+    // The window's *remembered* rectangle, which survives a minimize: the surface
+    // carries window-local pixels, so both its geometry and the origin the
+    // placement hash is compared at come from the placement, never from the
+    // visibility. `expected_window()` would be empty here if the window were
+    // minimized, and this snapshot runs on the destroy path either way.
+    let window = unsafe { &*addr_of!(WM) }.window();
     if surface.width != window.w || surface.height != window.h {
         crate::fail("window surface geometry mismatch");
     }
@@ -2204,8 +2207,11 @@ fn kernel_read_file(path: &[u8], out: &mut [u8]) -> Option<usize> {
 /// the window the client's pixels are unknowable (they are whatever the user
 /// typed), so that region is checked for *placement*: it must equal the client's
 /// own window surface, hashed by [`snapshot_window_surface`] when the compositor
-/// released it. The desktop and window regions are hashed separately and
-/// combined; either mismatch fails.
+/// released it. A minimized window yields an empty rectangle, so the whole frame
+/// is recomputed as bare desktop and there is no placement to compare — which is
+/// why the vacated area of a minimize is covered by the exact desktop check.
+/// The desktop and window regions are hashed separately and combined; either
+/// mismatch fails.
 fn verify_framebuffer() {
     use zc_abi::{HASH_OFFSET, encode, hash_step, pixel_at_with_window};
 
@@ -2269,10 +2275,18 @@ fn verify_framebuffer() {
         crate::fail("desktop checksum mismatch");
     }
     // SAFETY: written on the compositor's destroy path before the boot ends.
-    let Some(want_window) = (unsafe { addr_of!(WINDOW_SNAPSHOT).read() }) else {
+    let Some(snapshot) = (unsafe { addr_of!(WINDOW_SNAPSHOT).read() }) else {
         crate::fail("window surface was never released");
     };
-    if actual_window != want_window {
+    if window.is_empty() {
+        // The window is minimized, so none of its pixels are on screen and there
+        // is nothing to place: `actual_window` is still the untouched hash
+        // offset, which is exactly right for a frame with no window in it. The
+        // snapshot still had to exist — it is what proves the client painted its
+        // surface correctly while it was hidden — but there is no display region
+        // to compare it against.
+        crate::serial::write_str("fb: window minimized ok\n");
+    } else if actual_window != snapshot {
         crate::fail("window placement mismatch");
     }
     if want_cursor != actual_cursor {
@@ -3504,9 +3518,14 @@ static mut CURSOR: zc_abi::cursor::Cursor = zc_abi::cursor::Cursor::at(0, 0);
 static mut WM: zc_abi::wm::Wm = zc_abi::wm::Wm::EMPTY;
 
 /// Returns the window rectangle the compositor should have painted.
+///
+/// Empty while the window is minimized: an empty rectangle contains no pixel, so
+/// the verifier recomputes the whole frame as bare desktop and the placement
+/// comparison is skipped. That is the point — a hidden window needs no special
+/// case in the paint path, only one in the proof.
 fn expected_window() -> zc_abi::desktop::Rect {
     // SAFETY: read-only; written only through the mouse syscall.
-    unsafe { addr_of!(WM).read() }.window()
+    unsafe { addr_of!(WM).read() }.rect()
 }
 
 /// How many reports of the scripted mouse session have been served.

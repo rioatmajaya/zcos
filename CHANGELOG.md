@@ -62,6 +62,26 @@ still learns no address.
 
 ### Added
 
+- **Minimize and restore** (F8b-4): clicking the `-` glyph now hides the window
+  and the taskbar's `Terminal` button brings it back exactly where it was. The
+  representation is the whole design: a hidden window's rectangle *is*
+  `Rect::EMPTY`, so the shared desktop layout already recomputes every pixel it
+  vacated as bare desktop and the compositor's clip bounds already reject the
+  blit — neither path needs a new "is it visible" branch, and the area a
+  minimize vacates is covered by the exact frame check rather than merely going
+  unobserved. `zc_abi::wm::Wm` keeps the placement across a hide so a restore is
+  exact, and `Wm::apply` returns an `Action` (`Grabbed`, `Moved`, `Released`,
+  `Minimized`, `Restored`) so a caller can tell a grab from a move from a hide.
+  Click regions are now derived from the renderers — `terminal::close_rect` and
+  `minimize_rect` are public and `Term::render` calls them, as
+  `desktop::launcher_button_rect` and `task_button_rect` are for `panel_color_at`
+  — so a click can never land beside a glyph the user can see. The scripted
+  session now drives the whole round trip, so CI proves minimize and restore
+  (`compositor: window minimized`, `compositor: window restored`) rather than
+  only a drag. Close stays drawn but inert: it ends the window session, which
+  needs its own protocol. The boot checksum changes, because the scripted
+  pointer path is different. See
+  [ADR 0025](docs/adr/0025-hidden-window-is-an-empty-rectangle.md).
 - **Clicking the title bar drags the window** (F8b-3): the mouse button bitmask
   crossed `SYS_MOUSE_READ` with nothing acting on it, so a click moved the
   pointer and nothing else. `zc_abi::wm` adds a shared placement machine — a

@@ -34,9 +34,12 @@ const OUTPUT: (u8, u8, u8) = (176, 182, 192);
 /// Cursor block color.
 const CURSOR: (u8, u8, u8) = (120, 220, 140);
 /// Close-button glyph color.
-const CLOSE_FG: (u8, u8, u8) = (226, 96, 96);
+///
+/// Public so a test can confirm the glyph really paints inside the rectangle
+/// hit-testing claims for it.
+pub const DECORATION_CLOSE_COLOR: (u8, u8, u8) = (226, 96, 96);
 /// Minimize-button glyph color.
-const MIN_FG: (u8, u8, u8) = (226, 200, 120);
+pub const DECORATION_MIN_COLOR: (u8, u8, u8) = (226, 200, 120);
 
 /// Terminal width in character cells.
 const TERM_COLS: usize = 44;
@@ -181,7 +184,9 @@ impl Term {
     ///
     /// The glyph bit is computed by direct array indexing rather than a slice
     /// so the function stays `const`; the arithmetic matches
-    /// [`crate::font::text_blend_bytes`] exactly.
+    /// [`crate::font::text_blend_bytes`] exactly. The decorations go through
+    /// [`close_rect`] and [`minimize_rect`] rather than open-coded offsets, so
+    /// the region hit-testing clicks is the region the glyphs are painted in.
     #[must_use]
     pub const fn render(&self, lx: u32, ly: u32, w: u32, h: u32) -> (u8, u8, u8) {
         if w < 2 || h < 2 {
@@ -195,20 +200,13 @@ impl Term {
             // Window decorations: minimize and close glyphs at the right end
             // of the title bar. They are part of the shared render, so the
             // kernel's verifier recomputes them with the client's pixels.
-            if w > 80 {
-                let ty = if TITLE_HEIGHT > GLYPH_H {
-                    (TITLE_HEIGHT - GLYPH_H) / 2
-                } else {
-                    0
-                };
-                let close_x = w - 2 - GLYPH_W - 4;
-                if lx >= close_x && lx < close_x + GLYPH_W && ly >= ty && ly < ty + GLYPH_H {
-                    return glyph_over(b'x', lx - close_x, ly - ty, base, CLOSE_FG);
-                }
-                let min_x = close_x - GLYPH_W - 4;
-                if lx >= min_x && lx < min_x + GLYPH_W && ly >= ty && ly < ty + GLYPH_H {
-                    return glyph_over(b'-', lx - min_x, ly - ty, base, MIN_FG);
-                }
+            let close = close_rect(w, h);
+            if close.contains(lx, ly) {
+                return glyph_over(b'x', lx - close.x, ly - close.y, base, DECORATION_CLOSE_COLOR);
+            }
+            let minimize = minimize_rect(w, h);
+            if minimize.contains(lx, ly) {
+                return glyph_over(b'-', lx - minimize.x, ly - minimize.y, base, DECORATION_MIN_COLOR);
             }
             return base;
         }
@@ -401,6 +399,54 @@ const fn glyph_over(ch: u8, gx: u32, gy: u32, base: (u8, u8, u8), fg: (u8, u8, u
     }
 }
 
+/// Smallest window width that carries the decoration glyphs.
+///
+/// Below this the title bar has no room for them and both decoration rectangles
+/// are [`crate::desktop::Rect::EMPTY`].
+pub const DECORATION_MIN_W: u32 = 80;
+
+/// Vertical offset of the decoration glyphs inside the title bar.
+const fn decoration_y() -> u32 {
+    if TITLE_HEIGHT > GLYPH_H {
+        (TITLE_HEIGHT - GLYPH_H) / 2
+    } else {
+        0
+    }
+}
+
+/// The close glyph's rectangle in window-local coordinates, or
+/// [`crate::desktop::Rect::EMPTY`] for a window too narrow to draw it.
+///
+/// The renderer and the click hit-test both call this, so a click can never land
+/// beside the `x` the user can see.
+#[must_use]
+pub const fn close_rect(w: u32, h: u32) -> crate::desktop::Rect {
+    if w <= DECORATION_MIN_W || h < TITLE_HEIGHT {
+        return crate::desktop::Rect::EMPTY;
+    }
+    crate::desktop::Rect::new(
+        w - 2 - GLYPH_W - 4,
+        decoration_y(),
+        GLYPH_W,
+        GLYPH_H,
+    )
+}
+
+/// The minimize glyph's rectangle in window-local coordinates, or
+/// [`crate::desktop::Rect::EMPTY`] for a window too narrow to draw it.
+#[must_use]
+pub const fn minimize_rect(w: u32, h: u32) -> crate::desktop::Rect {
+    if w <= DECORATION_MIN_W || h < TITLE_HEIGHT {
+        return crate::desktop::Rect::EMPTY;
+    }
+    crate::desktop::Rect::new(
+        w - 2 - GLYPH_W - 4 - GLYPH_W - 4,
+        decoration_y(),
+        GLYPH_W,
+        GLYPH_H,
+    )
+}
+
 /// Renders one title-bar pixel: the bar color with the terminal title text.
 #[must_use]
 pub const fn title_bar_at(lx: u32, ly: u32) -> (u8, u8, u8) {
@@ -562,9 +608,9 @@ mod tests {
             let mut lx = 0;
             while lx < w {
                 let c = term.render(lx, ly, w, h);
-                if c == CLOSE_FG {
+                if c == DECORATION_CLOSE_COLOR {
                     saw_close = true;
-                } else if c == MIN_FG {
+                } else if c == DECORATION_MIN_COLOR {
                     saw_min = true;
                 }
                 lx += 1;
@@ -573,6 +619,43 @@ mod tests {
         }
         assert!(saw_close, "close glyph not rendered");
         assert!(saw_min, "minimize glyph not rendered");
+    }
+
+    #[test]
+    fn the_decoration_rectangles_contain_the_glyphs_they_claim() {
+        // `wm::decorations` derives the clickable strip from these two, so a
+        // rectangle that did not cover its glyph would put a click target beside
+        // the `x` the user can see.
+        let term = Term::new();
+        let (w, h) = (300u32, 120u32);
+        for (rect, color, label) in [
+            (close_rect(w, h), DECORATION_CLOSE_COLOR, "close"),
+            (minimize_rect(w, h), DECORATION_MIN_COLOR, "minimize"),
+        ] {
+            assert!(!rect.is_empty(), "{label} rectangle is empty");
+            let mut painted = false;
+            let mut ly = rect.y;
+            while ly < rect.bottom() {
+                let mut lx = rect.x;
+                while lx < rect.right() {
+                    if term.render(lx, ly, w, h) == color {
+                        painted = true;
+                    }
+                    lx += 1;
+                }
+                ly += 1;
+            }
+            assert!(painted, "{label} glyph paints outside its own rectangle");
+        }
+        // The two sit side by side at the right end, minimize first, with the
+        // same 4px gap and 4px inset from the border the renderer used.
+        assert_eq!(minimize_rect(w, h).right() + 4, close_rect(w, h).x);
+        assert_eq!(close_rect(w, h).right() + 4, w - 2);
+        // Too narrow to draw them, both rectangles are empty and nothing paints.
+        assert!(close_rect(64, 64).is_empty());
+        assert!(minimize_rect(64, 64).is_empty());
+        // Too short for a title bar: also empty.
+        assert!(close_rect(300, 8).is_empty());
     }
 
     #[test]
