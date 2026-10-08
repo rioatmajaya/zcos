@@ -143,9 +143,20 @@ stream, the kernel knows the window's real rectangle without being told it.
 `pixel_at_with_window` then recomputes the desktop against that exact rectangle,
 so `fb: desktop checksum ok` stays an exact check after a drag or a minimize
 rather than becoming a claim. The frame-numbered `color_at` and `pixel_at`
-remain as the two deterministic proof frames. See
-[ADR 0024](../adr/0024-window-dragging-and-hit-testing.md) and
-[ADR 0025](../adr/0025-hidden-window-is-an-empty-rectangle.md).
+remain as the two deterministic proof frames.
+
+**Both sides also derive their input events from one shared machine.** A report
+carries the *current* button mask, not changes, so `zc_abi::ui::Input` compares
+each report with the previous one and emits a single `Event` — `Move`, `Press`,
+or `Release`. `Wm` consumes those events rather than re-deriving edges, and the
+kernel holds an `Input` beside its cursor so the verifier and the compositor
+observe one event stream rather than two readings of one input. This is what keeps
+the placement proof above intact: agreement between the two sides is structural
+rather than incidental. See
+[ADR 0024](../adr/0024-window-dragging-and-hit-testing.md),
+[ADR 0025](../adr/0025-hidden-window-is-an-empty-rectangle.md),
+[ADR 0026](../adr/0026-closing-a-window-ends-a-session.md), and
+[ADR 0027](../adr/0027-one-input-layer.md).
 
 ### `SYS_IRQ_WAIT` and `IRQ_ANY`
 

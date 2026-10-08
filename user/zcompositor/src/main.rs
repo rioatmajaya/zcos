@@ -23,7 +23,7 @@
 
 use zc_abi::{
     Cursor, DamageList, FRAME_INITIAL, FRAME_MOVED, FramebufferInfo, IPC_WM, IPC_WM_REPLY,
-    Action, PixelFormat, Rect, SurfaceInfo, WM_ACK, WM_DONE, Wm, encode, pixel_at,
+    Action, Input, PixelFormat, Rect, SurfaceInfo, WM_ACK, WM_DONE, Wm, encode, pixel_at,
     pixel_at_with_window, unpack_report, window_rect,
 };
 use zc_user::{
@@ -88,6 +88,10 @@ pub unsafe extern "C" fn _start() -> ! {
     // so it knows where the window really ended up. The window starts where the
     // scripted second frame places it.
     let mut wm = Wm::new(width, height, window_rect(FRAME_INITIAL, width, height));
+    // The input layer that turns the device's current button mask into typed
+    // events. Shared with the kernel's frame verifier, so a press edge is derived
+    // from the same state machine on both sides of the syscall.
+    let mut input = Input::new();
 
     // The window is a separate surface the compositor hands to a client: it
     // creates the surface, delegates a read/write capability, and assigns the
@@ -195,8 +199,12 @@ pub unsafe extern "C" fn _start() -> ! {
     while let Some((buttons, dx, dy)) = unpack_report(mouse_read()) {
         let cursor_before = cursor.rect();
         let window_before = window;
+        // Derive the event once, exactly as the kernel does over the same
+        // reports, so both sides react to one event stream rather than to two
+        // independent readings of the same button mask.
+        let event = input.report(buttons, dx, dy);
         cursor.apply(dx, dy, width, height);
-        let action = wm.apply(cursor, buttons);
+        let action = wm.apply(cursor, event);
         minimized |= action == Action::Minimized;
         restored |= action == Action::Restored;
         if action == Action::Closed {
@@ -272,8 +280,9 @@ pub unsafe extern "C" fn _start() -> ! {
         while let Some((buttons, dx, dy)) = unpack_report(mouse_read()) {
             let cursor_before = cursor.rect();
             let window_before = window;
+            let event = input.report(buttons, dx, dy);
             cursor.apply(dx, dy, width, height);
-            let action = wm.apply(cursor, buttons);
+            let action = wm.apply(cursor, event);
             if action == Action::Closed {
                 wm.close();
                 let _ = window_close();

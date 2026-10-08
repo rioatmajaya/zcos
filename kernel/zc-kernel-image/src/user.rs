@@ -3550,6 +3550,14 @@ static mut CURSOR: zc_abi::cursor::Cursor = zc_abi::cursor::Cursor::at(0, 0);
 /// any task can act on a report.
 static mut WM: zc_abi::wm::Wm = zc_abi::wm::Wm::EMPTY;
 
+/// The pointer and button state the kernel derives events from.
+///
+/// Held next to [`CURSOR`] rather than inside [`WM`] so the frame verifier
+/// replays the *same* edge detection the compositor runs. Deriving edges twice
+/// from the same reports would work only while the two derivations happened to
+/// agree; sharing the machine makes disagreement impossible.
+static mut INPUT: zc_abi::ui::Input = zc_abi::ui::Input::new();
+
 /// Returns the window rectangle the compositor should have painted.
 ///
 /// Empty while the window is minimized: an empty rectangle contains no pixel, so
@@ -3785,8 +3793,9 @@ fn apply_report(buttons: u8, dx: i8, dy: i8) {
                 zc_abi::window_rect(zc_abi::FRAME_MOVED, info.width, info.height),
             );
         }
+        let event = (*addr_of_mut!(INPUT)).report(buttons, dx, dy);
         let after = *addr_of!(CURSOR);
-        let _ = wm.apply(after, buttons);
+        let _ = wm.apply(after, event);
     }
 }
 

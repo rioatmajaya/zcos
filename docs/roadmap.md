@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 7 grants`, `task 6: devmgr: blk published`, `dma: window coherent ok` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–5 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `client: vfs ok`; `wm: window mapped`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed`; `compositor: window erased`; `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm host tests pass |
+| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–5, F8e-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `client: vfs ok`; `wm: window mapped`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed`; `compositor: window erased`; `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui host tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -625,6 +625,31 @@ full browser. Note them as follow-ups, do not build them here.
         `client: vfs ok`. See
         [`adr/0022`](adr/0022-terminal-commands-over-the-vfs.md).
 - [ ] F8e: native Rust UI client library (widgets, event loop, no X11/Win32).
+      - [x] F8e-1: one shared input layer. F8e needs every widget to answer two
+        questions before it can react: "did a button go down *now*", and "which
+        widget is under the pointer". The PS/2 mouse reports the *current* button
+        mask rather than changes, so an edge has to be derived by comparison —
+        which `Wm` had solved for itself, the compositor had solved again
+        slightly differently, and every F8h app would solve once more. For the
+        compositor and the kernel that is not a tidiness issue: the two *must*
+        agree or the frame verifier's placement stops matching what was painted.
+        `zc_abi::ui::Input` derives each edge once and emits one `Event` per
+        report — `Key`, `Move`, `Press`, `Release` — with two rules that matter:
+        the first report is adopted rather than treated as an edge (a button held
+        before the session began did not just go down, and firing a press for it
+        would grab whatever was under the pointer), and movement rides on the edge
+        so a click acts at the pixel the report moved it to. `Wm::apply` now takes
+        an `Event` and has lost its `held` flag, and the kernel keeps its own
+        `Input` beside `CURSOR` so both sides see one event stream rather than two
+        readings of one input. `hit_topmost`/`hit_all` share the widget-stack
+        overlap order `color_at` already uses, allocating nothing. Keyboard events
+        stay byte-only because the input domain has already folded releases into
+        its ASCII output — inventing key-ups nobody emits would be worse. The boot
+        checksum is unchanged, which is the evidence this is a refactor and not a
+        feature. See [`adr/0027`](adr/0027-one-input-layer.md).
+      - [ ] *(follow-up)* widgets and layout on top of it.
+      - [ ] *(follow-up)* the syscall-facing event loop that pumps
+        `SYS_TERM_READ`/`SYS_MOUSE_READ` into `Input`.
 - [x] F8f: window decorations, focus, and a taskbar. The top panel is now a
       taskbar — a launcher button (`ZC`), a task button for the focused window
       (`Terminal`), and a clock — in `zc_abi::desktop::panel_color_at`; the

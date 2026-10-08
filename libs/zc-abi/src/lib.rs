@@ -22,6 +22,7 @@ pub mod service;
 pub mod surface;
 pub mod syscall;
 pub mod terminal;
+pub mod ui;
 pub mod vfs;
 pub mod wm;
 
@@ -73,6 +74,7 @@ pub use syscall::{
     SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TERM_READ, SYS_UMOUNT, SYS_WINDOW_CLOSE, SYS_WRITE,
     SYS_YIELD, SyscallError,
 };
+pub use ui::{Event, Input, hit_all, hit_topmost};
 pub use vfs::{KIND_CHR, KIND_DIR, KIND_FILE, STAT_LEN, Stat};
 pub use wm::{Action, Wm, decorations, hit, title_bar};
 

@@ -149,8 +149,12 @@ behind. See
 [ADR 0016](docs/adr/0016-window-client-delegation.md),
 [ADR 0018](docs/adr/0018-window-placement-proof.md),
 [ADR 0024](docs/adr/0024-window-dragging-and-hit-testing.md),
-[ADR 0025](docs/adr/0025-hidden-window-is-an-empty-rectangle.md), and
-[ADR 0026](docs/adr/0026-closing-a-window-ends-a-session.md).
+[ADR 0025](docs/adr/0025-hidden-window-is-an-empty-rectangle.md),
+[ADR 0026](docs/adr/0026-closing-a-window-ends-a-session.md), and
+[ADR 0027](docs/adr/0027-one-input-layer.md). The gestures are built on one shared
+`zc-abi::ui` input layer, so the compositor and the kernel's frame verifier derive
+press and release edges from the same state machine rather than from two readings
+of the same device — the foundation F8e's client library is being built on.
 
 ## Development
 

@@ -62,6 +62,24 @@ still learns no address.
 
 ### Added
 
+- **One shared input layer, and the start of F8e** (F8e-1): the PS/2 mouse
+  reports the *current* button mask rather than changes, so "the button went down
+  now" has to be derived by comparing against the previous report — which the
+  window manager had solved for itself, the compositor had solved again slightly
+  differently, and every future app would have solved once more. `zc_abi::ui`
+  derives each edge once: `Input` emits exactly one `Event` per report (`Key`,
+  `Move`, `Press`, `Release`), adopting the first report rather than treating it
+  as an edge so a button already held when a session began cannot spuriously grab
+  whatever was under the pointer, and carrying movement *on* the edge so a click
+  acts at the pixel the report moved it to. `Wm::apply` now takes an `Event` and
+  has lost its own `held` flag, and the kernel keeps its own `Input` beside its
+  cursor — so the compositor and the verifier see one event stream instead of two
+  readings of one input, which is what keeps the window-placement proof honest.
+  `hit_topmost` and `hit_all` resolve a widget stack in the same last-painted-wins
+  order `color_at` uses, allocating nothing. Keyboard events stay byte-only
+  because the input domain has already folded releases into its ASCII output.
+  The boot checksum is unchanged, which is the evidence this is a refactor rather
+  than a feature. See [ADR 0027](docs/adr/0027-one-input-layer.md).
 - **Closing a window** (F8b-5): the `x` glyph now ends the window's session for
   good. The client spends its session blocked in `SYS_TERM_READ` and the only
   end-of-session signal existed for the serial shell exiting, so the new

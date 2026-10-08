@@ -291,9 +291,11 @@ mod tests {
             crate::desktop::window_rect(crate::desktop::FRAME_MOVED, w, h),
         );
         let mut at = Cursor::new(w, h);
+        let mut input = crate::ui::Input::new();
         for entry in MOUSE_SCRIPT {
+            let event = input.report(entry.buttons, entry.dx, entry.dy);
             at.apply(entry.dx, entry.dy, w, h);
-            let _ = wm.apply(at, entry.buttons);
+            let _ = wm.apply(at, event);
         }
         assert!(wm.window().contains(cursor.x, cursor.y));
     }

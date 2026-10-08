@@ -16,9 +16,10 @@
 //! Everything is `const`-callable, integer-only, and allocation-free, so it is
 //! host-tested like the rest of the desktop layout.
 
-use crate::cursor::{BUTTON_LEFT, Cursor};
+use crate::cursor::Cursor;
 use crate::desktop::{Rect, TITLE_HEIGHT, panel_height};
 use crate::font::GLYPH_W;
+use crate::ui::Event;
 
 /// Width of the decoration strip reserved at the right end of the title bar.
 ///
@@ -111,7 +112,6 @@ pub struct Wm {
     grab_x: u32,
     grab_y: u32,
     dragging: bool,
-    held: bool,
     shown: bool,
     closed: bool,
 }
@@ -129,7 +129,6 @@ impl Wm {
         grab_x: 0,
         grab_y: 0,
         dragging: false,
-        held: false,
         shown: false,
         closed: false,
     };
@@ -149,7 +148,6 @@ impl Wm {
             grab_x: 0,
             grab_y: 0,
             dragging: false,
-            held: false,
             shown: true,
             closed: false,
         }
@@ -243,76 +241,93 @@ pub fn close(&mut self) -> bool {
         moved
     }
 
-    /// Applies one pointer report and returns what it asked for.
+    /// Applies one input event and returns what it asked for.
     ///
-    /// A left-button press inside [`title_bar`] grabs the window at that point;
-    /// while the button stays held the window follows the pointer with the grab
-    /// offset preserved, and the release ends the drag. A press on the
+    /// The event comes from [`crate::ui::Input`], which is what derives a press
+    /// *edge* from the device's current button mask. This machine therefore never
+    /// re-derives edges of its own: it reacts to the same typed event a widget
+    /// would, so a click cannot mean one thing here and another to a client
+    /// listening to the same mouse.
+    ///
+    /// A [`crate::ui::Event::Press`] of the left button inside [`title_bar`] grabs
+    /// the window at that point; while later events carry the button still held
+    /// the window follows the pointer with the grab offset preserved, and the
+    /// matching [`crate::ui::Event::Release`] ends the drag. A press on the
     /// minimize glyph hides the window, a press on the taskbar's task button
     /// shows it again, and a press on the close glyph ends the session for good.
-    /// Everything else — the body, the bare desktop — does nothing: the button
-    /// bitmask crosses the syscall, so acting on a subset of it is explicit
-    /// rather than accidental.
+    /// Everything else — the body, the bare desktop, a right-button press —
+    /// does nothing.
     ///
     /// Dragging is refused while the window is hidden, because a hidden window
     /// has no on-screen title bar to press; `rect()` being empty makes the
     /// title-bar test fail on its own.
-    pub fn apply(&mut self, at: Cursor, buttons: u8) -> Action {
-        let down = buttons & BUTTON_LEFT != 0;
-        if down && !self.held {
-            // Press edge: one target wins, checked most specific first.
-            self.held = true;
-            // A closed window absorbs everything. `rect()` is empty, so every
-            // region test below fails on its own and the window stays gone even
-            // if the pointer keeps moving over where it used to be.
-            if self.closed {
-                return Action::None;
-            }
-            // The taskbar is under everything, so its button is tested first:
-            // a window can never overlap it (clamp_window keeps windows clear
-            // of the panel), so the order only matters for readability.
-            let task = crate::desktop::task_button_rect(self.screen_h);
-            if task.contains(at.x, at.y) {
-                // Only a hidden window needs restoring; clicking a live task
-                // button is inert rather than a surprise un-minimize.
-                if !self.shown {
-                    self.shown = true;
-                    return Action::Restored;
+    pub fn apply(&mut self, at: Cursor, event: Event) -> Action {
+        match event {
+            Event::Press { button, .. } => {
+                if button & crate::cursor::BUTTON_LEFT == 0 {
+                    return Action::None;
                 }
-                return Action::None;
-            }
-            let strip = decorations(self.rect());
-            if strip.contains(at.x, at.y) {
-                // The left half of the strip is minimize, the right half close.
-                if at.x < strip.x + DECORATION_W / 2 {
+                // A closed window absorbs everything, so no region below can
+                // resurrect it however long the pointer keeps moving over where
+                // the window used to be.
+                if self.closed {
+                    return Action::None;
+                }
+                // One target wins, checked most specific first. The taskbar is
+                // under everything — `clamp_window` keeps windows clear of the
+                // panel — so its order is for readability, not correctness.
+                let task = crate::desktop::task_button_rect(self.screen_h);
+                if task.contains(at.x, at.y) {
+                    // Only a hidden window needs restoring; clicking a live task
+                    // button is inert rather than a surprise un-minimize.
+                    if !self.shown {
+                        self.shown = true;
+                        return Action::Restored;
+                    }
+                    return Action::None;
+                }
+                let strip = decorations(self.rect());
+                if strip.contains(at.x, at.y) {
+                    // The left half of the strip is minimize, the right half close.
+                    if at.x < strip.x + DECORATION_W / 2 {
+                        self.shown = false;
+                        self.dragging = false;
+                        return Action::Minimized;
+                    }
+                    // Close keeps the placement but ends the session: the
+                    // rectangle is remembered for the erase, `rect` goes empty,
+                    // and no later event can bring it back.
                     self.shown = false;
+                    self.closed = true;
                     self.dragging = false;
-                    return Action::Minimized;
+                    return Action::Closed;
                 }
-                // Close keeps the placement but ends the session: the rectangle
-                // is remembered for the erase, `rect` goes empty, and no later
-                // report can bring it back.
-                self.shown = false;
-                self.closed = true;
-                self.dragging = false;
-                return Action::Closed;
+                self.dragging = hit(self.rect(), at.x, at.y);
+                if self.dragging {
+                    self.grab_x = at.x - self.window.x;
+                    self.grab_y = at.y - self.window.y;
+                    return Action::Grabbed;
+                }
+                return Action::None;
             }
-            self.dragging = hit(self.rect(), at.x, at.y);
-            if self.dragging {
-                self.grab_x = at.x - self.window.x;
-                self.grab_y = at.y - self.window.y;
-                return Action::Grabbed;
+            // A release ends the drag wherever the pointer happens to be; the
+            // pointer itself keeps its position.
+            Event::Release { .. } => {
+                if self.dragging {
+                    self.dragging = false;
+                }
+                return Action::Released;
             }
-            return Action::None;
-        }
-        if !down && self.held {
-            // Release edge: the pointer keeps its position; only the drag ends.
-            self.held = false;
-            self.dragging = false;
-            return Action::Released;
-        }
-        if !self.dragging {
-            return Action::None;
+            // `Input` only emits `Move` when no button changed state, so
+            // reaching here means the button was held throughout: a drag in
+            // progress should follow the pointer.
+            Event::Move { .. } => {
+                if !self.dragging {
+                    return Action::None;
+                }
+            }
+            // A keypress belongs to a client, never to the window manager.
+            Event::Key(_) => return Action::None,
         }
         let x = at.x.saturating_sub(self.grab_x);
         let y = at.y.saturating_sub(self.grab_y);
@@ -347,10 +362,12 @@ const fn clamp_window(rect: Rect, screen_w: u32, screen_h: u32) -> Rect {
     Rect::new(x, y, rect.w, rect.h)
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cursor::MOUSE_SCRIPT;
+    use crate::cursor::{BUTTON_LEFT, BUTTON_RIGHT, MOUSE_SCRIPT};
+    use crate::ui::Input;
 
     /// The display the scripted boot proof runs at.
     const W: u32 = 1280;
@@ -361,8 +378,83 @@ mod tests {
         Wm::new(W, H, crate::desktop::window_rect(crate::desktop::FRAME_MOVED, W, H))
     }
 
-    fn cursor_at(x: u32, y: u32) -> Cursor {
-        Cursor::at(x, y)
+    /// Drives a [`Wm`] the way the compositor does: `Input` turns each report into
+    /// a typed event, the pointer advances, and the machine reacts.
+    ///
+    /// Tests go through this rather than building `Event` values by hand, because
+    /// the edge detection *is* part of what is under test — a hand-built event
+    /// would let a regression in `Input` slip past every window-manager test.
+    struct Driver {
+        wm: Wm,
+        input: Input,
+        cursor: Cursor,
+    }
+
+    impl Driver {
+        fn new() -> Self {
+            Self {
+                wm: start(),
+                input: Input::new(),
+                cursor: Cursor::new(W, H),
+            }
+        }
+
+        /// Feeds one report exactly as the compositor reads it from the syscall.
+        fn feed(&mut self, buttons: u8, dx: i8, dy: i8) -> Action {
+            let event = self.input.report(buttons, dx, dy);
+            self.cursor.apply(dx, dy, W, H);
+            self.wm.apply(self.cursor, event)
+        }
+
+        /// Moves the pointer toward a target with no button held, stepping one
+        /// report per axis the way the device would.
+        fn move_toward(&mut self, x: u32, y: u32) -> Action {
+            let dx = clamp_delta(i64::from(x) - i64::from(self.cursor.x));
+            let dy = clamp_delta(i64::from(y) - i64::from(self.cursor.y));
+            self.feed(0, dx, dy)
+        }
+
+        /// Walks the pointer onto a target point, keeping whatever buttons
+        /// are currently held.
+        ///
+        /// The held mask matters: a real device reports the *current* button state
+        /// on every frame, so moving during a drag means reporting the button as
+        /// still down. Feeding zero here would release it and end the drag.
+        ///
+        /// Stops early if a step makes no progress: `Cursor` clamps to the
+        /// screen, so a target on or past the last row or column is unreachable
+        /// and must not spin here.
+        fn hover_point(&mut self, x: u32, y: u32) {
+            loop {
+                if (self.cursor.x, self.cursor.y) == (x, y) {
+                    return;
+                }
+                let before = (self.cursor.x, self.cursor.y);
+                let dx = clamp_delta(i64::from(x) - i64::from(before.0));
+                let dy = clamp_delta(i64::from(y) - i64::from(before.1));
+                let held = self.input.held();
+                self.feed(held, dx, dy);
+                if (self.cursor.x, self.cursor.y) == before {
+                    return;
+                }
+            }
+        }
+
+        /// Walks the pointer onto a rectangle's top-left corner.
+        fn hover(&mut self, rect: Rect) {
+            self.hover_point(rect.x, rect.y);
+        }
+
+    }
+
+    fn clamp_delta(value: i64) -> i8 {
+        if value > 127 {
+            127
+        } else if value < -128 {
+            -128
+        } else {
+            value as i8
+        }
     }
 
     #[test]
@@ -376,7 +468,6 @@ mod tests {
         let close = crate::terminal::close_rect(window.w, window.h);
         assert_eq!(strip.x, window.x + minimize.x);
         assert_eq!(strip.right(), window.x + close.right());
-        // It never runs past the window's right border.
         assert!(strip.right() <= window.right());
         // Each glyph really does paint inside the strip it claims.
         let term = crate::terminal::Term::new();
@@ -412,125 +503,199 @@ mod tests {
     #[test]
     fn the_drag_region_excludes_the_decorations() {
         let window = start().window();
-        let bar = title_bar(window);
-        assert_eq!(bar.right(), decorations(window).x);
-        // A press left of the decorations grabs; a press on them does not.
+        assert_eq!(title_bar(window).right(), decorations(window).x);
         assert!(hit(window, window.x + 4, window.y + 4));
         assert!(!hit(window, decorations(window).x + 1, window.y + 4));
     }
 
     #[test]
     fn pressing_the_body_or_the_desktop_never_drags() {
-        let mut wm = start();
-        let window = wm.window();
-        let before = window;
-        // The window body, below the title bar.
-        assert_eq!(
-            wm.apply(cursor_at(window.x + 10, window.bottom() - 4), BUTTON_LEFT),
-            Action::None
-        );
-        assert_eq!(
-            wm.apply(cursor_at(window.x + 20, window.bottom() - 2), BUTTON_LEFT),
-            Action::None
-        );
-        assert_eq!(wm.window(), before);
-        // The desktop, left of the window.
-        assert_eq!(
-            wm.apply(cursor_at(window.x - 8, window.y + 4), BUTTON_LEFT),
-            Action::None
-        );
-        assert_eq!(wm.window(), before);
-        assert!(!wm.is_dragging());
+        let mut d = Driver::new();
+        let window = d.wm.window();
+        // The window body, well below the title bar.
+        d.hover(Rect::new(window.x + 10, window.bottom() - 4, 1, 1));
+        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), Action::None);
+        assert_eq!(d.feed(0, 0, 0), Action::Released);
+        // The bare desktop, left of the window.
+        d.hover(Rect::new(window.x - 8, window.y + 4, 1, 1));
+        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), Action::None);
+        assert_eq!(d.feed(0, 0, 0), Action::Released);
+        assert_eq!(d.wm.window(), window);
+        assert!(!d.wm.is_dragging());
+    }
+
+    #[test]
+    fn a_right_button_press_never_drags() {
+        // Only the left button acts on the window; the others cross the syscall
+        // for widgets to use.
+        let mut d = Driver::new();
+        let window = d.wm.window();
+        d.hover(Rect::new(window.x + 60, window.y + 11, 1, 1));
+        assert_eq!(d.feed(BUTTON_RIGHT, 0, 0), Action::None);
+        assert_eq!(d.feed(BUTTON_RIGHT, 0, 0), Action::None);
+        assert!(!d.wm.is_dragging());
+        assert_eq!(d.wm.window(), window);
     }
 
     #[test]
     fn a_drag_preserves_the_grab_offset() {
-        let mut wm = start();
-        let window = wm.window();
+        let mut d = Driver::new();
+        let window = d.wm.window();
         // Grab the title bar 60 across and 11 down from its corner.
-        let mut at = cursor_at(window.x + 60, window.y + 11);
-        assert_eq!(wm.apply(at, BUTTON_LEFT), Action::Grabbed);
-        assert!(wm.is_dragging());
-        at = Cursor::at(600, 200);
-        assert_eq!(wm.apply(at, BUTTON_LEFT), Action::Moved);
-        assert_eq!(wm.window(), Rect::new(window.x - 100, window.y + 24, window.w, window.h));
+        d.hover(Rect::new(window.x + 60, window.y + 11, 1, 1));
+        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), Action::Grabbed);
+        assert!(d.wm.is_dragging());
+        // Move to an absolute position and check the offset was honoured.
+        let (at_x, at_y) = (window.x - 40, window.y + 35);
+        d.hover(Rect::new(at_x, at_y, 1, 1));
+        assert_eq!(
+            d.wm.window(),
+            Rect::new(at_x - 60, at_y - 11, window.w, window.h)
+        );
     }
 
     #[test]
     fn the_release_ends_the_drag_and_later_moves_do_nothing() {
-        let mut wm = start();
-        let window = wm.window();
-        let _ = wm.apply(cursor_at(window.x + 60, window.y + 11), BUTTON_LEFT);
-        let _ = wm.apply(cursor_at(window.x + 80, window.y + 31), BUTTON_LEFT);
-        let dragged = wm.window();
-        assert_eq!(wm.apply(dragged_center(dragged), 0), Action::Released);
-        assert!(!wm.is_dragging());
-        let after = wm.window();
+        let mut d = Driver::new();
+        let window = d.wm.window();
+        d.hover(Rect::new(window.x + 60, window.y + 11, 1, 1));
+        let _ = d.feed(BUTTON_LEFT, 0, 0);
+        d.hover(Rect::new(window.x + 140, window.y + 71, 1, 1));
+        let dragged = d.wm.window();
+        assert_ne!(dragged, window);
+        assert_eq!(d.feed(0, 0, 0), Action::Released);
+        assert!(!d.wm.is_dragging());
+        let after = d.wm.window();
         // Further movement with no button held leaves the window alone.
-        assert_eq!(wm.apply(Cursor::at(900, 700), 0), Action::None);
-        assert_eq!(wm.window(), after);
+        d.move_toward(900, 700);
+        assert_eq!(d.wm.window(), after);
     }
 
     #[test]
     fn the_minimize_glyph_hides_the_window() {
-        let mut wm = start();
-        let window = wm.window();
+        let mut d = Driver::new();
+        let window = d.wm.window();
         let strip = decorations(window);
         // The left half of the strip is minimize.
-        let press = cursor_at(strip.x + DECORATION_W / 4, strip.y + 4);
-        assert_eq!(wm.apply(press, BUTTON_LEFT), Action::Minimized);
-        assert!(!wm.is_shown());
+        d.hover(Rect::new(strip.x + DECORATION_W / 4, strip.y + 4, 1, 1));
+        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), Action::Minimized);
+        assert!(!d.wm.is_shown());
         // The remembered rectangle is untouched, so a restore is exact.
-        assert_eq!(wm.window(), window);
-        // But nothing on screen belongs to the window any more.
-        assert_eq!(wm.rect(), Rect::EMPTY);
+        assert_eq!(d.wm.window(), window);
+        assert_eq!(d.wm.rect(), Rect::EMPTY);
+        assert_eq!(d.feed(0, 0, 0), Action::Released);
         // A drag is refused: a hidden window has no title bar to press.
-        assert_eq!(wm.apply(cursor_at(window.x + 60, window.y + 11), BUTTON_LEFT), Action::None);
-        assert!(!wm.is_dragging());
-        // And a release still closes the press edge cleanly.
-        assert_eq!(wm.apply(press, 0), Action::Released);
+        d.hover(Rect::new(window.x + 60, window.y + 11, 1, 1));
+        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), Action::None);
+        assert!(!d.wm.is_dragging());
     }
 
     #[test]
     fn the_close_glyph_ends_the_session_for_good() {
-        let mut wm = start();
-        let window = wm.window();
+        let mut d = Driver::new();
+        let window = d.wm.window();
         let strip = decorations(window);
-        let press = cursor_at(strip.right() - 2, strip.y + 4);
-        assert_eq!(wm.apply(press, BUTTON_LEFT), Action::Closed);
-        assert!(!wm.is_shown());
-        assert!(wm.is_closed());
-        assert!(!wm.is_dragging());
+        d.hover(Rect::new(strip.right() - 2, strip.y + 4, 1, 1));
+        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), Action::Closed);
+        assert!(!d.wm.is_shown());
+        assert!(d.wm.is_closed());
+        assert!(!d.wm.is_dragging());
         // The placement is remembered, so the compositor can erase exactly the
         // right footprint even though nothing is left to paint.
-        assert_eq!(wm.window(), window);
-        assert_eq!(wm.rect(), Rect::EMPTY);
-        let _ = wm.apply(press, 0);
+        assert_eq!(d.wm.window(), window);
+        assert_eq!(d.wm.rect(), Rect::EMPTY);
     }
 
     #[test]
     fn a_closed_window_cannot_come_back() {
-        let mut wm = start();
-        let window = wm.window();
+        let mut d = Driver::new();
+        let window = d.wm.window();
         let strip = decorations(window);
-        let _ = wm.apply(cursor_at(strip.right() - 2, strip.y + 4), BUTTON_LEFT);
-        let _ = wm.apply(cursor_at(strip.right() - 2, strip.y + 4), 0);
+        d.hover(Rect::new(strip.right() - 2, strip.y + 4, 1, 1));
+        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), Action::Closed);
+        assert_eq!(d.feed(0, 0, 0), Action::Released);
 
         // The task button restores a *minimized* window, never a closed one.
         let task = crate::desktop::task_button_rect(H);
-        assert_eq!(
-            wm.apply(Cursor::at(task.x + task.w / 2, task.y + task.h / 2), BUTTON_LEFT),
-            Action::None
-        );
-        let _ = wm.apply(Cursor::at(task.x, task.y), 0);
+        d.hover(Rect::new(task.x + task.w / 2, task.y + task.h / 2, 1, 1));
+        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), Action::None);
+        assert_eq!(d.feed(0, 0, 0), Action::Released);
         // Neither can it be dragged from where its title bar used to be.
-        assert_eq!(wm.apply(cursor_at(window.x + 60, window.y + 11), BUTTON_LEFT), Action::None);
-        assert_eq!(wm.apply(Cursor::at(400, 200), BUTTON_LEFT), Action::None);
-        // Every later report is inert and the rectangle never returns.
-        let _ = wm.apply(Cursor::at(400, 200), 0);
-        assert_eq!(wm.rect(), Rect::EMPTY);
-        assert!(wm.is_closed());
-        assert_eq!(wm.window(), window);
+        d.hover(Rect::new(window.x + 60, window.y + 11, 1, 1));
+        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), Action::None);
+        assert_eq!(d.feed(0, 0, 0), Action::Released);
+        assert!(d.wm.is_closed());
+        assert_eq!(d.wm.rect(), Rect::EMPTY);
+        assert_eq!(d.wm.window(), window);
+    }
+
+    #[test]
+    fn the_task_button_restores_a_minimized_window() {
+        let mut d = Driver::new();
+        let window = d.wm.window();
+        let strip = decorations(window);
+        d.hover(Rect::new(strip.x + DECORATION_W / 4, strip.y + 4, 1, 1));
+        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), Action::Minimized);
+        assert_eq!(d.feed(0, 0, 0), Action::Released);
+        assert!(!d.wm.is_shown());
+
+        let task = crate::desktop::task_button_rect(H);
+        d.hover(Rect::new(task.x + task.w / 2, task.y + task.h / 2, 1, 1));
+        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), Action::Restored);
+        assert!(d.wm.is_shown());
+        // The window comes back exactly where it was left.
+        assert_eq!(d.wm.rect(), window);
+    }
+
+    #[test]
+    fn the_launcher_button_and_a_shown_task_button_do_nothing() {
+        let mut d = Driver::new();
+        let window = d.wm.window();
+        let launcher = crate::desktop::launcher_button_rect(H);
+        let task = crate::desktop::task_button_rect(H);
+        for button in [launcher, task] {
+            d.hover(Rect::new(button.x + button.w / 2, button.y + button.h / 2, 1, 1));
+            assert_eq!(d.feed(BUTTON_LEFT, 0, 0), Action::None);
+            assert_eq!(d.feed(0, 0, 0), Action::Released);
+            assert!(d.wm.is_shown());
+            assert_eq!(d.wm.window(), window);
+        }
+    }
+
+    #[test]
+    fn a_drag_stays_on_screen_and_clear_of_the_taskbar() {
+        let mut d = Driver::new();
+        let window = d.wm.window();
+        d.hover(Rect::new(window.x + 4, window.y + 4, 1, 1));
+        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), Action::Grabbed);
+        for at in [(0u32, 0u32), (W - 1, H - 1), (W - 1, 0)] {
+            d.hover(Rect::new(at.0, at.1, 1, 1));
+            let held = d.wm.window();
+            assert!(held.right() <= W, "window ran off the right edge");
+            assert!(held.bottom() <= H, "window ran off the bottom edge");
+            assert!(held.y >= panel_height(H), "window ran under the taskbar");
+            assert_eq!((held.w, held.h), (window.w, window.h), "a drag never resizes");
+        }
+        // Dragging up-left past the origin pins the window to the taskbar's
+        // lower-left corner rather than underflowing through it.
+        for at in [(0u32, 0u32), (1, 0), (0, 1)] {
+            d.hover(Rect::new(at.0, at.1, 1, 1));
+            assert_eq!(d.wm.window(), Rect::new(0, panel_height(H), window.w, window.h));
+        }
+        // And the opposite corner pins the far side.
+        d.hover(Rect::new(W - 1, H - 1, 1, 1));
+        assert_eq!(
+            d.wm.window(),
+            Rect::new(W - window.w, H - window.h, window.w, window.h)
+        );
+    }
+
+    #[test]
+    fn a_tiny_screen_pins_the_window_without_underflowing() {
+        let mut wm = Wm::new(2, 2, Rect::new(0, 0, 64, 48));
+        assert_eq!(wm.window(), Rect::new(0, 0, 64, 48));
+        let _ = wm.place(Rect::new(900, 900, 64, 48));
+        assert_eq!(wm.window(), Rect::new(0, 0, 64, 48));
     }
 
     #[test]
@@ -547,149 +712,74 @@ mod tests {
         // The compositor erases across `window()` after the session ends, so
         // losing the placement on close would erase nothing and leave the
         // window's pixels standing — the desktop half of the frame check would
-        // then fail on exactly the footprint the close vacated. This is the one
-        // property of a close that is easy to break silently.
+        // then fail on exactly the footprint the close vacated.
         let mut wm = start();
         let window = wm.window();
         assert!(wm.close());
         assert_eq!(wm.window(), window);
         assert!(!wm.window().is_empty());
 
-        // And on a live window, the remembered placement is the *last dragged*
-        // one rather than the scripted frame position — the erase has to cover
-        // where the window actually ended up.
-        let mut wm = start();
-        let _ = wm.apply(cursor_at(window.x + 60, window.y + 11), BUTTON_LEFT);
-        let _ = wm.apply(cursor_at(window.x + 200, window.y + 90), BUTTON_LEFT);
-        let _ = wm.apply(cursor_at(window.x + 200, window.y + 90), 0);
-        let dragged = wm.window();
+        // And on a live window the remembered placement is the *last dragged* one
+        // rather than the scripted frame position — the erase has to cover where
+        // the window actually ended up.
+        let mut d = Driver::new();
+        let window = d.wm.window();
+        d.hover(Rect::new(window.x + 60, window.y + 11, 1, 1));
+        let _ = d.feed(BUTTON_LEFT, 0, 0);
+        d.hover(Rect::new(window.x + 200, window.y + 90, 1, 1));
+        let _ = d.feed(0, 0, 0);
+        let dragged = d.wm.window();
         assert_ne!(dragged, window, "the drag must actually have moved the window");
-        assert!(wm.close());
-        assert_eq!(wm.window(), dragged);
+        assert!(d.wm.close());
+        assert_eq!(d.wm.window(), dragged);
     }
 
     #[test]
-    fn a_closed_window_absorbs_the_whole_decoration_strip() {
-        // The minimize half must not resurrect a closed window, even though a
-        // minimize press is otherwise the same shape of click.
-        let mut wm = start();
-        let window = wm.window();
-        let strip = decorations(window);
-        assert!(wm.close());
-        for press in [
-            cursor_at(strip.x + 1, strip.y + 4),
-            cursor_at(strip.right() - 1, strip.y + 4),
-        ] {
-            assert_eq!(wm.apply(press, BUTTON_LEFT), Action::None);
-            assert_eq!(wm.apply(press, 0), Action::Released);
-        }
-        assert!(wm.is_closed());
-        assert_eq!(wm.rect(), Rect::EMPTY);
-    }
-
-    #[test]
-    fn the_task_button_restores_a_minimized_window() {
-        let mut wm = start();
-        let window = wm.window();
-        let strip = decorations(window);
-        let _ = wm.apply(cursor_at(strip.x + DECORATION_W / 4, strip.y + 4), BUTTON_LEFT);
-        let _ = wm.apply(cursor_at(strip.x, strip.y), 0);
-        assert!(!wm.is_shown());
-
-        let task = crate::desktop::task_button_rect(H);
-        assert_eq!(
-            wm.apply(Cursor::at(task.x + task.w / 2, task.y + task.h / 2), BUTTON_LEFT),
-            Action::Restored
-        );
-        assert!(wm.is_shown());
-        // The window comes back exactly where it was left.
-        assert_eq!(wm.rect(), window);
-    }
-
-    #[test]
-    fn the_launcher_button_and_a_shown_task_button_do_nothing() {
-        let mut wm = start();
-        let window = wm.window();
-        let launcher = crate::desktop::launcher_button_rect(H);
-        let task = crate::desktop::task_button_rect(H);
-        // Neither button disturbs a window that is already on screen.
-        for button in [launcher, task] {
-            let press = Cursor::at(button.x + button.w / 2, button.y + button.h / 2);
-            assert_eq!(wm.apply(press, BUTTON_LEFT), Action::None);
-            let _ = wm.apply(press, 0);
-            assert!(wm.is_shown());
-            assert_eq!(wm.window(), window);
-        }
-    }
-
-    fn dragged_center(window: Rect) -> Cursor {
-        Cursor::at(window.x + window.w / 2, window.y + window.h / 2)
-    }
-
-    #[test]
-    fn a_drag_stays_on_screen_and_clear_of_the_taskbar() {
-        let mut wm = start();
-        let window = wm.window();
-        let _ = wm.apply(cursor_at(window.x + 4, window.y + 4), BUTTON_LEFT);
-        // Far past every edge.
-        for at in [Cursor::at(0, 0), Cursor::at(W - 1, H - 1), Cursor::at(W, 0)] {
-            let _ = wm.apply(at, BUTTON_LEFT);
-            let held = wm.window();
-            assert!(held.right() <= W, "window ran off the right edge");
-            assert!(held.bottom() <= H, "window ran off the bottom edge");
-            assert!(held.y >= panel_height(H), "window ran under the taskbar");
-            assert_eq!(held.w, window.w, "a drag never resizes the window");
-            assert_eq!(held.h, window.h, "a drag never resizes the window");
-        }
-        // The corner clamp really is reached, and only because of the bounds:
-        // dragging up-left past the origin pins the window to the taskbar's
-        // lower-left corner rather than underflowing through it.
-        for at in [Cursor::at(0, 0), Cursor::at(1, 0), Cursor::at(0, 1)] {
-            let _ = wm.apply(at, BUTTON_LEFT);
-            assert_eq!(wm.window(), Rect::new(0, panel_height(H), window.w, window.h));
-        }
-        // And the opposite corner pins the far side.
-        let _ = wm.apply(Cursor::at(W - 1, H - 1), BUTTON_LEFT);
-        assert_eq!(
-            wm.window(),
-            Rect::new(W - window.w, H - window.h, window.w, window.h)
-        );
-    }
-
-    #[test]
-    fn a_tiny_screen_pins_the_window_without_underflowing() {
-        let mut wm = Wm::new(2, 2, Rect::new(0, 0, 64, 48));
-        assert_eq!(wm.window(), Rect::new(0, 0, 64, 48));
-        let _ = wm.place(Rect::new(900, 900, 64, 48));
-        assert_eq!(wm.window(), Rect::new(0, 0, 64, 48));
+    fn a_keypress_never_moves_the_window() {
+        // The window manager sees the same event stream a widget would, including
+        // keys; a key is simply not its business.
+        let mut d = Driver::new();
+        let window = d.wm.window();
+        let event = d.input.report(0, 0, 0);
+        assert_eq!(d.wm.apply(d.cursor, crate::ui::Event::Key(b'a')), Action::None);
+        assert_eq!(d.wm.apply(d.cursor, crate::ui::Event::Key(b'\n')), Action::None);
+        assert_eq!(d.wm.window(), window);
+        assert_eq!(event, crate::ui::Event::Move { dx: 0, dy: 0 });
     }
 
     #[test]
     fn the_scripted_session_drives_the_whole_window_lifecycle() {
-        // Replays the boot proof's mouse script: the pointer walks to the title
-        // bar, presses, drags the window, releases, minimizes it, restores it
-        // through the taskbar, and finally closes it.
-        let run = replay_script();
-        assert!(run.moved, "the scripted session never moved the window");
-        assert!(run.minimized, "the scripted session never minimized the window");
-        assert!(run.restored, "the scripted session never restored the window");
-        assert!(run.closed, "the scripted session never closed the window");
-        assert!(!run.dragging, "the scripted session never released");
+        // Replays the boot proof's mouse script: walk, grab and drag, release,
+        // minimize, restore through the taskbar, and close.
+        let mut d = Driver::new();
+        let mut moved = false;
+        let mut minimized = false;
+        let mut restored = false;
+        let mut closed = false;
+        for step in MOUSE_SCRIPT {
+            match d.feed(step.buttons, step.dx, step.dy) {
+                Action::Moved => moved = true,
+                Action::Minimized => minimized = true,
+                Action::Restored => restored = true,
+                Action::Closed => closed = true,
+                _ => {}
+            }
+        }
+        assert!(moved, "the scripted session never moved the window");
+        assert!(minimized, "the scripted session never minimized the window");
+        assert!(restored, "the scripted session never restored the window");
+        assert!(closed, "the scripted session never closed the window");
+        assert!(!d.wm.is_dragging(), "the scripted session never released");
         // The window left its scripted frame position and stayed on screen the
         // whole time it was shown.
-        assert_ne!(run.window, crate::desktop::window_rect(crate::desktop::FRAME_MOVED, W, H));
-        assert!(run.window.right() <= W && run.window.bottom() <= H);
-        assert!(run.window.y >= panel_height(H));
-        // The session ends closed, so the final frame has no window in it and
-        // the compositor erases the remembered footprint. The placement is kept
-        // for exactly that erase, and for nothing else.
-        assert!(!run.shown);
-        assert_eq!(run.rect, Rect::EMPTY);
-        assert!(!run.window.is_empty(), "a close must remember the footprint");
-        // The pointer finishes on the close glyph it pressed, over the window's
-        // remembered placement — the boot proof exercises pointer-over-window and
-        // not just pointer-over-empty-desktop.
-        assert!(run.window.contains(run.pointer.x, run.pointer.y));
+        assert_ne!(d.wm.window(), crate::desktop::window_rect(crate::desktop::FRAME_MOVED, W, H));
+        assert!(d.wm.window().right() <= W && d.wm.window().bottom() <= H);
+        assert!(d.wm.window().y >= panel_height(H));
+        // It ends closed, so the final frame has no window in it and the
+        // compositor erases the remembered footprint.
+        assert!(!d.wm.is_shown());
+        assert_eq!(d.wm.rect(), Rect::EMPTY);
+        assert!(!d.wm.window().is_empty(), "a close must remember the footprint");
     }
 
     #[test]
@@ -697,16 +787,14 @@ mod tests {
         // The close only proves anything if the window really was on screen
         // before it: a script that minimized and closed without restoring would
         // never exercise the placement half of the frame check.
-        let mut wm = start();
-        let mut cursor = Cursor::new(W, H);
+        let mut d = Driver::new();
         let mut ever_shown_after_drag = false;
         let mut moved = false;
         for step in MOUSE_SCRIPT {
-            cursor.apply(step.dx, step.dy, W, H);
-            match wm.apply(cursor, step.buttons) {
+            match d.feed(step.buttons, step.dx, step.dy) {
                 Action::Moved => {
                     moved = true;
-                    ever_shown_after_drag = wm.is_shown();
+                    ever_shown_after_drag = d.wm.is_shown();
                 }
                 Action::Restored => ever_shown_after_drag = true,
                 _ => {}
@@ -716,49 +804,6 @@ mod tests {
         assert!(ever_shown_after_drag, "the window was never shown after the drag");
     }
 
-    /// What one run of the boot proof's mouse script produced.
-    struct Replay {
-        window: Rect,
-        rect: Rect,
-        shown: bool,
-        dragging: bool,
-        moved: bool,
-        minimized: bool,
-        restored: bool,
-        closed: bool,
-        pointer: Cursor,
-    }
-
-    fn replay_script() -> Replay {
-        let mut wm = start();
-        let mut cursor = Cursor::new(W, H);
-        let mut moved = false;
-        let mut minimized = false;
-        let mut restored = false;
-        let mut closed = false;
-        for step in MOUSE_SCRIPT {
-            cursor.apply(step.dx, step.dy, W, H);
-            match wm.apply(cursor, step.buttons) {
-                Action::Moved => moved = true,
-                Action::Minimized => minimized = true,
-                Action::Restored => restored = true,
-                Action::Closed => closed = true,
-                _ => {}
-            }
-        }
-        Replay {
-            window: wm.window(),
-            rect: wm.rect(),
-            shown: wm.is_shown(),
-            dragging: wm.is_dragging(),
-            moved,
-            minimized,
-            restored,
-            closed,
-            pointer: cursor,
-        }
-    }
-
     #[test]
     fn two_runs_over_the_same_reports_agree() {
         // The whole point of the module: the compositor and the verifier each
@@ -766,6 +811,7 @@ mod tests {
         // same visibility.
         let replay = || {
             let mut wm = start();
+            let mut input = Input::new();
             let mut cursor = Cursor::new(W, H);
             let mut trail = [Action::None; 64];
             let mut at = 0;
@@ -773,8 +819,9 @@ mod tests {
                 if at == trail.len() {
                     break;
                 }
+                let event = input.report(step.buttons, step.dx, step.dy);
                 cursor.apply(step.dx, step.dy, W, H);
-                trail[at] = wm.apply(cursor, step.buttons);
+                trail[at] = wm.apply(cursor, event);
                 at += 1;
             }
             (wm.rect(), wm.window(), wm.is_shown(), at, trail)
