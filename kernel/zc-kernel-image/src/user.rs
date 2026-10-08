@@ -2184,6 +2184,10 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface) {
     // The content is the terminal screen the kernel served the client. The
     // kernel derives it from its own mount table, so the scripted `cat` proves
     // the client read the same bytes through the VFS.
+    //
+    // The font loads before the read counter resets, so the "script read a
+    // file" check below still measures the scripted session, not this load.
+    let font = verifier_font();
     // SAFETY: owned here; reset before the replay.
     unsafe { addr_of_mut!(WINDOW_VFS_READS).write(0) };
     let mut terminal = Term::new();
@@ -2218,7 +2222,7 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface) {
             if cursor.color_at(window.x + lx, window.y + ly).is_none() {
                 hash = hash_step(hash, pixel);
             }
-            let Some(expected) = terminal.pixel(format, lx, ly, surface.width, surface.height)
+            let Some(expected) = terminal.pixel(font, format, lx, ly, surface.width, surface.height)
             else {
                 crate::fail("unsupported window format");
             };
@@ -2287,6 +2291,9 @@ fn verify_framebuffer() {
     // is what makes the desktop half of the check exact after a drag.
     let window = expected_window();
 
+    // The desktop half renders from the same initramfs font the client and
+    // compositor painted with; a different table here would fail the hash.
+    let font = verifier_font();
     let width = u64::from(info.width);
     let height = u64::from(info.height);
     let stride = u64::from(info.stride);
@@ -2316,6 +2323,7 @@ fn verify_framebuffer() {
                 actual_window = hash_step(actual_window, seen);
             } else {
                 let Some(expected) = pixel_at_with_window(
+                    font,
                     info.pixel_format,
                     x as u32,
                     y as u32,
@@ -3648,6 +3656,61 @@ static mut WINDOW_SURFACE: Option<u32> = None;
 /// and the frame checksum compares the display's window region against this
 /// snapshot — the placement proof for content the kernel cannot recompute.
 static mut WINDOW_SNAPSHOT: Option<u64> = None;
+
+/// The canonical font file's bytes, loaded once for the frame verifier.
+///
+/// The client and the compositor load the same initramfs asset through their
+/// own syscalls; the verifier reads it through its mount table here, so all
+/// three render from one file instead of three baked-in copies.
+static mut VERIFIER_FONT_BUF: [u8; zc_abi::FONT_LEN] = [0; zc_abi::FONT_LEN];
+
+/// The verifier's font table once loaded: `Some` on success, `None` when the
+/// asset failed and every side shares the baked-in fallback.
+///
+/// Stored rather than retried so the load — and its marker — happens exactly
+/// once per boot, whichever verify path runs first.
+static mut VERIFIER_FONT: Option<zc_abi::Font<'static>> = None;
+
+/// Whether [`VERIFIER_FONT`] has been decided yet.
+static mut VERIFIER_FONT_TRIED: bool = false;
+
+/// The font table the frame verifier renders from.
+///
+/// Loads [`zc_abi::FONT_PATH`] through the mount table on first use and shares
+/// the client's fallback on any failure: a missing or truncated asset degrades
+/// identically on every side instead of splitting the frame proof. Logs which
+/// source won, once, so CI can grep it.
+fn verifier_font() -> zc_abi::Font<'static> {
+    // SAFETY: decided once before any verify; read-only afterwards.
+    if unsafe { core::ptr::addr_of!(VERIFIER_FONT_TRIED).read() } {
+        return unsafe { core::ptr::addr_of!(VERIFIER_FONT).read() }
+            .unwrap_or(zc_abi::Font::embedded());
+    }
+    let mut buf = [0u8; zc_abi::FONT_LEN];
+    let loaded = kernel_read_file(zc_abi::FONT_PATH, &mut buf).is_some_and(|n| n == zc_abi::FONT_LEN);
+    let font = if loaded {
+        // SAFETY: validated above; never written again.
+        unsafe {
+            core::ptr::addr_of_mut!(VERIFIER_FONT_BUF).write(buf);
+        }
+        let font = unsafe { zc_abi::Font::load(&*core::ptr::addr_of!(VERIFIER_FONT_BUF)) };
+        if font.is_some() {
+            crate::serial::write_str("font: vfs ok\n");
+        } else {
+            crate::serial::write_str("font: embedded fallback\n");
+        }
+        font
+    } else {
+        crate::serial::write_str("font: embedded fallback\n");
+        None
+    };
+    // SAFETY: decided here, once; read-only afterwards.
+    unsafe {
+        core::ptr::addr_of_mut!(VERIFIER_FONT).write(font);
+        core::ptr::addr_of_mut!(VERIFIER_FONT_TRIED).write(true);
+    }
+    font.unwrap_or(zc_abi::Font::embedded())
+}
 
 /// Appends keyboard bytes to the window queue.
 fn push_window_input(bytes: &[u8]) {

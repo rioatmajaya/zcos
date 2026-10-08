@@ -37,6 +37,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0028](0028-boot-watchdog-only-in-test-builds.md) | The boot watchdog is armed only in test builds | Accepted |
 | [0029](0029-two-scripted-sessions.md) | Two scripted sessions, one per final-frame proof | Accepted |
 | [0030](0030-the-pointer-has-one-owner.md) | The pointer has exactly one owner | Accepted |
+| [0031](0031-font-loads-from-the-vfs.md) | The font loads from the VFS, on every side | Accepted |
 
 ## Adding a decision
 

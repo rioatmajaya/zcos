@@ -7,7 +7,7 @@
 
 use crate::PixelFormat;
 use crate::fb::encode;
-use crate::font::{GLYPH_H, text_blend, text_width};
+use crate::font::{Font, GLYPH_H, text_blend, text_width};
 
 /// Height of the top panel, clamped for very short displays.
 pub const PANEL_HEIGHT: u32 = 32;
@@ -293,9 +293,12 @@ pub const fn window_rect(frame: u32, width: u32, height: u32) -> Rect {
 /// client's own (live) terminal surface over the window; the kernel's frame
 /// verifier replaces the window region with the client's expected terminal
 /// state, so the live content is proven rather than assumed.
+///
+/// Takes the loaded [`Font`] both sides render from, so the placeholder and
+/// the live terminal cannot disagree about a glyph.
 #[must_use]
-pub const fn window_color_at(lx: u32, ly: u32, w: u32, h: u32) -> (u8, u8, u8) {
-    crate::terminal::INITIAL.render(lx, ly, w, h)
+pub const fn window_color_at(font: Font<'_>, lx: u32, ly: u32, w: u32, h: u32) -> (u8, u8, u8) {
+    crate::terminal::INITIAL.render(font, lx, ly, w, h)
 }
 
 /// Height of a taskbar button.
@@ -368,9 +371,10 @@ pub const fn task_button_rect(height: u32) -> Rect {
 /// shared bitmap font, so the kernel's frame verifier recomputes it and the
 /// checksum proves it renders. The buttons go through
 /// [`launcher_button_rect`] and [`task_button_rect`] so the painted region and
-/// the clickable region cannot drift apart.
+/// the clickable region cannot drift apart. The font is the table both sides
+/// loaded from the initramfs asset.
 #[must_use]
-pub const fn panel_color_at(x: u32, y: u32, width: u32, height: u32) -> (u8, u8, u8) {
+pub const fn panel_color_at(font: Font<'_>, x: u32, y: u32, width: u32, height: u32) -> (u8, u8, u8) {
     let panel = panel_height(height);
     if panel == 0 {
         return PANEL_BG;
@@ -381,6 +385,7 @@ pub const fn panel_color_at(x: u32, y: u32, width: u32, height: u32) -> (u8, u8,
     let launcher = launcher_button_rect(height);
     if launcher.contains(x, y) {
         return button_label(
+            font,
             LAUNCHER_LABEL,
             launcher.x,
             launcher.w,
@@ -392,14 +397,14 @@ pub const fn panel_color_at(x: u32, y: u32, width: u32, height: u32) -> (u8, u8,
     }
     let task = task_button_rect(height);
     if task.contains(x, y) {
-        return button_label(TASK_LABEL, task.x, task.w, x, y, ty, TASK_BG);
+        return button_label(font, TASK_LABEL, task.x, task.w, x, y, ty, TASK_BG);
     }
     // Clock, right-aligned with an 8px margin.
     let clock_w = text_width(CLOCK_LABEL);
     if width > clock_w + 8 {
         let clock_x = width - 8 - clock_w;
         if x >= clock_x && x < clock_x + clock_w {
-            return text_blend(CLOCK_LABEL, clock_x, ty, x, y, PANEL_BG, CLOCK_FG);
+            return text_blend(font, CLOCK_LABEL, clock_x, ty, x, y, PANEL_BG, CLOCK_FG);
         }
     }
     PANEL_BG
@@ -408,6 +413,7 @@ pub const fn panel_color_at(x: u32, y: u32, width: u32, height: u32) -> (u8, u8,
 /// Renders a centered button label over a fill color.
 #[must_use]
 const fn button_label(
+    font: Font<'_>,
     label: &str,
     x: u32,
     w: u32,
@@ -418,7 +424,7 @@ const fn button_label(
 ) -> (u8, u8, u8) {
     let tw = text_width(label);
     let tx = if w > tw { x + (w - tw) / 2 } else { x + 2 };
-    text_blend(label, tx, ty, px, py, fill, BUTTON_FG)
+    text_blend(font, label, tx, ty, px, py, fill, BUTTON_FG)
 }
 
 /// Returns the `(red, green, blue)` channels of one desktop pixel, given the
@@ -428,9 +434,11 @@ const fn button_label(
 /// proof's two deterministic frames. A desktop whose window has since been
 /// dragged must be recomputed against the rectangle it really occupies, or the
 /// verifier would compare the screen against a window that is no longer there —
-/// so painter and verifier call this with the placement they agree on.
+/// so painter and verifier call this with the placement they agree on. The font
+/// is the table both sides loaded from the initramfs asset.
 #[must_use]
 pub const fn color_at_with_window(
+    font: Font<'_>,
     x: u32,
     y: u32,
     width: u32,
@@ -438,10 +446,10 @@ pub const fn color_at_with_window(
     window: Rect,
 ) -> (u8, u8, u8) {
     if window.contains(x, y) {
-        return window_color_at(x - window.x, y - window.y, window.w, window.h);
+        return window_color_at(font, x - window.x, y - window.y, window.w, window.h);
     }
     if y < panel_height(height) {
-        return panel_color_at(x, y, width, height);
+        return panel_color_at(font, x, y, width, height);
     }
     // Background: a vertical/horizontal gradient, guarded for empty sizes.
     let r = if width == 0 {
@@ -467,14 +475,15 @@ pub const fn color_at_with_window(
 /// The layout is a background gradient, a top taskbar, and one window with a
 /// border, a title bar, and a body.
 #[must_use]
-pub const fn color_at(x: u32, y: u32, width: u32, height: u32, frame: u32) -> (u8, u8, u8) {
-    color_at_with_window(x, y, width, height, window_rect(frame, width, height))
+pub const fn color_at(font: Font<'_>, x: u32, y: u32, width: u32, height: u32, frame: u32) -> (u8, u8, u8) {
+    color_at_with_window(font, x, y, width, height, window_rect(frame, width, height))
 }
 
 /// Encodes one desktop pixel for `format` against a specific window rectangle,
 /// or `None` when the format has no direct 32-bit encoding.
 #[must_use]
 pub const fn pixel_at_with_window(
+    font: Font<'_>,
     format: PixelFormat,
     x: u32,
     y: u32,
@@ -482,7 +491,7 @@ pub const fn pixel_at_with_window(
     height: u32,
     window: Rect,
 ) -> Option<u32> {
-    let (r, g, b) = color_at_with_window(x, y, width, height, window);
+    let (r, g, b) = color_at_with_window(font, x, y, width, height, window);
     encode(format, r, g, b)
 }
 
@@ -490,6 +499,7 @@ pub const fn pixel_at_with_window(
 /// direct 32-bit encoding.
 #[must_use]
 pub const fn pixel_at(
+    font: Font<'_>,
     format: PixelFormat,
     x: u32,
     y: u32,
@@ -497,7 +507,7 @@ pub const fn pixel_at(
     height: u32,
     frame: u32,
 ) -> Option<u32> {
-    let (r, g, b) = color_at(x, y, width, height, frame);
+    let (r, g, b) = color_at(font, x, y, width, height, frame);
     encode(format, r, g, b)
 }
 
@@ -508,13 +518,14 @@ pub const fn pixel_at(
 /// result anywhere and the kernel's frame checksum still matches.
 #[must_use]
 pub const fn window_pixel_at(
+    font: Font<'_>,
     format: PixelFormat,
     lx: u32,
     ly: u32,
     w: u32,
     h: u32,
 ) -> Option<u32> {
-    let (r, g, b) = window_color_at(lx, ly, w, h);
+    let (r, g, b) = window_color_at(font, lx, ly, w, h);
     encode(format, r, g, b)
 }
 
@@ -556,15 +567,15 @@ mod tests {
 
     #[test]
     fn colors_are_deterministic_and_distinct_by_region() {
-        let panel = color_at(200, 4, 1280, 800, FRAME_INITIAL);
-        let background = color_at(200, 700, 1280, 800, FRAME_INITIAL);
+        let panel = color_at(Font::embedded(), 200, 4, 1280, 800, FRAME_INITIAL);
+        let background = color_at(Font::embedded(), 200, 700, 1280, 800, FRAME_INITIAL);
         let window = window_rect(FRAME_INITIAL, 1280, 800);
-        let body = color_at(window.x + 10, window.y + TITLE_HEIGHT + 10, 1280, 800, FRAME_INITIAL);
+        let body = color_at(Font::embedded(), window.x + 10, window.y + TITLE_HEIGHT + 10, 1280, 800, FRAME_INITIAL);
         assert_ne!(panel, background);
         assert_ne!(panel, body);
-        assert_eq!(panel, color_at(200, 4, 1280, 800, FRAME_INITIAL));
+        assert_eq!(panel, color_at(Font::embedded(), 200, 4, 1280, 800, FRAME_INITIAL));
         // Degenerate sizes must not divide by zero.
-        let _ = color_at(0, 0, 0, 0, FRAME_INITIAL);
+        let _ = color_at(Font::embedded(), 0, 0, 0, 0, FRAME_INITIAL);
     }
 
     #[test]
@@ -579,8 +590,8 @@ mod tests {
                 let mut lx = 0;
                 while lx < window.w {
                     assert_eq!(
-                        color_at(window.x + lx, window.y + ly, 1280, 800, frame),
-                        window_color_at(lx, ly, window.w, window.h),
+                        color_at(Font::embedded(), window.x + lx, window.y + ly, 1280, 800, frame),
+                        window_color_at(Font::embedded(), lx, ly, window.w, window.h),
                     );
                     lx += 1;
                 }
@@ -588,8 +599,8 @@ mod tests {
             }
         }
         // Degenerate sizes must not underflow the border check.
-        let _ = window_color_at(0, 0, 0, 0);
-        let _ = window_color_at(0, 0, 1, 1);
+        let _ = window_color_at(Font::embedded(), 0, 0, 0, 0);
+        let _ = window_color_at(Font::embedded(), 0, 0, 1, 1);
     }
 
     #[test]
@@ -606,7 +617,7 @@ mod tests {
         while ly < TITLE_HEIGHT {
             let mut lx = 0;
             while lx < w {
-                let c = window_color_at(lx, ly, w, h);
+                let c = window_color_at(Font::embedded(), lx, ly, w, h);
                 if c == fg {
                     found_fg = true;
                 }
@@ -633,7 +644,7 @@ mod tests {
         while y < panel {
             let mut x = 0;
             while x < width {
-                let c = panel_color_at(x, y, width, height);
+                let c = panel_color_at(Font::embedded(), x, y, width, height);
                 if c == LAUNCHER_BG {
                     saw_launcher = true;
                 } else if c == TASK_BG {
@@ -655,12 +666,12 @@ mod tests {
 
     #[test]
     fn pixel_at_encodes_per_format() {
-        let rgb = pixel_at(PixelFormat::Rgbx8888, 0, 4, 1280, 800, FRAME_INITIAL);
-        let bgr = pixel_at(PixelFormat::Bgrx8888, 0, 4, 1280, 800, FRAME_INITIAL);
+        let rgb = pixel_at(Font::embedded(), PixelFormat::Rgbx8888, 0, 4, 1280, 800, FRAME_INITIAL);
+        let bgr = pixel_at(Font::embedded(), PixelFormat::Bgrx8888, 0, 4, 1280, 800, FRAME_INITIAL);
         assert!(rgb.is_some());
         assert!(bgr.is_some());
         assert_ne!(rgb, bgr);
-        assert_eq!(pixel_at(PixelFormat::Bitmask, 0, 0, 64, 64, 0), None);
+        assert_eq!(pixel_at(Font::embedded(), PixelFormat::Bitmask, 0, 0, 64, 64, 0), None);
     }
 
     #[test]
@@ -675,8 +686,8 @@ mod tests {
                 let mut x = 0;
                 while x < 1280 {
                     assert_eq!(
-                        color_at(x, y, 1280, 800, frame),
-                        color_at_with_window(x, y, 1280, 800, window)
+                        color_at(Font::embedded(), x, y, 1280, 800, frame),
+                        color_at_with_window(Font::embedded(), x, y, 1280, 800, window)
                     );
                     x += 64;
                 }
@@ -699,8 +710,8 @@ mod tests {
             while x < 1280 {
                 if !from.contains(x, y) && !to.contains(x, y) {
                     assert_eq!(
-                        color_at_with_window(x, y, 1280, 800, from),
-                        color_at_with_window(x, y, 1280, 800, to)
+                        color_at_with_window(Font::embedded(), x, y, 1280, 800, from),
+                        color_at_with_window(Font::embedded(), x, y, 1280, 800, to)
                     );
                     compared += 1;
                 }
@@ -716,8 +727,8 @@ mod tests {
         assert!(from.contains(vacated, from.y + 40));
         assert!(!to.contains(vacated, from.y + 40));
         assert_eq!(
-            color_at_with_window(vacated, from.y + 40, 1280, 800, to),
-            color_at_with_window(vacated, from.y + 40, 1280, 800, Rect::EMPTY)
+            color_at_with_window(Font::embedded(), vacated, from.y + 40, 1280, 800, to),
+            color_at_with_window(Font::embedded(), vacated, from.y + 40, 1280, 800, Rect::EMPTY)
         );
     }
 

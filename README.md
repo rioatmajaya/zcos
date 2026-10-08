@@ -145,7 +145,11 @@ the kernel derives where the window ended up and still recomputes the desktop
 around it exactly. The `-` glyph minimizes the window and the taskbar's task
 button restores it, and the `x` glyph closes the session — a hidden window's
 rectangle is simply empty, so the same exact check covers the desktop it leaves
-behind. See
+behind. The 8x16 bitmap font itself is an initramfs asset now
+(`initramfs/font8x16.raw`): the client, the compositor, and the kernel verifier
+each load it through the F7 VFS and render every glyph from it, with the baked-in
+copy as a shared fallback — see
+[ADR 0031](docs/adr/0031-font-loads-from-the-vfs.md). See
 [ADR 0016](docs/adr/0016-window-client-delegation.md),
 [ADR 0018](docs/adr/0018-window-placement-proof.md),
 [ADR 0024](docs/adr/0024-window-dragging-and-hit-testing.md),

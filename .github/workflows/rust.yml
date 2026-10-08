@@ -173,6 +173,12 @@ jobs:
         grep -q "wm: content ok" build/boot.log
         grep -q "wm: vfs content ok" build/boot.log
         grep -q "task 8: client: vfs ok" build/boot.log
+        # The font is an initramfs asset now (ADR 0031): all three text
+        # renderers load it through the VFS, and none may silently fall back.
+        grep -q "task 8: client: font vfs ok" build/boot.log
+        grep -q "task 3: compositor: font vfs ok" build/boot.log
+        grep -q "font: vfs ok" build/boot.log
+        ! grep -q "font embedded fallback" build/boot.log
         ! grep -q "window script read no file" build/boot.log
         ! grep -q "window content mismatch" build/boot.log
         # The pointer is composited topmost and the kernel recomputes its sprite
@@ -201,7 +207,7 @@ jobs:
         grep -q "fb: desktop checksum ok" build/boot.log
         grep -q "switches" build/boot.log
         grep -q "acpi: rsdp v2" build/boot.log
-        grep -q "initramfs: 11 files" build/boot.log
+        grep -q "initramfs: 12 files" build/boot.log
         grep -q "task 4: blk: resuming" build/boot.log
         grep -q "task 7: initd: blk down" build/boot.log
         grep -q "task 7: service blk started, task 4 revived" build/boot.log
@@ -243,6 +249,12 @@ jobs:
         # every pixel, including the vacated footprint, recomputes exactly.
         grep -q "fb: no window, placement skipped" build/boot-close.log
         grep -q "wm: content ok" build/boot-close.log
+        # Same font pipeline as the window-up run: the close run drags,
+        # minimizes, and restores before closing, so all three sides render.
+        grep -q "task 8: client: font vfs ok" build/boot-close.log
+        grep -q "task 3: compositor: font vfs ok" build/boot-close.log
+        grep -q "font: vfs ok" build/boot-close.log
+        ! grep -q "font embedded fallback" build/boot-close.log
         grep -q "fb: desktop checksum ok" build/boot-close.log
         ! grep -q "cursor checksum mismatch" build/boot-close.log
         ! grep -q "desktop checksum mismatch" build/boot-close.log

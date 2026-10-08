@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 7 grants`, `task 6: devmgr: blk published`, `dma: window coherent ok` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–7, F8e-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `client: vfs ok`; `wm: window mapped`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed` (close run); `compositor: window erased` (close run); `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui host tests pass |
+| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–7, F8e-1–2, live-input check, F8g-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: font vfs ok`; `compositor: font vfs ok`; `font: vfs ok`; `client: window painted`; `client: vfs ok`; `wm: window mapped`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed` (close run); `compositor: window erased` (close run); `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui host tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -718,7 +718,27 @@ full browser. Note them as follow-ups, do not build them here.
       them with no compositor, client, or kernel change. Host tests cover the
       taskbar buttons, labels, background, and both decoration glyphs. A live
       (non-fixed) clock and multi-window focus are follow-ups.
-- [ ] F8g: fonts and assets loaded from the F7 VFS, not baked into binaries.
+- [x] F8g-1: the font loads from the VFS. `initramfs/font8x16.raw` (1536 bytes)
+      is the canonical 8x16 bitmap font; `zc_abi::font::Font` is the only way to
+      render text — `Font::load` accepts exactly `FONT_LEN` bytes, and every
+      text function (`glyph_row`, `text_blend`, `Term::render`, `panel_color_at`,
+      the whole `color_at`/`pixel_at` chain) takes a `Font`, so there is no
+      ambient default to drift from. The client, the compositor (through the
+      ungated `SYS_OPEN`/`SYS_READ` — no capability change), and the kernel
+      verifier (through its mount table) load the same file; any failure falls
+      back to the shared baked-in bytes through the same logic, so agreement
+      survives a missing asset. Each side logs its source and CI greps the
+      `vfs ok` markers while asserting the fallback is absent. Both boot
+      checksums are unchanged, which is the evidence the pipeline moved the
+      bytes without changing them. Mutation-checked both ways: a truncated file
+      keeps the boot green with the markers absent (shared fallback), and a
+      flipped glyph byte keeps it green with a *changed* checksum value (the
+      file is rendered from, not merely validated). The 512-byte syscall read
+      limit bit once — `read` past `MAX_USER_IO_LEN` fails closed, so the
+      loaders fill the table in chunks. See
+      [`adr/0031`](adr/0031-font-loads-from-the-vfs.md).
+- [ ] F8g-2+: more assets through the same pipeline (icons, themes), and a real
+      font format — PSF/Truetype shaping was deferred to F8e/F8g back in F8c.
 - [ ] F8h: minimum daily apps — file manager, settings, clock/calendar.
 - [ ] F8i: audio stack (virtio-snd first, then HD Audio) after the desktop is
       stable.
@@ -799,6 +819,16 @@ full browser. Note them as follow-ups, do not build them here.
   still on screen for `fb: desktop checksum ok` to placement-check against the
   client's surface. The close run asserts the mirror image. Together the two runs
   cover both claims; neither alone can.
+- The font is a VFS asset, not a baked-in constant (F8g-1): the boot logs
+  `task 8: client: font vfs ok`, `task 3: compositor: font vfs ok`, and
+  `font: vfs ok` (the verifier's load through its own mount table), and asserts
+  `font embedded fallback` is absent. Both `fb: desktop checksum ok` values are
+  unchanged, so the pipeline moved the bytes without changing them.
+- Live input reaches the window (F8e follow-up): `tools/check-live-input.sh`
+  boots the interactive image, checks the idle desktop is byte-stable, types
+  `cat hello.txt` + Enter through QEMU's monitor, and asserts the frame changed
+  with the session still healthy — the boot checks only prove the scripted
+  frame. Mutation-checked: a client that ignores keystrokes fails it.
 - Clean shutdown: `power: halt clean`.
 - Audio plays a known tone and the driver reports no XRUN under a stress
   buffer: `snd: playback ok`.

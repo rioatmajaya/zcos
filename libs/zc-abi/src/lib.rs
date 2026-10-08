@@ -47,7 +47,7 @@ pub use desktop::{
     TITLE_HEIGHT, color_at, color_at_with_window, hash_step, launcher_button_rect, panel_height,
     pixel_at, pixel_at_with_window, task_button_rect, window_color_at, window_pixel_at, window_rect,
 };
-pub use font::{GLYPH_H, GLYPH_W, glyph_bit, glyph_row, text_blend, text_width};
+pub use font::{FONT_LEN, FONT_PATH, GLYPH_H, GLYPH_W, Font, glyph_bit, glyph_row, text_blend, text_width};
 pub use ipc::{
     IPC_CHANNELS, IPC_DATA, IPC_DISCOVERY, IPC_FS, IPC_FS_REPLY, IPC_SUPERVISE, IPC_WM,
     IPC_WM_REPLY, MESSAGE_WORDS, Message, WM_ACK, WM_DONE, WM_MOUSE,

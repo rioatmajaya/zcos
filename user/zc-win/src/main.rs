@@ -22,12 +22,54 @@
 #![allow(unsafe_code)]
 
 use zc_abi::terminal::{Term, run_command};
-use zc_abi::{IPC_WM, IPC_WM_REPLY, PixelFormat, SurfaceInfo, WM_ACK, WM_DONE};
+use zc_abi::{FONT_LEN, FONT_PATH, Font, IPC_WM, IPC_WM_REPLY, PixelFormat, SurfaceInfo, WM_ACK, WM_DONE};
 use zc_ui::Keys;
 use zc_user::{close, log, open, read, recv_from, send_to, surface_map, task_exit};
 
 /// Whether the client has logged its first successful VFS read.
 static mut VFS_LOGGED: bool = false;
+
+/// The font file's bytes, filled once at startup before the first paint.
+///
+/// A plain buffer rather than something fancier: the task is `no_std` with no
+/// allocator, and one 1536-byte static is exactly the table the renderer needs.
+static mut FONT_BUF: [u8; FONT_LEN] = [0; FONT_LEN];
+
+/// Loads the canonical font through the VFS, or the shared baked-in fallback.
+///
+/// Reads [`FONT_PATH`] through the same syscalls `cat` uses and validates the
+/// length through [`Font::load`]. Every side — client, compositor, kernel
+/// verifier — runs this same logic over the same file, so a missing or
+/// truncated asset degrades identically everywhere instead of splitting the
+/// frame proof. The marker tells CI which source rendered the window.
+fn load_font() -> Font<'static> {
+    // SAFETY: written once here before any paint; never shared mutably after.
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(FONT_BUF) };
+    let path = core::str::from_utf8(FONT_PATH).unwrap_or("font8x16.raw");
+    let fd = open(path);
+    if fd != u64::MAX {
+        let mut at = 0;
+        while at < FONT_LEN {
+            // One syscall reads at most 512 bytes (`MAX_USER_IO_LEN`), so the
+            // buffer is filled in chunks; a short read just ends the loop.
+            let end = (at + 512).min(FONT_LEN);
+            let got = read(fd, &mut buf[at..end]);
+            if got == u64::MAX || got == 0 {
+                break;
+            }
+            at += got as usize;
+        }
+        close(fd);
+        if at == FONT_LEN {
+            log("client: font vfs ok\n");
+            // SAFETY: `FONT_BUF` holds exactly `FONT_LEN` validated bytes and
+            // is never written again; the borrow outlives every paint.
+            return unsafe { Font::load(&*core::ptr::addr_of!(FONT_BUF)).unwrap() };
+        }
+    }
+    log("client: font embedded fallback\n");
+    Font::embedded()
+}
 
 /// Task entry point; the kernel provides a fresh user stack.
 #[unsafe(no_mangle)]
@@ -42,10 +84,14 @@ pub unsafe extern "C" fn _start() -> ! {
         let pixels = mapped as *mut u32;
         let mut terminal = Term::new();
         log("client: terminal ready\n");
+        // The canonical font, loaded once: every pixel below renders from the
+        // initramfs asset the kernel verifier loads too.
+        let font = load_font();
         // Paint the initial prompt so the compositor can composite frame 0,
         // then repaint and acknowledge once per keystroke.
         paint(
             &terminal,
+            font,
             pixels,
             surface.stride,
             format,
@@ -69,6 +115,7 @@ pub unsafe extern "C" fn _start() -> ! {
             }
             paint(
                 &terminal,
+                font,
                 pixels,
                 surface.stride,
                 format,
@@ -117,6 +164,7 @@ fn read_file(path: &[u8], out: &mut [u8]) -> Option<usize> {
 /// Fills the window surface with the terminal's rendered screen.
 fn paint(
     terminal: &Term,
+    font: Font<'_>,
     pixels: *mut u32,
     stride: u32,
     format: PixelFormat,
@@ -127,7 +175,7 @@ fn paint(
     while y < height {
         let mut x = 0;
         while x < width {
-            if let Some(pixel) = terminal.pixel(format, x, y, width, height) {
+            if let Some(pixel) = terminal.pixel(font, format, x, y, width, height) {
                 // SAFETY: the kernel mapped `stride * height` pixels at
                 // `pixels` with user permissions and `(x, y)` stays inside.
                 unsafe {

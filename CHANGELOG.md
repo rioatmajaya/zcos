@@ -125,6 +125,18 @@ still learns no address.
 
 ### Added
 
+- **The font loads from the VFS instead of three baked-in copies** (F8g-1):
+  `initramfs/font8x16.raw` is the canonical 8x16 bitmap font and
+  `zc_abi::font::Font` is the only way to render text — every text function
+  takes a `Font`, so no two sides can disagree about a glyph. The client, the
+  compositor, and the kernel verifier load the same file and share one fallback.
+  Both boot checksums are unchanged, which is the evidence the bytes moved
+  without changing. Mutation-checked both ways: a truncated file boots green
+  with the `vfs ok` markers absent (shared fallback holds), and a flipped glyph
+  byte boots green with a *changed* checksum value (the file is rendered from,
+  not merely validated). Fixed a real bug the move exposed: a single `read`
+  past the 512-byte syscall limit fails closed, so the loaders fill the table
+  in chunks. See [ADR 0031](docs/adr/0031-font-loads-from-the-vfs.md).
 - **A live-input proof, because the boot checks never tested one** (F8e-2):
   `tools/check-live-input.sh` boots the real image headless, checks the idle
   desktop is byte-stable across two dumps, types `cat hello.txt` and Enter through

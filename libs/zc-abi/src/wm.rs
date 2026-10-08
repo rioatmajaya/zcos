@@ -477,7 +477,7 @@ mod tests {
         while ly < strip.bottom() {
             let mut lx = strip.x;
             while lx < strip.right() {
-                match term.render(lx - window.x, ly - window.y, window.w, window.h) {
+                match term.render(crate::font::Font::embedded(), lx - window.x, ly - window.y, window.w, window.h) {
                     crate::terminal::DECORATION_MIN_COLOR => saw_min = true,
                     crate::terminal::DECORATION_CLOSE_COLOR => saw_close = true,
                     _ => {}

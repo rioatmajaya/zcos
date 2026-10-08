@@ -22,18 +22,58 @@
 #![allow(unsafe_code)]
 
 use zc_abi::{
-    Cursor, DamageList, FRAME_INITIAL, FRAME_MOVED, FramebufferInfo, IPC_WM, IPC_WM_REPLY,
-    Action, PixelFormat, Rect, SurfaceInfo, WM_ACK, WM_DONE, Wm, encode, pixel_at,
-    pixel_at_with_window, window_rect,
+    Cursor, DamageList, FONT_LEN, FONT_PATH, FRAME_INITIAL, FRAME_MOVED, FramebufferInfo, Font,
+    IPC_WM, IPC_WM_REPLY, Action, PixelFormat, Rect, SurfaceInfo, WM_ACK, WM_DONE, Wm, encode,
+    pixel_at, pixel_at_with_window, window_rect,
 };
 use zc_ui::Pointer;
 use zc_user::{
-    cap_delegate, framebuffer_info, log, recv_from, send_to, surface_create, surface_destroy,
-    surface_map, task_exit, window_close,
+    cap_delegate, close, framebuffer_info, log, open, read, recv_from, send_to, surface_create,
+    surface_destroy, surface_map, task_exit, window_close,
 };
 
 /// Damage rectangles the compositor tracks before collapsing to a full repaint.
 const DAMAGE_SLOTS: usize = 16;
+
+/// The font file's bytes, filled once at startup before the first frame.
+///
+/// One 1536-byte static, like the client's: the panel labels render from the
+/// initramfs asset the client and the kernel verifier load too.
+static mut FONT_BUF: [u8; FONT_LEN] = [0; FONT_LEN];
+
+/// Loads the canonical font through the VFS, or the shared baked-in fallback.
+///
+/// Same logic as the client's loader over the same file: a missing or truncated
+/// asset degrades identically everywhere instead of splitting the frame proof.
+/// The marker tells CI which source painted the panel.
+fn load_font() -> Font<'static> {
+    // SAFETY: written once here before any paint; never shared mutably after.
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(FONT_BUF) };
+    let path = core::str::from_utf8(FONT_PATH).unwrap_or("font8x16.raw");
+    let fd = open(path);
+    if fd != u64::MAX {
+        let mut at = 0;
+        while at < FONT_LEN {
+            // One syscall reads at most 512 bytes (`MAX_USER_IO_LEN`), so the
+            // buffer is filled in chunks; a short read just ends the loop.
+            let end = (at + 512).min(FONT_LEN);
+            let got = read(fd, &mut buf[at..end]);
+            if got == u64::MAX || got == 0 {
+                break;
+            }
+            at += got as usize;
+        }
+        close(fd);
+        if at == FONT_LEN {
+            log("compositor: font vfs ok\n");
+            // SAFETY: `FONT_BUF` holds exactly `FONT_LEN` validated bytes and
+            // is never written again; the borrow outlives every frame.
+            return unsafe { Font::load(&*core::ptr::addr_of!(FONT_BUF)).unwrap() };
+        }
+    }
+    log("compositor: font embedded fallback\n");
+    Font::embedded()
+}
 
 /// Task index of the window client the compositor delegates the window to.
 ///
@@ -58,7 +98,10 @@ pub unsafe extern "C" fn _start() -> ! {
     let height = fb.height;
     // Surfaces are 32-bit pixels; refuse a format we cannot encode rather
     // than paint nothing.
-    if pixel_at(format, 0, 0, width, height, FRAME_INITIAL).is_none() {
+    // The canonical font, loaded once: every label below renders from the
+    // initramfs asset the client and the kernel verifier load too.
+    let font = load_font();
+    if pixel_at(font, format, 0, 0, width, height, FRAME_INITIAL).is_none() {
         log("compositor: unsupported format\n");
         let _ = send_to(IPC_WM as u64, 0);
         task_exit()
@@ -142,6 +185,7 @@ pub unsafe extern "C" fn _start() -> ! {
         back,
         &fb,
         format,
+        font,
         width,
         height,
         surface.stride,
@@ -171,6 +215,7 @@ pub unsafe extern "C" fn _start() -> ! {
             back,
             &fb,
             format,
+            font,
             width,
             height,
             surface.stride,
@@ -239,6 +284,7 @@ pub unsafe extern "C" fn _start() -> ! {
             back,
             &fb,
             format,
+            font,
             width,
             height,
             surface.stride,
@@ -300,6 +346,7 @@ pub unsafe extern "C" fn _start() -> ! {
                 back,
                 &fb,
                 format,
+                font,
                 width,
                 height,
                 surface.stride,
@@ -320,6 +367,7 @@ pub unsafe extern "C" fn _start() -> ! {
             back,
             &fb,
             format,
+            font,
             width,
             height,
             surface.stride,
@@ -353,6 +401,7 @@ pub unsafe extern "C" fn _start() -> ! {
             back,
             &fb,
             format,
+            font,
             width,
             height,
             surface.stride,
@@ -383,6 +432,7 @@ fn paint_rect(
     back: *mut u32,
     stride: u32,
     format: PixelFormat,
+    font: Font<'_>,
     width: u32,
     height: u32,
     rect: Rect,
@@ -398,7 +448,7 @@ fn paint_rect(
     while y < bottom {
         let mut x = rect.x;
         while x < right {
-            if let Some(pixel) = pixel_at_with_window(format, x, y, width, height, window) {
+            if let Some(pixel) = pixel_at_with_window(font, format, x, y, width, height, window) {
                 // SAFETY: the kernel mapped `stride * height` pixels at `back`
                 // with user permissions and `rect` stays inside them.
                 unsafe {
@@ -547,6 +597,7 @@ fn composite(
     back: *mut u32,
     fb: &FramebufferInfo,
     format: PixelFormat,
+    font: Font<'_>,
     width: u32,
     height: u32,
     stride: u32,
@@ -556,7 +607,7 @@ fn composite(
     cursor: Cursor,
     rect: Rect,
 ) {
-    paint_rect(back, stride, format, width, height, rect, window);
+    paint_rect(back, stride, format, font, width, height, rect, window);
     blit_window(
         back,
         stride,

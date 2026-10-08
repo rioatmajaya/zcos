@@ -14,7 +14,7 @@
 use crate::PixelFormat;
 use crate::desktop::TITLE_HEIGHT;
 use crate::fb::encode;
-use crate::font::{GLYPH_H, GLYPH_W, glyph_bit, text_blend_bytes};
+use crate::font::{Font, GLYPH_H, GLYPH_W, glyph_bit, text_blend_bytes};
 
 /// Title shown in the window's title bar.
 pub const TITLE: &str = "Terminal";
@@ -187,8 +187,12 @@ impl Term {
     /// [`crate::font::text_blend_bytes`] exactly. The decorations go through
     /// [`close_rect`] and [`minimize_rect`] rather than open-coded offsets, so
     /// the region hit-testing clicks is the region the glyphs are painted in.
+    ///
+    /// The font is a parameter rather than a global so the table the client
+    /// paints with and the table the kernel verifies against cannot drift: both
+    /// load the same initramfs asset (see [`crate::font::Font`]).
     #[must_use]
-    pub const fn render(&self, lx: u32, ly: u32, w: u32, h: u32) -> (u8, u8, u8) {
+    pub const fn render(&self, font: Font<'_>, lx: u32, ly: u32, w: u32, h: u32) -> (u8, u8, u8) {
         if w < 2 || h < 2 {
             return BORDER;
         }
@@ -196,17 +200,17 @@ impl Term {
             return BORDER;
         }
         if ly < TITLE_HEIGHT {
-            let base = title_bar_at(lx, ly);
+            let base = title_bar_at(font, lx, ly);
             // Window decorations: minimize and close glyphs at the right end
             // of the title bar. They are part of the shared render, so the
             // kernel's verifier recomputes them with the client's pixels.
             let close = close_rect(w, h);
             if close.contains(lx, ly) {
-                return glyph_over(b'x', lx - close.x, ly - close.y, base, DECORATION_CLOSE_COLOR);
+                return glyph_over(font, b'x', lx - close.x, ly - close.y, base, DECORATION_CLOSE_COLOR);
             }
             let minimize = minimize_rect(w, h);
             if minimize.contains(lx, ly) {
-                return glyph_over(b'-', lx - minimize.x, ly - minimize.y, base, DECORATION_MIN_COLOR);
+                return glyph_over(font, b'-', lx - minimize.x, ly - minimize.y, base, DECORATION_MIN_COLOR);
             }
             return base;
         }
@@ -242,7 +246,7 @@ impl Term {
             return BG;
         }
         let ch = self.lines[r][col as usize];
-        if glyph_bit(ch, row_in_glyph, rel_x % GLYPH_W) {
+        if glyph_bit(font, ch, row_in_glyph, rel_x % GLYPH_W) {
             self.row_color(r)
         } else {
             BG
@@ -254,13 +258,14 @@ impl Term {
     #[must_use]
     pub const fn pixel(
         &self,
+        font: Font<'_>,
         format: PixelFormat,
         lx: u32,
         ly: u32,
         w: u32,
         h: u32,
     ) -> Option<u32> {
-        let (r, g, b) = self.render(lx, ly, w, h);
+        let (r, g, b) = self.render(font, lx, ly, w, h);
         encode(format, r, g, b)
     }
 
@@ -391,8 +396,8 @@ fn split_first_word(line: &[u8]) -> (&[u8], &[u8]) {
 
 /// Overlays a single glyph on `base`, painting lit pixels `fg`.
 #[must_use]
-const fn glyph_over(ch: u8, gx: u32, gy: u32, base: (u8, u8, u8), fg: (u8, u8, u8)) -> (u8, u8, u8) {
-    if glyph_bit(ch, gy, gx) {
+const fn glyph_over(font: Font<'_>, ch: u8, gx: u32, gy: u32, base: (u8, u8, u8), fg: (u8, u8, u8)) -> (u8, u8, u8) {
+    if glyph_bit(font, ch, gy, gx) {
         fg
     } else {
         base
@@ -449,13 +454,13 @@ pub const fn minimize_rect(w: u32, h: u32) -> crate::desktop::Rect {
 
 /// Renders one title-bar pixel: the bar color with the terminal title text.
 #[must_use]
-pub const fn title_bar_at(lx: u32, ly: u32) -> (u8, u8, u8) {
+pub const fn title_bar_at(font: Font<'_>, lx: u32, ly: u32) -> (u8, u8, u8) {
     let ty = if TITLE_HEIGHT > GLYPH_H {
         (TITLE_HEIGHT - GLYPH_H) / 2
     } else {
         0
     };
-    text_blend_bytes(TITLE.as_bytes(), 8, ty, lx, ly, BAR, BAR_FG)
+    text_blend_bytes(font, TITLE.as_bytes(), 8, ty, lx, ly, BAR, BAR_FG)
 }
 
 #[cfg(test)]
@@ -577,7 +582,7 @@ mod tests {
         while ly < h {
             let mut lx = 0;
             while lx < w {
-                let c = term.render(lx, ly, w, h);
+                let c = term.render(Font::embedded(), lx, ly, w, h);
                 if c == PROMPT {
                     saw_prompt = true;
                 } else if c == OUTPUT {
@@ -607,7 +612,7 @@ mod tests {
         while ly < TITLE_HEIGHT {
             let mut lx = 0;
             while lx < w {
-                let c = term.render(lx, ly, w, h);
+                let c = term.render(Font::embedded(), lx, ly, w, h);
                 if c == DECORATION_CLOSE_COLOR {
                     saw_close = true;
                 } else if c == DECORATION_MIN_COLOR {
@@ -638,7 +643,7 @@ mod tests {
             while ly < rect.bottom() {
                 let mut lx = rect.x;
                 while lx < rect.right() {
-                    if term.render(lx, ly, w, h) == color {
+                    if term.render(Font::embedded(), lx, ly, w, h) == color {
                         painted = true;
                     }
                     lx += 1;
@@ -673,7 +678,7 @@ mod tests {
     #[test]
     fn pixel_encodes_and_rejects_unencodable_formats() {
         let term = Term::new();
-        assert!(term.pixel(PixelFormat::Rgbx8888, 0, 0, 64, 64).is_some());
-        assert_eq!(term.pixel(PixelFormat::Bitmask, 0, 0, 64, 64), None);
+        assert!(term.pixel(Font::embedded(), PixelFormat::Rgbx8888, 0, 0, 64, 64).is_some());
+        assert_eq!(term.pixel(Font::embedded(), PixelFormat::Bitmask, 0, 0, 64, 64), None);
     }
 }
