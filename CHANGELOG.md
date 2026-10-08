@@ -125,6 +125,14 @@ still learns no address.
 
 ### Added
 
+- **CI explains its own boot failures.** Both QEMU runs redirect into log files
+  that no later step read, so `Boot test the close proof` once failed with exit
+  1 and zero evidence — a missing image, a staleness-guard refusal, a dead
+  QEMU, or a guest failure were indistinguishable. A new `Show boot logs on
+  failure` step runs only on failure and changes no pass/fail semantics: it
+  prints runner disk state, `build/` contents, and both log tails. Disk state
+  is included because a full runner disk fails image and disk writes that
+  succeed everywhere else, and nothing else would say so.
 - **The font loads from the VFS instead of three baked-in copies** (F8g-1):
   `initramfs/font8x16.raw` is the canonical 8x16 bitmap font and
   `zc_abi::font::Font` is the only way to render text — every text function

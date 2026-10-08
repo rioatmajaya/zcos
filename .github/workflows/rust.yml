@@ -272,3 +272,25 @@ jobs:
       run: ./tools/build-efi.sh
     - name: Prove typed input reaches the window
       run: ./tools/check-live-input.sh
+
+    # A red boot step currently shows nothing: both runs redirect the emulator
+    # output into a log file that no later step reads, so a failure like
+    # "Boot test the close proof exited 1" arrives with zero evidence about
+    # whether the image was missing, the staleness guard refused, QEMU died,
+    # or the guest failed. This step runs only on failure and changes no
+    # pass/fail semantics; it just makes the next red step self-explaining.
+    # The disk listing matters too: a full runner disk fails image and disk
+    # writes that succeed everywhere else, and nothing else would say so.
+    - name: Show boot logs on failure
+      if: failure()
+      run: |
+        echo "--- runner disk state ---"
+        df -h "$GITHUB_WORKSPACE" | tail -2
+        echo "--- build/ contents ---"
+        ls -la build/ || true
+        echo "--- target/ size ---"
+        du -sh target 2>/dev/null || true
+        echo "===== build/boot.log (tail) ====="
+        tail -60 build/boot.log 2>/dev/null || echo "(missing)"
+        echo "===== build/boot-close.log (tail) ====="
+        tail -60 build/boot-close.log 2>/dev/null || echo "(missing)"
