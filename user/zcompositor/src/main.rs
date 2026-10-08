@@ -28,7 +28,7 @@ use zc_abi::{
 };
 use zc_user::{
     cap_delegate, framebuffer_info, log, mouse_read, recv_from, send_to, surface_create,
-    surface_destroy, surface_map, task_exit,
+    surface_destroy, surface_map, task_exit, window_close,
 };
 
 /// Damage rectangles the compositor tracks before collapsing to a full repaint.
@@ -191,6 +191,7 @@ pub unsafe extern "C" fn _start() -> ! {
     let mut dragged = false;
     let mut minimized = false;
     let mut restored = false;
+    let mut closed = false;
     while let Some((buttons, dx, dy)) = unpack_report(mouse_read()) {
         let cursor_before = cursor.rect();
         let window_before = window;
@@ -198,6 +199,17 @@ pub unsafe extern "C" fn _start() -> ! {
         let action = wm.apply(cursor, buttons);
         minimized |= action == Action::Minimized;
         restored |= action == Action::Restored;
+        if action == Action::Closed {
+            // Closing is a decision, not a paint: end the client's input session
+            // so the task blocked in `SYS_TERM_READ` wakes, paints a final frame,
+            // and sends `WM_DONE`. The kernel records the closed state too, so
+            // the frame verifier expects a desktop with no window in it.
+            wm.close();
+            if window_close() == u64::MAX {
+                log("compositor: window close refused\n");
+            }
+            closed = true;
+        }
         window = wm.rect();
         dragged |= action == Action::Moved;
         // A press that arms a drag moves nothing yet, but the pointer's own old
@@ -238,14 +250,19 @@ pub unsafe extern "C" fn _start() -> ! {
     if restored {
         log("compositor: window restored\n");
     }
+    if closed {
+        log("compositor: window closed\n");
+    }
     log("compositor: cursor ok\n");
 
     // Event loop: the client repaints on every keystroke and acknowledges, so
-    // re-composite its window at the moved position and flush only that
+    // re-composite its window at its current position and flush only that
     // rectangle. The pointer is foreground, so before each frame the compositor
     // drains any mouse report the kernel routed and moves the sprite with damage
-    // tracking; a `WM_MOUSE` nudge (or any client frame) carries the wakeup. `WM_DONE`
-    // means the client's session closed; composite the final frame and stop.
+    // tracking; a `WM_MOUSE` nudge (or any client frame) carries the wakeup.
+    // `WM_DONE` means the client's session is over, whichever way it ended: the
+    // shell exited, or the close glyph ended it. Either way the window leaves the
+    // screen, so erase it before stopping.
     loop {
         let message = recv_from(IPC_WM_REPLY as u64);
         // Poll the pointer first: the kernel applies the same reports it serves
@@ -256,7 +273,11 @@ pub unsafe extern "C" fn _start() -> ! {
             let cursor_before = cursor.rect();
             let window_before = window;
             cursor.apply(dx, dy, width, height);
-            let _ = wm.apply(cursor, buttons);
+            let action = wm.apply(cursor, buttons);
+            if action == Action::Closed {
+                wm.close();
+                let _ = window_close();
+            }
             window = wm.rect();
             let mut rect = cursor_before.union(cursor.rect());
             if window_before != window {
@@ -280,7 +301,8 @@ pub unsafe extern "C" fn _start() -> ! {
             break;
         }
         // The client repainted; overlay the window at its current position and
-        // flush. A `WM_MOUSE` nudge carries no window change of its own.
+        // flush. A `WM_MOUSE` nudge carries no window change of its own, and a
+        // closed window's `rect` is empty so this paints and flushes nothing.
         composite(
             back,
             &fb,
@@ -297,6 +319,37 @@ pub unsafe extern "C" fn _start() -> ! {
         if message == WM_ACK {
             log("compositor: frame updated\n");
         }
+    }
+
+    // A *closed* window leaves the screen: repaint the desktop across its
+    // remembered footprint and flush it. Passing the remembered placement as the
+    // remembered footprint and flush it. Passing the remembered placement as the
+    // clip bounds and an empty placement to the painter is what makes this an
+    // erase — the painter sees bare desktop, and the blit rejects itself because
+    // an empty origin covers nothing. The kernel expects exactly this, because
+    // its own machine also holds a closed window, so `fb: desktop checksum ok`
+    // proves the erase covered the right pixels.
+    //
+    // A session that ended any other way — the shell exiting, the client
+    // choosing to stop — leaves the window's pixels standing, and the kernel's
+    // placement proof is what checks them. Erasing there would destroy the very
+    // pixels the proof compares against.
+    if wm.is_closed() {
+        let erased = wm.window();
+        composite(
+            back,
+            &fb,
+            format,
+            width,
+            height,
+            surface.stride,
+            window_pixels,
+            window_surface.stride,
+            Rect::EMPTY,
+            cursor,
+            erased,
+        );
+        log("compositor: window erased\n");
     }
 
     // Both surfaces are no longer needed once the display holds the final

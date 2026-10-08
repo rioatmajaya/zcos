@@ -23,8 +23,8 @@ filesystem exchange page (see [`server-protocol.md`](server-protocol.md)).
 
 ## Syscall table
 
-Numbers are stable and never reused. `SYS_MOUSE_READ` (32) is the highest
-assigned number; 33 and above are rejected.
+Numbers are stable and never reused. `SYS_WINDOW_CLOSE` (33) is the highest
+assigned number; 34 and above are rejected.
 
 Two numbers are **declared but not yet implemented**: `SYS_YIELD` (0) and
 `SYS_MAP_FRAME` (4) are recognized by the dispatch table but have no handler, so
@@ -66,6 +66,26 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 30 | `SYS_TERM_READ` | — | keystroke byte, or `u64::MAX` at end of session | — |
 | 31 | `SYS_MMIO_MAP` | object id, `MmioInfo` out ptr, length | mapped virtual address | `u64::MAX` |
 | 32 | `SYS_MOUSE_READ` | — | packed report, or `MOUSE_NO_REPORT` when none | — |
+| 33 | `SYS_WINDOW_CLOSE` | — | 0 | `u64::MAX` |
+
+### `SYS_WINDOW_CLOSE`
+
+`SYS_WINDOW_CLOSE` (33) ends the window input session. A client blocked in
+`SYS_TERM_READ` is rewound, made runnable, and on its retry observes
+`u64::MAX` — the same end-of-session result the serial shell's exit produces — so
+it paints a final frame and sends `WM_DONE` through the path it already uses.
+There is deliberately no separate client-side protocol: one path serves both
+causes.
+
+Authority is the surface **factory**. Only a task holding `SURFACE_FACTORY` with
+`WRITE` — the window manager, which created the window and delegated it — may
+call it; every other task, including the client inside the window, gets
+`u64::MAX`. Without that a client could end its own session and leave the
+compositor blocked in `recv_from` waiting for a frame that will never arrive.
+
+The call marks the kernel's window machine closed before the client can observe
+the session end, so the frame verifier expects a display with no window in it.
+See [ADR 0026](../adr/0026-closing-a-window-ends-a-session.md).
 
 ### Mouse reports
 
@@ -102,8 +122,17 @@ rectangle contains no pixel, `pixel_at_with_window` recomputes the entire frame
 as bare desktop and the compositor's blit is rejected by its clip bounds — no
 consumer needs a separate visibility flag. `verify_framebuffer` therefore skips
 only the placement comparison when the rectangle is empty, and logs
-`fb: window minimized ok`; the surface snapshot is still required, because it is
-what proves the client painted correctly while hidden.
+`fb: no window, placement skipped`; the surface snapshot is still required,
+because it is what proves the client painted correctly while hidden.
+
+A window is **hidden** two ways. The `-` glyph minimizes it, and the taskbar's
+task button restores it. The `x` glyph closes it, which is terminal: `Wm::close`
+keeps the placement for the erase, `rect()` stays empty, the task button will not
+restore it, and every later report is absorbed. The compositor erases a closed
+window across its remembered footprint and erases nothing otherwise.
+
+The two final-frame proofs are alternatives chosen by the session's end state: a
+window on screen proves *placement* (ADR 0018), a window gone proves the *erase*.
 
 Hit regions are derived from the renderers, never open-coded beside them:
 `terminal::close_rect` / `minimize_rect` (used by `Term::render`) and

@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 7 grants`, `task 6: devmgr: blk published`, `dma: window coherent ok` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–4 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `client: vfs ok`; `wm: window mapped`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm host tests pass |
+| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–5 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `client: vfs ok`; `wm: window mapped`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed`; `compositor: window erased`; `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm host tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -522,9 +522,22 @@ full browser. Note them as follow-ups, do not build them here.
         `terminal::close_rect`/`minimize_rect` and
         `desktop::launcher_button_rect`/`task_button_rect` are public and
         `Term::render` and `panel_color_at` call them — so a click can never land
-        beside a glyph the user can see. Close is drawn but still inert: it ends
-        the window session, which needs its own protocol. See
+        beside a glyph the user can see. See
         [`adr/0025`](adr/0025-hidden-window-is-an-empty-rectangle.md).
+      - [x] F8b-5: close the window. The close glyph ends the window's session
+        for good. The client spends the session blocked in `SYS_TERM_READ`, and
+        the only end-of-session signal existed for the shell exiting, so the new
+        `SYS_WINDOW_CLOSE` (33) posts the same one: the client is rewound,
+        retries, paints a final frame and sends `WM_DONE` by exactly the path it
+        already used, which is why it needed no change. Only the surface factory's
+        holder — the window manager — may call it, so a client cannot end its own
+        session and strand the compositor. `Wm` gains a terminal `closed` flag: the
+        placement is remembered for the erase, the task button will not restore
+        it, and later reports are absorbed. The compositor erases a closed window
+        across its remembered footprint and nothing else — a session that ended
+        by the shell exiting leaves its pixels standing, because those are what
+        the placement proof compares. See
+        [`adr/0026`](adr/0026-closing-a-window-ends-a-session.md).
 - [x] F8c: 2D renderer with a bitmap font and text overlay. `zc-abi::font`
       embeds the VGA 8x16 glyph set and exposes `glyph_row`/`glyph_bit`/
       `text_blend`/`text_width` as pure `const`-callable helpers; the window
@@ -688,6 +701,15 @@ full browser. Note them as follow-ups, do not build them here.
   exact check covers the minimize, not just the restore. The `zc-abi` host tests
   pass, including that each decoration glyph really paints inside the rectangle
   hit-testing claims for it.
+- The window closes and its session ends (F8b-5): the compositor logs
+  `compositor: window closed` and then `compositor: window erased`, the client
+  logs `client: window painted` and exits through the path it already used, and
+  `fb: desktop checksum ok` still passes with `fb: no window, placement skipped`.
+  With no window on screen the desktop half of the check becomes *total*: every
+  pixel of the final frame, including the footprint the close vacated, recomputes
+  exactly from the shared layout. The placement half is unchanged but does not run
+  in this scenario — the two final-frame proofs are alternatives, and ADR 0026
+  records the trade explicitly rather than leaving it implicit.
 - Clean shutdown: `power: halt clean`.
 - Audio plays a known tone and the driver reports no XRUN under a stress
   buffer: `snd: playback ok`.

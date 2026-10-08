@@ -122,6 +122,13 @@ pub const SYS_MMIO_MAP: u64 = 31;
 /// serves a fixed script ([`crate::cursor::MOUSE_SCRIPT`]) so the compositor
 /// and the kernel's frame verifier derive the same pointer position.
 pub const SYS_MOUSE_READ: u64 = 32;
+/// Ends the window input session, so a client blocked in `SYS_TERM_READ` returns
+/// `u64::MAX` instead of waiting for a keystroke that will never come; returns 0
+/// or `u64::MAX`. Only a caller holding the surface **factory** capability — the
+/// window manager — may invoke it, because a window's client is that manager's
+/// to close. This is the same end-of-session signal the shell's exit posts, so
+/// one client path serves both causes.
+pub const SYS_WINDOW_CLOSE: u64 = 33;
 
 /// Error codes returned by failed syscalls.
 ///
@@ -210,6 +217,7 @@ mod tests {
         assert_eq!(SYS_TERM_READ, 30);
         assert_eq!(SYS_MMIO_MAP, 31);
         assert_eq!(SYS_MOUSE_READ, 32);
+        assert_eq!(SYS_WINDOW_CLOSE, 33);
     }
 
     #[test]

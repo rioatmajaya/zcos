@@ -90,12 +90,12 @@ const fn step(buttons: u8, dx: i8, dy: i8) -> MouseStep {
 /// 2. climb to the window's title bar, press, drag it to the left edge, release,
 /// 3. click the minimize glyph, so the window leaves the screen entirely,
 /// 4. click the taskbar's task button, so the window comes back exactly where it
-///    was.
+///    was,
+/// 5. click the close glyph, so the window's session ends for good.
 ///
 /// A session that only moved the pointer would leave the window-management path
 /// unproven in CI, and the button bitmask would cross the syscall with nothing
-/// acting on it. Ending on a *restored* window keeps the placement proof — the
-/// half of the frame check ADR 0018 is about — running on the final frame.
+/// acting on it.
 ///
 /// The run ends with the pointer over the window it dragged, so the proof also
 /// exercises the pointer-over-window path rather than steering clear of it.
@@ -126,6 +126,10 @@ pub const MOUSE_SCRIPT: &[MouseStep] = &[
     step(0, 0, 0),
     step(0, 127, 127),
     step(0, 50, 7),
+    step(0, 127, -99),
+    step(0, 89, 0),
+    step(BUTTON_LEFT, 0, 0),
+    step(0, 0, 0),
 ];
 
 /// The value `SYS_MOUSE_READ` returns when no report is waiting.
@@ -277,7 +281,7 @@ mod tests {
         for entry in MOUSE_SCRIPT {
             cursor.apply(entry.dx, entry.dy, w, h);
         }
-        assert_eq!((cursor.x, cursor.y), (300, 150));
+        assert_eq!((cursor.x, cursor.y), (516, 51));
         // The session drags the window out from under the pointer and ends on
         // top of it, so the boot proof exercises pointer-over-window instead of
         // steering clear of it.

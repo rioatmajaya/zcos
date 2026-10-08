@@ -17,7 +17,7 @@ use zc_abi::{
     SYS_RECV,
     SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START, SYS_SERVICE_STATUS,
     SYS_SERVICE_STOP, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP, SYS_TASK_EXIT,
-    SYS_TERM_READ, SYS_YIELD,
+    SYS_TERM_READ, SYS_WINDOW_CLOSE, SYS_YIELD,
 };
 use zc_kernel::{
     addrspace::AddressSpace,
@@ -299,6 +299,7 @@ fn exercise_mechanisms(alloc: &mut FrameAllocator<'_>, usable: u64) {
         (SYS_TERM_READ, Action::TermRead),
         (SYS_MMIO_MAP, Action::MmioMap),
         (SYS_MOUSE_READ, Action::MouseRead),
+        (SYS_WINDOW_CLOSE, Action::WindowClose),
     ];
     for (number, expected) in dispatched {
         match syscall::dispatch(number) {

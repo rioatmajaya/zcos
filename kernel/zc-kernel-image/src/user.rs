@@ -1849,6 +1849,33 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 0
             }
         }
+        Ok(Action::WindowClose) => {
+            let me = tasks.current();
+            // The surface factory is the window manager's authority: it is who
+            // created the window and delegated it, so closing that window is its
+            // decision to make. Any other task — including the client inside the
+            // window — is refused, so a client cannot end its own session and
+            // strand the compositor waiting for a frame that will not come.
+            // SAFETY: owned here; interrupts are masked through this arm.
+            let allowed = unsafe {
+                (*addr_of!(CAPS))[me].holds_object(zc_abi::SURFACE_FACTORY, Rights::WRITE)
+            };
+            if !allowed {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            // Mark the window closed on the authoritative machine before the
+            // client can observe the session end, so the frame verifier sees a
+            // window with no pixels rather than one that merely went quiet.
+            // SAFETY: owned here; interrupts are masked through this arm.
+            unsafe { (*addr_of_mut!(WM)).close() };
+            close_window_input();
+            // A client blocked in `SYS_TERM_READ` is rewound and retried by the
+            // scheduler, so it must be made runnable now to observe the close.
+            tasks.unblock_all();
+            regs.set_result(0);
+            0
+        }
         Ok(Action::MouseRead) => {
             use zc_abi::cursor::{MOUSE_NO_REPORT, MOUSE_SCRIPT, pack_report};
             // The scripted session runs first, so the boot proof derives the
@@ -2279,13 +2306,19 @@ fn verify_framebuffer() {
         crate::fail("window surface was never released");
     };
     if window.is_empty() {
-        // The window is minimized, so none of its pixels are on screen and there
-        // is nothing to place: `actual_window` is still the untouched hash
-        // offset, which is exactly right for a frame with no window in it. The
-        // snapshot still had to exist — it is what proves the client painted its
-        // surface correctly while it was hidden — but there is no display region
-        // to compare it against.
-        crate::serial::write_str("fb: window minimized ok\n");
+        // No window is on screen — minimized or closed — so none of its pixels
+        // are on the display and there is nothing to place: `actual_window` is
+        // still the untouched hash offset, which is exactly right for a frame
+        // with no window in it. That makes the *desktop* half of the check total
+        // instead of partial: with no window, every pixel of the frame was
+        // recomputed from the shared layout, including the footprint a minimize
+        // or a close vacated. The surface snapshot is still required — it is
+        // what proves the client painted correctly while hidden.
+        //
+        // The trade is explicit: a session that ends with a window on screen
+        // proves placement (ADR 0018), and one that ends with the window gone
+        // proves the erase instead. The shipped script ends closed.
+        crate::serial::write_str("fb: no window, placement skipped\n");
     } else if actual_window != snapshot {
         crate::fail("window placement mismatch");
     }

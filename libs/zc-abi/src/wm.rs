@@ -91,6 +91,8 @@ pub enum Action {
     Minimized,
     /// The task button was pressed; the window is now shown again.
     Restored,
+    /// The close glyph was pressed; the window's session is over.
+    Closed,
 }
 
 /// The window placement the pointer drives, shared by painter and verifier.
@@ -111,6 +113,7 @@ pub struct Wm {
     dragging: bool,
     held: bool,
     shown: bool,
+    closed: bool,
 }
 
 impl Wm {
@@ -128,6 +131,7 @@ impl Wm {
         dragging: false,
         held: false,
         shown: false,
+        closed: false,
     };
 
     /// A window manager holding `window` on a `screen_w` x `screen_h` display.
@@ -147,6 +151,7 @@ impl Wm {
             dragging: false,
             held: false,
             shown: true,
+            closed: false,
         }
     }
 
@@ -169,13 +174,29 @@ impl Wm {
     /// Callers therefore need no separate "is it visible" branch.
     #[must_use]
     pub const fn rect(&self) -> Rect {
-        if self.shown { self.window } else { Rect::EMPTY }
+        if self.shown && !self.closed {
+            self.window
+        } else {
+            Rect::EMPTY
+        }
     }
 
     /// Returns whether the window is currently shown.
+    ///
+    /// A closed window is never shown again: the task button restores a
+    /// *minimized* window, never one whose session has ended.
     #[must_use]
     pub const fn is_shown(&self) -> bool {
-        self.shown
+        self.shown && !self.closed
+    }
+
+    /// Returns whether the close glyph has ended this window's session.
+    ///
+    /// Terminal: a closed window can be neither minimized, restored, nor dragged,
+    /// and [`Self::rect`] stays empty however the pointer moves afterwards.
+    #[must_use]
+    pub const fn is_closed(&self) -> bool {
+        self.closed
     }
 
     /// Returns whether a drag is in progress.
@@ -192,6 +213,21 @@ impl Wm {
     #[must_use]
     pub const fn is_placed(&self) -> bool {
         self.screen_w != 0
+    }
+
+    /// Ends the window's session, returning whether this call was the one to do it.
+///
+/// Separate from [`Self::apply`] because the *deciding* side is the compositor —
+/// it owns the window and must end the client's input session — while the
+/// *recording* side is the kernel's verifier, which only replays reports. A
+/// replay reaches the same state through the close glyph, so this exists for the
+/// compositor to record its own decision on the machine it is already driving.
+pub fn close(&mut self) -> bool {
+        let changed = !self.closed;
+        self.shown = false;
+        self.closed = true;
+        self.dragging = false;
+        changed
     }
 
     /// Places `rect` as the window, returning whether it moved.
@@ -212,10 +248,11 @@ impl Wm {
     /// A left-button press inside [`title_bar`] grabs the window at that point;
     /// while the button stays held the window follows the pointer with the grab
     /// offset preserved, and the release ends the drag. A press on the
-    /// minimize glyph hides the window and a press on the taskbar's task button
-    /// shows it again. Everything else — the body, the close glyph, the bare
-    /// desktop — does nothing: the button bitmask crosses the syscall, so acting
-    /// on a subset of it is explicit rather than accidental.
+    /// minimize glyph hides the window, a press on the taskbar's task button
+    /// shows it again, and a press on the close glyph ends the session for good.
+    /// Everything else — the body, the bare desktop — does nothing: the button
+    /// bitmask crosses the syscall, so acting on a subset of it is explicit
+    /// rather than accidental.
     ///
     /// Dragging is refused while the window is hidden, because a hidden window
     /// has no on-screen title bar to press; `rect()` being empty makes the
@@ -225,6 +262,12 @@ impl Wm {
         if down && !self.held {
             // Press edge: one target wins, checked most specific first.
             self.held = true;
+            // A closed window absorbs everything. `rect()` is empty, so every
+            // region test below fails on its own and the window stays gone even
+            // if the pointer keeps moving over where it used to be.
+            if self.closed {
+                return Action::None;
+            }
             // The taskbar is under everything, so its button is tested first:
             // a window can never overlap it (clamp_window keeps windows clear
             // of the panel), so the order only matters for readability.
@@ -241,13 +284,18 @@ impl Wm {
             let strip = decorations(self.rect());
             if strip.contains(at.x, at.y) {
                 // The left half of the strip is minimize, the right half close.
-                // Close is drawn but not wired, so only the minimize half acts.
                 if at.x < strip.x + DECORATION_W / 2 {
                     self.shown = false;
                     self.dragging = false;
                     return Action::Minimized;
                 }
-                return Action::None;
+                // Close keeps the placement but ends the session: the rectangle
+                // is remembered for the erase, `rect` goes empty, and no later
+                // report can bring it back.
+                self.shown = false;
+                self.closed = true;
+                self.dragging = false;
+                return Action::Closed;
             }
             self.dragging = hit(self.rect(), at.x, at.y);
             if self.dragging {
@@ -444,18 +492,99 @@ mod tests {
     }
 
     #[test]
-    fn the_close_glyph_is_drawn_but_does_nothing_yet() {
-        // Close would end the window session, which the placement proof cannot
-        // yet describe; the glyph is painted but inert, and a press on it must
-        // neither hide the window nor start a drag.
+    fn the_close_glyph_ends_the_session_for_good() {
         let mut wm = start();
         let window = wm.window();
         let strip = decorations(window);
         let press = cursor_at(strip.right() - 2, strip.y + 4);
-        assert_eq!(wm.apply(press, BUTTON_LEFT), Action::None);
-        assert!(wm.is_shown());
+        assert_eq!(wm.apply(press, BUTTON_LEFT), Action::Closed);
+        assert!(!wm.is_shown());
+        assert!(wm.is_closed());
         assert!(!wm.is_dragging());
+        // The placement is remembered, so the compositor can erase exactly the
+        // right footprint even though nothing is left to paint.
+        assert_eq!(wm.window(), window);
+        assert_eq!(wm.rect(), Rect::EMPTY);
         let _ = wm.apply(press, 0);
+    }
+
+    #[test]
+    fn a_closed_window_cannot_come_back() {
+        let mut wm = start();
+        let window = wm.window();
+        let strip = decorations(window);
+        let _ = wm.apply(cursor_at(strip.right() - 2, strip.y + 4), BUTTON_LEFT);
+        let _ = wm.apply(cursor_at(strip.right() - 2, strip.y + 4), 0);
+
+        // The task button restores a *minimized* window, never a closed one.
+        let task = crate::desktop::task_button_rect(H);
+        assert_eq!(
+            wm.apply(Cursor::at(task.x + task.w / 2, task.y + task.h / 2), BUTTON_LEFT),
+            Action::None
+        );
+        let _ = wm.apply(Cursor::at(task.x, task.y), 0);
+        // Neither can it be dragged from where its title bar used to be.
+        assert_eq!(wm.apply(cursor_at(window.x + 60, window.y + 11), BUTTON_LEFT), Action::None);
+        assert_eq!(wm.apply(Cursor::at(400, 200), BUTTON_LEFT), Action::None);
+        // Every later report is inert and the rectangle never returns.
+        let _ = wm.apply(Cursor::at(400, 200), 0);
+        assert_eq!(wm.rect(), Rect::EMPTY);
+        assert!(wm.is_closed());
+        assert_eq!(wm.window(), window);
+    }
+
+    #[test]
+    fn closing_twice_reports_only_the_first_close() {
+        let mut wm = start();
+        assert!(wm.close(), "the first close changes the state");
+        assert!(!wm.close(), "a second close is a no-op");
+        assert!(wm.is_closed());
+        assert_eq!(wm.rect(), Rect::EMPTY);
+    }
+
+    #[test]
+    fn closing_keeps_the_placement_the_erase_needs() {
+        // The compositor erases across `window()` after the session ends, so
+        // losing the placement on close would erase nothing and leave the
+        // window's pixels standing — the desktop half of the frame check would
+        // then fail on exactly the footprint the close vacated. This is the one
+        // property of a close that is easy to break silently.
+        let mut wm = start();
+        let window = wm.window();
+        assert!(wm.close());
+        assert_eq!(wm.window(), window);
+        assert!(!wm.window().is_empty());
+
+        // And on a live window, the remembered placement is the *last dragged*
+        // one rather than the scripted frame position — the erase has to cover
+        // where the window actually ended up.
+        let mut wm = start();
+        let _ = wm.apply(cursor_at(window.x + 60, window.y + 11), BUTTON_LEFT);
+        let _ = wm.apply(cursor_at(window.x + 200, window.y + 90), BUTTON_LEFT);
+        let _ = wm.apply(cursor_at(window.x + 200, window.y + 90), 0);
+        let dragged = wm.window();
+        assert_ne!(dragged, window, "the drag must actually have moved the window");
+        assert!(wm.close());
+        assert_eq!(wm.window(), dragged);
+    }
+
+    #[test]
+    fn a_closed_window_absorbs_the_whole_decoration_strip() {
+        // The minimize half must not resurrect a closed window, even though a
+        // minimize press is otherwise the same shape of click.
+        let mut wm = start();
+        let window = wm.window();
+        let strip = decorations(window);
+        assert!(wm.close());
+        for press in [
+            cursor_at(strip.x + 1, strip.y + 4),
+            cursor_at(strip.right() - 1, strip.y + 4),
+        ] {
+            assert_eq!(wm.apply(press, BUTTON_LEFT), Action::None);
+            assert_eq!(wm.apply(press, 0), Action::Released);
+        }
+        assert!(wm.is_closed());
+        assert_eq!(wm.rect(), Rect::EMPTY);
     }
 
     #[test]
@@ -536,25 +665,55 @@ mod tests {
     }
 
     #[test]
-    fn the_scripted_session_ends_with_the_window_dragged() {
+    fn the_scripted_session_drives_the_whole_window_lifecycle() {
         // Replays the boot proof's mouse script: the pointer walks to the title
-        // bar, presses, drags the window, releases, then minimizes and restores
-        // it through the taskbar.
+        // bar, presses, drags the window, releases, minimizes it, restores it
+        // through the taskbar, and finally closes it.
         let run = replay_script();
         assert!(run.moved, "the scripted session never moved the window");
         assert!(run.minimized, "the scripted session never minimized the window");
         assert!(run.restored, "the scripted session never restored the window");
-        assert!(run.shown, "the scripted session ended with the window hidden");
+        assert!(run.closed, "the scripted session never closed the window");
         assert!(!run.dragging, "the scripted session never released");
-        // The window left its scripted frame position and stayed on screen.
+        // The window left its scripted frame position and stayed on screen the
+        // whole time it was shown.
         assert_ne!(run.window, crate::desktop::window_rect(crate::desktop::FRAME_MOVED, W, H));
         assert!(run.window.right() <= W && run.window.bottom() <= H);
         assert!(run.window.y >= panel_height(H));
-        // Shown means the frame the verifier checks is the window's own.
-        assert_eq!(run.rect, run.window);
-        // The pointer finishes over the window, so the boot proof exercises the
-        // pointer-over-window path rather than steering clear of it.
+        // The session ends closed, so the final frame has no window in it and
+        // the compositor erases the remembered footprint. The placement is kept
+        // for exactly that erase, and for nothing else.
+        assert!(!run.shown);
+        assert_eq!(run.rect, Rect::EMPTY);
+        assert!(!run.window.is_empty(), "a close must remember the footprint");
+        // The pointer finishes on the close glyph it pressed, over the window's
+        // remembered placement — the boot proof exercises pointer-over-window and
+        // not just pointer-over-empty-desktop.
         assert!(run.window.contains(run.pointer.x, run.pointer.y));
+    }
+
+    #[test]
+    fn the_scripted_session_was_shown_again_between_minimize_and_close() {
+        // The close only proves anything if the window really was on screen
+        // before it: a script that minimized and closed without restoring would
+        // never exercise the placement half of the frame check.
+        let mut wm = start();
+        let mut cursor = Cursor::new(W, H);
+        let mut ever_shown_after_drag = false;
+        let mut moved = false;
+        for step in MOUSE_SCRIPT {
+            cursor.apply(step.dx, step.dy, W, H);
+            match wm.apply(cursor, step.buttons) {
+                Action::Moved => {
+                    moved = true;
+                    ever_shown_after_drag = wm.is_shown();
+                }
+                Action::Restored => ever_shown_after_drag = true,
+                _ => {}
+            }
+        }
+        assert!(moved, "the window never moved");
+        assert!(ever_shown_after_drag, "the window was never shown after the drag");
     }
 
     /// What one run of the boot proof's mouse script produced.
@@ -566,6 +725,7 @@ mod tests {
         moved: bool,
         minimized: bool,
         restored: bool,
+        closed: bool,
         pointer: Cursor,
     }
 
@@ -575,12 +735,14 @@ mod tests {
         let mut moved = false;
         let mut minimized = false;
         let mut restored = false;
+        let mut closed = false;
         for step in MOUSE_SCRIPT {
             cursor.apply(step.dx, step.dy, W, H);
             match wm.apply(cursor, step.buttons) {
                 Action::Moved => moved = true,
                 Action::Minimized => minimized = true,
                 Action::Restored => restored = true,
+                Action::Closed => closed = true,
                 _ => {}
             }
         }
@@ -592,6 +754,7 @@ mod tests {
             moved,
             minimized,
             restored,
+            closed,
             pointer: cursor,
         }
     }

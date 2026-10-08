@@ -18,7 +18,8 @@ pub use zc_abi::{
     SYS_RECV_FROM, SYS_SEND,
     SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START, SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT,
     SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TERM_READ,
-    SYS_UMOUNT, SYS_WRITE, SYS_YIELD, MmioInfo, Stat, SurfaceInfo, SyscallError, WM_ACK,
+    SYS_UMOUNT, SYS_WINDOW_CLOSE, SYS_WRITE, SYS_YIELD, MmioInfo, Stat, SurfaceInfo, SyscallError,
+    WM_ACK,
     supervise_kind, supervise_service,
 };
 
@@ -221,6 +222,17 @@ pub fn term_read() -> u64 {
 #[inline(always)]
 pub fn mouse_read() -> u64 {
     syscall0(SYS_MOUSE_READ)
+}
+
+/// Ends the window input session, so the window client blocked in
+/// [`term_read`] returns `u64::MAX` instead of waiting for a keystroke.
+///
+/// Only the task holding the surface factory — the window manager — may call
+/// it; `u64::MAX` means the kernel refused. Non-blocking: the client observes
+/// the end on its next scheduler turn, not inside this call.
+#[inline(always)]
+pub fn window_close() -> u64 {
+    syscall0(SYS_WINDOW_CLOSE)
 }
 
 /// Closes a descriptor, returning 0 or `u64::MAX` on failure.

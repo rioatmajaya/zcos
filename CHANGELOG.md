@@ -62,6 +62,27 @@ still learns no address.
 
 ### Added
 
+- **Closing a window** (F8b-5): the `x` glyph now ends the window's session for
+  good. The client spends its session blocked in `SYS_TERM_READ` and the only
+  end-of-session signal existed for the serial shell exiting, so the new
+  `SYS_WINDOW_CLOSE` (33) posts exactly that one: the client is rewound, retries,
+  paints a final frame and sends `WM_DONE` by the same path it already used, which
+  is why the client needed no change at all. Only the holder of the surface
+  factory may call it — the window manager, who created and delegated the window —
+  so a client cannot end its own session and strand the compositor waiting for a
+  frame that will not arrive. `zc_abi::wm::Wm` gains a terminal `closed` flag
+  beside `shown`: the placement is remembered for the erase, the task button will
+  not restore a closed window, and every later report is absorbed. The compositor
+  erases a closed window across its remembered footprint — passing that footprint
+  as clip bounds and an empty placement to the painter, so the blit rejects
+  itself — and erases nothing in any other case, because a session that ended by
+  the shell exiting leaves its pixels standing and those are what the placement
+  proof compares. The scripted session now drives the whole lifecycle
+  (drag → minimize → restore → close), so CI proves all four. The boot checksum
+  changes. This trade is explicit: a session ending with a window up proves
+  *placement* (ADR 0018), one ending with the window gone proves the *erase*, and
+  the shipped script ends closed — see
+  [ADR 0026](docs/adr/0026-closing-a-window-ends-a-session.md).
 - **Minimize and restore** (F8b-4): clicking the `-` glyph now hides the window
   and the taskbar's `Terminal` button brings it back exactly where it was. The
   representation is the whole design: a hidden window's rectangle *is*
