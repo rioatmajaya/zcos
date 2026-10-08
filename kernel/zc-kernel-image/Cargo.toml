@@ -21,6 +21,11 @@ zc-kernel = { path = "../zc-kernel" }
 # Terminate QEMU through isa-debug-exit so an automated boot test ends with a
 # status code. Never enable this for a real firmware build.
 qemu-exit = []
+# Serve the whole scripted mouse session, including the close click, so the
+# window's session-ending protocol is proven end to end. Off by default because
+# the same image is what a person boots interactively, and a demo that closes its
+# own window leaves an empty desktop with nothing left to interact with.
+close-proof = []
 
 [lints]
 workspace = true

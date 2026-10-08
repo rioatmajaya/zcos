@@ -62,6 +62,23 @@ still learns no address.
 
 ### Fixed
 
+- **The interactive desktop no longer destroys itself at the end of its demo**
+  (F8b-7): the scripted mouse session ended by clicking the close glyph, so
+  `tools/run-qemu.sh` left a bare desktop, an exited compositor and an exited
+  window client with nothing to interact with. The cause is structural — the
+  compositor drains the whole scripted session before entering its event loop, so
+  a close click always lands before the client has consumed its keystrokes, and
+  "ends with a window on screen" and "ends with a close" are mutually exclusive in
+  one run. `MOUSE_SCRIPT` is now one array served at one of two lengths:
+  `script_len(close)` returns the whole script or the prefix before the close
+  suffix, so the shared gestures are described exactly once and the two variants
+  cannot drift. The default build serves the window-up prefix and leaves a live
+  window; `build-efi.sh --test-close` sets a `close-proof` feature on the kernel
+  so CI can still prove the close protocol end to end. CI now runs both scenarios,
+  and each asserts the other's markers are absent, so placement (ADR 0018) is
+  proven again while the erase (ADR 0026) keeps its proof — total coverage is
+  higher than at any single point in this sequence. See
+  [ADR 0029](docs/adr/0029-two-scripted-sessions.md).
 - **An interactive boot no longer kills itself after five seconds** (F8b-6):
   booting with `tools/run-qemu.sh` and touching nothing froze the machine with
   `user: timed out after 5019 ticks` — the input driver stopped and the pointer

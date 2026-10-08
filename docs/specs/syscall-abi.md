@@ -134,6 +134,13 @@ window across its remembered footprint and erases nothing otherwise.
 The two final-frame proofs are alternatives chosen by the session's end state: a
 window on screen proves *placement* (ADR 0018), a window gone proves the *erase*.
 
+`SYS_MOUSE_READ` serves `cursor::MOUSE_SCRIPT`, and `cursor::script_len(close)`
+decides how much of it: the whole array, or the prefix before the close suffix.
+The kernel picks with `cfg!(feature = "close-proof")` — off by default, so an
+interactive build leaves the window on screen; on for the CI run that proves the
+close protocol. The two variants are prefixes of one array and therefore cannot
+describe a gesture differently.
+
 Hit regions are derived from the renderers, never open-coded beside them:
 `terminal::close_rect` / `minimize_rect` (used by `Term::render`) and
 `desktop::launcher_button_rect` / `task_button_rect` (used by `panel_color_at`).

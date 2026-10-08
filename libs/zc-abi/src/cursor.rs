@@ -91,14 +91,23 @@ const fn step(buttons: u8, dx: i8, dy: i8) -> MouseStep {
 /// 3. click the minimize glyph, so the window leaves the screen entirely,
 /// 4. click the taskbar's task button, so the window comes back exactly where it
 ///    was,
-/// 5. click the close glyph, so the window's session ends for good.
+/// 5. *(close proof only)* walk to the close glyph and click it, ending the
+///    window's session for good.
+///
+/// The last step is a **prefix choice, not a different script**: [`script`]
+/// serves either the window-up prefix or the whole thing, so the two can never
+/// drift apart and a gesture is proved identically either way.
 ///
 /// A session that only moved the pointer would leave the window-management path
 /// unproven in CI, and the button bitmask would cross the syscall with nothing
 /// acting on it.
 ///
-/// The run ends with the pointer over the window it dragged, so the proof also
-/// exercises the pointer-over-window path rather than steering clear of it.
+/// The window-up prefix ends with the pointer over the window it dragged, so the
+/// proof exercises the pointer-over-window path rather than steering clear of it,
+/// **and leaves the window on screen**. That matters beyond the proof: the same
+/// build is what a person boots from `tools/run-qemu.sh`, and a demo that closes
+/// its own window leaves an empty desktop and a dead compositor with nothing left
+/// to interact with.
 ///
 /// Coordinates are tuned for the 1280x800 boot display: the drag lands the
 /// window near the left edge so its minimize glyph is a short walk from the
@@ -131,6 +140,25 @@ pub const MOUSE_SCRIPT: &[MouseStep] = &[
     step(BUTTON_LEFT, 0, 0),
     step(0, 0, 0),
 ];
+
+/// Index of the first step that belongs to the close proof.
+///
+/// Everything before it ends with the window restored and on screen. Naming the
+/// boundary rather than a bare count keeps the two variants tied to the gesture
+/// they split at: inserting a step anywhere in the shared prefix moves the
+/// boundary with it.
+pub const MOUSE_SCRIPT_LEN_WINDOW_UP: usize = 22;
+
+/// Returns how many steps of [`MOUSE_SCRIPT`] a variant serves.
+///
+/// `close` selects it: `false` serves only the shared prefix, leaving the window
+/// on screen; `true` serves the whole script and ends the window's session.
+/// Selecting by length rather than by slice keeps both variants prefixes of the
+/// one array, so a gesture is described exactly once and the two can never drift.
+#[must_use]
+pub const fn script_len(close: bool) -> usize {
+    if close { MOUSE_SCRIPT.len() } else { MOUSE_SCRIPT_LEN_WINDOW_UP }
+}
 
 /// The value `SYS_MOUSE_READ` returns when no report is waiting.
 ///
@@ -275,16 +303,50 @@ mod tests {
     }
 
     #[test]
-    fn the_script_ends_at_a_known_position() {
+    fn both_script_variants_end_at_a_known_position() {
         let (w, h) = (1280u32, 800u32);
+        // The window-up prefix ends with the pointer inside the window it moved.
         let mut cursor = Cursor::new(w, h);
-        for entry in MOUSE_SCRIPT {
+        for entry in &MOUSE_SCRIPT[..script_len(false)] {
             cursor.apply(entry.dx, entry.dy, w, h);
         }
-        assert_eq!((cursor.x, cursor.y), (516, 51));
-        // The session drags the window out from under the pointer and ends on
-        // top of it, so the boot proof exercises pointer-over-window instead of
-        // steering clear of it.
+        assert_eq!((cursor.x, cursor.y), (300, 150));
+        // The close variant walks on to the close glyph and clicks it.
+        let mut closing = Cursor::new(w, h);
+        for entry in &MOUSE_SCRIPT[..script_len(true)] {
+            closing.apply(entry.dx, entry.dy, w, h);
+        }
+        assert_eq!((closing.x, closing.y), (516, 51));
+    }
+
+    #[test]
+    fn the_window_up_variant_is_a_strict_prefix_of_the_close_one() {
+        // The two variants share one array, so a gesture can never be described
+        // differently in each.
+        let (up, full) = (script_len(false), script_len(true));
+        assert!(up > 0, "the shared prefix is empty");
+        assert!(up < full, "the close variant adds nothing");
+        assert_eq!(full, MOUSE_SCRIPT.len(), "the close variant serves them all");
+        // The suffix the close variant adds is the walk to the glyph and the
+        // click itself, and nothing else has moved.
+        assert_eq!(
+            &MOUSE_SCRIPT[..up],
+            &MOUSE_SCRIPT[..full][..up],
+            "the shared prefix differs between variants"
+        );
+        // Both halves end with a released button, so neither variant can leave
+        // a drag in progress.
+        assert_eq!(MOUSE_SCRIPT[up - 1].buttons, 0);
+        assert_eq!(MOUSE_SCRIPT[full - 1].buttons, 0);
+        // The last click of the close variant is the one that closes.
+        assert_eq!(MOUSE_SCRIPT[full - 2].buttons, BUTTON_LEFT);
+    }
+
+    #[test]
+    fn the_session_leaves_the_window_over_the_pointer() {
+        let (w, h) = (1280u32, 800u32);
+        // Drag the window out from under the pointer and end on top of it, so
+        // the boot proof exercises pointer-over-window instead of steering clear.
         let mut wm = crate::wm::Wm::new(
             w,
             h,
@@ -292,12 +354,15 @@ mod tests {
         );
         let mut at = Cursor::new(w, h);
         let mut input = crate::ui::Input::new();
-        for entry in MOUSE_SCRIPT {
+        for entry in &MOUSE_SCRIPT[..script_len(false)] {
             let event = input.report(entry.buttons, entry.dx, entry.dy);
             at.apply(entry.dx, entry.dy, w, h);
             let _ = wm.apply(at, event);
         }
-        assert!(wm.window().contains(cursor.x, cursor.y));
+        // The prefix leaves a window on screen for a person to use.
+        assert!(wm.is_shown());
+        assert!(!wm.rect().is_empty());
+        assert!(wm.rect().contains(at.x, at.y));
     }
 
     #[test]

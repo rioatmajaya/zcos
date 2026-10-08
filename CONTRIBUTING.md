@@ -22,6 +22,10 @@ cargo test --workspace        # host unit tests for every pure module
 
 ./tools/build-efi.sh --test   # CI path: build with isa-debug-exit
 ./tools/run-qemu.sh --test    # headless boot test; exits 0 on success
+
+# The second CI run. The two frame proofs need different final frames, so CI
+# proves each in its own boot (ADR 0029).
+./tools/build-efi.sh --test-close && ./tools/run-qemu.sh --test-close
 ```
 
 **The green path is a rule.** `main` must always build, pass host tests, and
@@ -114,7 +118,8 @@ format requires at least a minor bump and a changelog `Changed`/`Removed` note.
 2. Keep the branch focused. If a component stalls for two working weeks, park
    it per [`docs/blocked/TEMPLATE.md`](docs/blocked/TEMPLATE.md) and move on.
 3. Before opening a PR: `cargo test --workspace`, then
-   `./tools/build-efi.sh --test && ./tools/run-qemu.sh --test`.
+   `./tools/build-efi.sh --test && ./tools/run-qemu.sh --test`, then the
+   `--test-close` pair.
 4. Update the changelog and, if you made an architectural choice, add an ADR
    under [`docs/adr/`](docs/adr/README.md).
 5. A PR is mergeable when the `host`, `boot`, and `changelog` CI jobs are

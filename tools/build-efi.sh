@@ -2,10 +2,17 @@
 # Build the ZC OS UEFI loader and kernel, and package them into a bootable
 # FAT image that QEMU/OVMF can start.
 #
-# Usage: tools/build-efi.sh [--test]
-#   --test  build both the loader and the kernel with the qemu-exit feature so
-#           tools/run-qemu.sh --test can terminate the emulator with a status
-#           code once the kernel reaches its idle state.
+# Usage: tools/build-efi.sh [--test | --test-close]
+#   --test         build with the qemu-exit feature so tools/run-qemu.sh --test
+#                  can terminate the emulator with a status code once the kernel
+#                  reaches its idle state. The scripted mouse session stops with
+#                  the window on screen.
+#   --test-close   as above, and additionally build the kernel with close-proof so
+#                  the scripted session also clicks close. That proves the
+#                  window's session-ending protocol end to end, at the cost of a
+#                  final frame with no window in it — which is why it is a
+#                  separate image and a separate CI run, and why the default is
+#                  the one a person boots (ADR 0026).
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -15,11 +22,27 @@ uefi_target=x86_64-unknown-uefi
 none_target=x86_64-unknown-none
 image=build/zcos.img
 esp_size_mib=4
-features=""
+# `qemu-exit` belongs to both binaries; `close-proof` only to the kernel, which is
+# the only one with the scripted mouse session.
+loader_features=""
+kernel_features=""
 
-if [ "${1:-}" = "--test" ]; then
-    features="--features qemu-exit"
-fi
+case "${1:-}" in
+    --test)
+        loader_features="--features qemu-exit"
+        kernel_features="--features qemu-exit"
+        ;;
+    --test-close)
+        loader_features="--features qemu-exit"
+        kernel_features="--features qemu-exit,close-proof"
+        ;;
+    "")
+        ;;
+    *)
+        echo "usage: $0 [--test|--test-close]" >&2
+        exit 2
+        ;;
+esac
 
 if ! rustup target list --installed | grep -qx "$uefi_target"; then
     echo "installing rust target $uefi_target"
@@ -31,11 +54,11 @@ if ! rustup target list --installed | grep -qx "$none_target"; then
 fi
 
 # shellcheck disable=SC2086
-cargo build -p zc-uefi-loader --target "$uefi_target" --release $features
+cargo build -p zc-uefi-loader --target "$uefi_target" --release $loader_features
 
 # shellcheck disable=SC2086
 cargo build --manifest-path kernel/zc-kernel-image/Cargo.toml \
-    --target "$none_target" --target-dir target --release $features
+    --target "$none_target" --target-dir target --release $kernel_features
 
 efi="target/$uefi_target/release/zc-uefi-loader.efi"
 kernel="target/$none_target/release/zc-kernel"

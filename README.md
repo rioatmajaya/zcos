@@ -164,7 +164,8 @@ cargo test --workspace
 
 ./tools/build-efi.sh          # produce build/zcos.img (loader + kernel + user tasks + initramfs)
 ./tools/run-qemu.sh           # boot it under QEMU + OVMF
-./tools/run-qemu.sh --test    # headless boot test for CI
+./tools/run-qemu.sh --test    # headless boot test for CI (window left on screen)
+./tools/run-qemu.sh --test-close  # the second CI run: proves the close protocol
 ```
 
 `tools/build-efi.sh` needs the `x86_64-unknown-uefi` and
@@ -174,18 +175,22 @@ The host verification script checks all of them.
 
 ### What an interactive boot shows
 
-`run-qemu.sh` runs a **boot proof, not a session**. On start the compositor
-replays a scripted mouse session — the window drags itself, minimizes, restores
-from the taskbar, then closes and erases — while the window client types its
-scripted keystrokes. That animation is the demo, and it is why the desktop looks
-like it is acting on its own.
+`run-qemu.sh` starts with a **scripted mouse session**, which is why the desktop
+looks like it is acting on its own: the window drags itself to the left edge,
+minimizes, and is restored from the taskbar. It ends with the window **on screen**
+and every task still running, so afterwards you can move the pointer, type into the
+window, and use the serial shell on the QEMU terminal (`help`, `cat`, `stat`,
+`write`, `tmp`, `chmod`, `exit` — listed in `tools/boot-script.txt`).
 
-When the scripted session ends, the desktop is bare and the serial shell waits for
-input on the QEMU terminal (`help`, `cat`, `stat`, `write`, `tmp`, `chmod`,
-`exit` — the commands are listed in `tools/boot-script.txt`). A normal build never
-arms the task watchdog, so the machine stays up indefinitely; only the `--test`
-build arms it, because a wedged task must fail CI rather than hang it. See
-[ADR 0028](docs/adr/0028-boot-watchdog-only-in-test-builds.md).
+A normal build never arms the task watchdog, so the machine stays up
+indefinitely; only the `--test` builds arm it, because a wedged task must fail CI
+rather than hang it. See [ADR 0028](docs/adr/0028-boot-watchdog-only-in-test-builds.md).
+
+CI runs the boot twice, because the two frame proofs need different final frames:
+`--test` leaves a window up (proving the compositor placed the client's pixels,
+[ADR 0018](docs/adr/0018-window-placement-proof.md)) and `--test-close` closes it
+(proving the erase, [ADR 0026](docs/adr/0026-closing-a-window-ends-a-session.md)).
+See [ADR 0029](docs/adr/0029-two-scripted-sessions.md).
 
 ## Documentation
 

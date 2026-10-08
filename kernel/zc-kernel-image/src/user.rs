@@ -1906,14 +1906,19 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             0
         }
         Ok(Action::MouseRead) => {
-            use zc_abi::cursor::{MOUSE_NO_REPORT, MOUSE_SCRIPT, pack_report};
+            use zc_abi::cursor::{MOUSE_NO_REPORT, MOUSE_SCRIPT, pack_report, script_len};
             // The scripted session runs first, so the boot proof derives the
             // same pointer position the compositor paints; after it the live
             // movement the drain accumulated is delivered. Non-blocking: the
             // compositor polls, so it never waits on a report that may not come.
             // SAFETY: owned here; interrupts are masked through this arm.
+            // A `close-proof` build serves the whole script and ends the
+            // window's session, which is what proves the close protocol. Every
+            // other build serves only the window-up prefix, so an interactive
+            // boot leaves a window on screen for the person to actually use.
+            let len = script_len(cfg!(feature = "close-proof"));
             let index = unsafe { &mut *addr_of_mut!(MOUSE_SCRIPT_INDEX) };
-            if *index < MOUSE_SCRIPT.len() {
+            if *index < len {
                 let step = MOUSE_SCRIPT[*index];
                 *index += 1;
                 // The scripted reports carry button bits, so the boot proof

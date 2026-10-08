@@ -184,21 +184,20 @@ jobs:
         grep -q "fb: cursor ok" build/boot.log
         # The pointer is not just drawn, it is driven: the scripted mouse session
         # presses the left button on the window's title bar, drags the window off
-        # its scripted frame position, releases, clicks the minimize glyph,
-        # clicks the taskbar's task button to bring it back, and finally clicks
-        # close. The window machine runs on both sides (ADR 0024), so the desktop
-        # checksum still recomputes the desktop exactly around wherever the window
-        # ended up — and with the window closed, that covers the whole frame
-        # including the footprint the close vacated (ADR 0026).
+        # its scripted frame position, releases, clicks the minimize glyph, and
+        # clicks the taskbar's task button to bring it back. The window machine
+        # runs on both sides (ADR 0024), so the desktop checksum still recomputes
+        # the desktop exactly around wherever the window ended up — and this
+        # variant leaves the window on screen, which is what proves the compositor
+        # placed the client's pixels (ADR 0018).
         grep -q "compositor: window dragged" build/boot.log
         grep -q "compositor: window minimized" build/boot.log
         grep -q "compositor: window restored" build/boot.log
-        grep -q "compositor: window closed" build/boot.log
-        grep -q "compositor: window erased" build/boot.log
-        grep -q "fb: no window, placement skipped" build/boot.log
+        ! grep -q "compositor: window closed" build/boot.log
         ! grep -q "cursor checksum mismatch" build/boot.log
         ! grep -q "desktop checksum mismatch" build/boot.log
         ! grep -q "window placement mismatch" build/boot.log
+        ! grep -q "fb: no window, placement skipped" build/boot.log
         grep -q "fb: desktop checksum ok" build/boot.log
         grep -q "switches" build/boot.log
         grep -q "acpi: rsdp v2" build/boot.log
@@ -220,3 +219,31 @@ jobs:
       run: ./tools/check-disk-zcfs.sh
     - name: Check the fsck repair
       run: ./tools/check-fsck.sh
+
+    # Closing a window ends its session and erases it, so its final frame has no
+    # window in it — the two frame proofs are alternatives, and only a second run
+    # can cover the other one (ADR 0026). This build serves the same scripted
+    # gestures plus the close click.
+    - name: Build the close-proof image
+      run: ./tools/build-efi.sh --test-close
+    - name: Boot test the close proof
+      run: ./tools/run-qemu.sh --test-close > build/boot-close.log 2>&1
+    - name: Check the close proof
+      run: |
+        cat build/boot-close.log
+        # The window is closed, so the client ends through the path it already
+        # used and the compositor erases the remembered footprint.
+        grep -q "compositor: window dragged" build/boot-close.log
+        grep -q "compositor: window minimized" build/boot-close.log
+        grep -q "compositor: window restored" build/boot-close.log
+        grep -q "compositor: window closed" build/boot-close.log
+        grep -q "compositor: window erased" build/boot-close.log
+        grep -q "task 8: client: window painted" build/boot-close.log
+        # With no window on screen the desktop half of the check becomes total:
+        # every pixel, including the vacated footprint, recomputes exactly.
+        grep -q "fb: no window, placement skipped" build/boot-close.log
+        grep -q "wm: content ok" build/boot-close.log
+        grep -q "fb: desktop checksum ok" build/boot-close.log
+        ! grep -q "cursor checksum mismatch" build/boot-close.log
+        ! grep -q "desktop checksum mismatch" build/boot-close.log
+        grep -q "kernel reached idle state" build/boot-close.log

@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 7 grants`, `task 6: devmgr: blk published`, `dma: window coherent ok` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–6, F8e-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `client: vfs ok`; `wm: window mapped`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed`; `compositor: window erased`; `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui host tests pass |
+| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–7, F8e-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: window painted`; `client: vfs ok`; `wm: window mapped`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed` (close run); `compositor: window erased` (close run); `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui host tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -551,6 +551,20 @@ full browser. Note them as follow-ups, do not build them here.
         finding it alive with no timeout in the log; CI is unchanged and still
         fails fast. See
         [`adr/0028`](adr/0028-boot-watchdog-only-in-test-builds.md).
+      - [x] F8b-7: the demo stops destroying itself. The scripted session ended by
+        clicking close, so an interactive boot ended with a bare desktop, an exited
+        compositor and an exited client — nothing left to interact with. That is
+        structural rather than a slip: the compositor drains the whole scripted
+        session before its event loop, so a close click always precedes the
+        client's keystrokes, and "ends with a window up" and "ends with a close"
+        cannot both hold in one run. `MOUSE_SCRIPT` is therefore one array served
+        at one of two lengths — `script_len(close)` gives the whole script or the
+        prefix before the close suffix, so the shared gestures are described once
+        and cannot drift. The default build leaves a live window; a `close-proof`
+        kernel feature behind `build-efi.sh --test-close` keeps the close protocol
+        proven end to end. CI runs both, each asserting the other's markers are
+        absent, so placement is proven again *and* the erase keeps its proof.
+        See [`adr/0029`](adr/0029-two-scripted-sessions.md).
 - [x] F8c: 2D renderer with a bitmap font and text overlay. `zc-abi::font`
       embeds the VGA 8x16 glyph set and exposes `glyph_row`/`glyph_bit`/
       `text_blend`/`text_width` as pure `const`-callable helpers; the window
@@ -739,15 +753,20 @@ full browser. Note them as follow-ups, do not build them here.
   exact check covers the minimize, not just the restore. The `zc-abi` host tests
   pass, including that each decoration glyph really paints inside the rectangle
   hit-testing claims for it.
-- The window closes and its session ends (F8b-5): the compositor logs
+- The window closes and its session ends (F8b-5, run B): the compositor logs
   `compositor: window closed` and then `compositor: window erased`, the client
   logs `client: window painted` and exits through the path it already used, and
   `fb: desktop checksum ok` still passes with `fb: no window, placement skipped`.
   With no window on screen the desktop half of the check becomes *total*: every
   pixel of the final frame, including the footprint the close vacated, recomputes
-  exactly from the shared layout. The placement half is unchanged but does not run
-  in this scenario — the two final-frame proofs are alternatives, and ADR 0026
-  records the trade explicitly rather than leaving it implicit.
+  exactly from the shared layout. This runs from `build-efi.sh --test-close` and
+  `run-qemu.sh --test-close`.
+- The interactive boot leaves a usable window, and both frame proofs run (F8b-7):
+  the default `--test` run logs `compositor: window dragged`, `… minimized` and
+  `… restored` and must **not** log `compositor: window closed`, so the window is
+  still on screen for `fb: desktop checksum ok` to placement-check against the
+  client's surface. The close run asserts the mirror image. Together the two runs
+  cover both claims; neither alone can.
 - Clean shutdown: `power: halt clean`.
 - Audio plays a known tone and the driver reports no XRUN under a stress
   buffer: `snd: playback ok`.
