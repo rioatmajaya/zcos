@@ -173,6 +173,13 @@ cargo test --workspace
 `tools/run-qemu.sh` needs `qemu-system-x86_64` and an OVMF firmware package.
 The host verification script checks all of them.
 
+**`run-qemu.sh` does not build.** It boots whatever `build/zcos.img` already
+holds, and refuses to start if that image is older than the sources — booting a
+stale kernel looks exactly like a fix that had no effect. If you have changed
+anything, run `./tools/build-efi.sh` first. The two CI variants write to their own
+images (`build/zcos.img` and `build/zcos-close.img`), so a CI run can never leave
+the wrong kernel in the one you boot.
+
 ### What an interactive boot shows
 
 `run-qemu.sh` starts with a **scripted mouse session**, which is why the desktop

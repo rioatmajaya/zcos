@@ -564,7 +564,13 @@ full browser. Note them as follow-ups, do not build them here.
         kernel feature behind `build-efi.sh --test-close` keeps the close protocol
         proven end to end. CI runs both, each asserting the other's markers are
         absent, so placement is proven again *and* the erase keeps its proof.
-        See [`adr/0029`](adr/0029-two-scripted-sessions.md).
+        Each variant also writes its **own** image (`build/zcos.img` versus
+        `build/zcos-close.img`): sharing one path meant the last build won, so a CI
+        close run left the interactive image holding the close-proof kernel — a
+        person booting it saw the old empty desktop and reasonably concluded the
+        fix had done nothing. `run-qemu.sh` now also refuses to boot an image
+        older than the sources, since that reads the same way. See
+        [`adr/0029`](adr/0029-two-scripted-sessions.md).
 - [x] F8c: 2D renderer with a bitmap font and text overlay. `zc-abi::font`
       embeds the VGA 8x16 glyph set and exposes `glyph_row`/`glyph_bit`/
       `text_blend`/`text_width` as pure `const`-callable helpers; the window

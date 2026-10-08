@@ -62,6 +62,20 @@ still learns no address.
 
 ### Fixed
 
+- **A CI build could leave the wrong kernel in the image a person boots** (F8b-7):
+  `build-efi.sh --test-close` wrote to the same path as the default build, so the
+  last build won. A CI close run therefore left `build/zcos.img` holding the
+  close-proof kernel, and the next `tools/run-qemu.sh` booted a desktop that
+  closes its own window — reported as "my fix had no effect", when the fix was
+  fine and the image was simply the other variant. Each variant now has its own
+  image (`build/zcos.img` and `build/zcos-close.img`), verified isolated: a full
+  close-proof build and boot leaves the interactive image byte-identical.
+- **`run-qemu.sh` refuses to boot an image older than the sources.** The script
+  never built, so an image left over from an earlier edit booted yesterday's
+  kernel and looked like a fix that did not work. A `find -newer` check turns that
+  silent failure into a message naming the build command to run. It catches
+  *unbuilt sources*, not a wrong feature variant — which is why the variants now
+  write to different paths rather than relying on a check to tell them apart.
 - **The interactive desktop no longer destroys itself at the end of its demo**
   (F8b-7): the scripted mouse session ended by clicking the close glyph, so
   `tools/run-qemu.sh` left a bare desktop, an exited compositor and an exited

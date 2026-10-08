@@ -17,9 +17,50 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
-image=build/zcos.img
+# Refuse to boot an image older than the sources.
+#
+# This script does not build, so an image left over from an earlier edit boots
+# the old kernel and looks like the fix "did not work" — which is exactly what
+# happened once already. `find -newer` turns that silent failure into a message
+# naming the fix: any source newer than the image means the image cannot contain
+# the current code.
+is_stale() {
+    find boot kernel libs user -name '*.rs' -newer "$1" -print -quit 2>/dev/null | grep -q .
+}
+
+# Pick the image and the command that builds it. Each variant has its own image
+# so a CI build can never leave a different kernel in the one a person boots.
+case "${1:-}" in
+    --test)
+        mode=--test
+        image=build/zcos.img
+        build_hint="tools/build-efi.sh --test"
+        ;;
+    --test-close)
+        mode=--test-close
+        image=build/zcos-close.img
+        build_hint="tools/build-efi.sh --test-close"
+        ;;
+    "")
+        mode=interactive
+        image=build/zcos.img
+        build_hint="tools/build-efi.sh"
+        ;;
+    *)
+        echo "usage: $0 [--test|--test-close]" >&2
+        exit 2
+        ;;
+esac
+
 if [ ! -f "$image" ]; then
-    echo "error: $image not found; run tools/build-efi.sh first" >&2
+    echo "error: $image not found; build it with: $build_hint" >&2
+    exit 1
+fi
+
+if is_stale "$image"; then
+    echo "error: $image is older than the sources, so it cannot contain the" >&2
+    echo "       current code — you would be booting an old kernel." >&2
+    echo "       rebuild with: $build_hint" >&2
     exit 1
 fi
 
@@ -55,18 +96,10 @@ common="-machine q35 -m 512M -net none -vga std -no-reboot
 -drive file=$root/build/disk.img,format=raw,if=none,id=vdisk
 -device virtio-blk-pci,disable-modern=on,drive=vdisk"
 
-case "${1:-}" in
-    --test|--test-close)
-        mode=$1
-        ;;
-    "")
-        exec qemu-system-x86_64 $common -serial stdio
-        ;;
-    *)
-        echo "usage: $0 [--test|--test-close]" >&2
-        exit 2
-        ;;
-esac
+if [ "$mode" = interactive ]; then
+    # shellcheck disable=SC2086
+    exec qemu-system-x86_64 $common -serial stdio
+fi
 
 # Headless CI mode. isa-debug-exit turns the loader's port write into a process
 # exit code; writing 0x10 makes QEMU exit with (0x10 << 1) | 1 = 33.

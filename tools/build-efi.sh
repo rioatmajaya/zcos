@@ -20,12 +20,12 @@ cd "$root"
 
 uefi_target=x86_64-unknown-uefi
 none_target=x86_64-unknown-none
-image=build/zcos.img
 esp_size_mib=4
 # `qemu-exit` belongs to both binaries; `close-proof` only to the kernel, which is
 # the only one with the scripted mouse session.
 loader_features=""
 kernel_features=""
+image=build/zcos.img
 
 case "${1:-}" in
     --test)
@@ -35,6 +35,11 @@ case "${1:-}" in
     --test-close)
         loader_features="--features qemu-exit"
         kernel_features="--features qemu-exit,close-proof"
+        # Its own image, so this CI-only variant can never overwrite the one a
+        # person boots. Sharing a path meant the last build won: a CI close run
+        # left `build/zcos.img` holding the close-proof kernel, and the next
+        # `tools/run-qemu.sh` booted a desktop that destroys its own window.
+        image=build/zcos-close.img
         ;;
     "")
         ;;
