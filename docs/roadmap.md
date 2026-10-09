@@ -743,8 +743,27 @@ full browser. Note them as follow-ups, do not build them here.
 - [ ] F8i: audio stack (virtio-snd first, then HD Audio) after the desktop is
       stable.
 - [ ] F8j: USB stack (xHCI) for keyboard, mouse, and mass storage.
-- [ ] F8k: power management — idle, clean shutdown, suspend/resume, thermal
-      and battery reporting.
+- [x] F8k-1: clean shutdown as a syscall. `SYS_POWEROFF` (34), callable only by
+      the serial shell, which is the console owner: it flushes the block domain
+      and unmounts `/data` through the same path as `SYS_UMOUNT` — so
+      `FLAG_CLEAN` is set exactly as at any other clean unmount — and then
+      writes ACPI S5. The power state comes from firmware, never a hardcoded
+      QEMU constant: FADT for the PM1 control block and `ACPI_ENABLE`, DSDT
+      `_S5_` for both `SLP_TYP` values, walked with a minimal AML reader that
+      accepts only small integers. No usable ACPI means `power: no acpi` and
+      halting the CPUs, never writing a guess to a control port. The window
+      client is refused, deliberately: it runs untrusted keystrokes, and a typed
+      `poweroff` there must not work. `tools/check-poweroff.sh` boots the
+      interactive image, waits for the shell and the `/data` mount, sends
+      `poweroff`, and asserts three independent signals — QEMU exited 0, the log
+      holds `power: halt clean`, and a host `fsck --check` says `fsck: clean`
+      — because each one alone lies. Landing it required fixing a real kernel
+      bug first: all IDT gates shared IST1, so a tick landing inside a handler
+      that re-enables interrupts (the serial reader) overwrote that handler's
+      own frames. See [`adr/0032`](adr/0032-clean-shutdown-is-a-syscall.md) and
+      [`adr/0033`](adr/0033-device-interrupts-get-their-own-stack.md).
+- [ ] F8k-2+: the rest of F8k — idle states, suspend/resume, thermal and
+      battery reporting — and a window-terminal path to power off.
 - [ ] F8l: AMD iGPU driver for hardware acceleration (last, optional for 1.0).
 
 **Pass criteria (machine).**

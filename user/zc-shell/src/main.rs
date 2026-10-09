@@ -22,7 +22,7 @@
 
 use zc_user::{
     FS_ID_ZCFS, FS_OP_STOP, IPC_FS, KIND_CHR, KIND_DIR, Stat, chmod, close, create, log, mount,
-    open, read, send_to, serial_read, stat, task_exit, umount, write,
+    open, poweroff, read, send_to, serial_read, stat, task_exit, umount, write,
 };
 
 /// Contents `persist` writes and expects to read back.
@@ -213,7 +213,7 @@ fn run(line: &[u8]) -> bool {
     }
     match argv[0] {
         b"help" => {
-            log("Commands: help echo cat stat write tmp persist chmod mount umount exit\n");
+            log("Commands: help echo cat stat write tmp persist chmod mount umount poweroff exit\n");
         }
         b"echo" => {
             for index in 1..count {
@@ -430,6 +430,13 @@ fn run(line: &[u8]) -> bool {
             // with the volume clean instead of waiting out the timeout.
             let _ = send_to(IPC_FS as u64, FS_OP_STOP as u64);
             return true;
+        }
+        b"poweroff" => {
+            log("shell powering off\n");
+            // Never returns: the kernel flushes the volume and writes ACPI
+            // S5 (QEMU exits), or halts when firmware offers no power info.
+            poweroff();
+            loop {}
         }
         _ => {
             log("unknown command\n");

@@ -1206,25 +1206,49 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 regs.set_result(u64::from(byte));
                 return 0;
             }
-            // The shell is the idle anchor: it must stay runnable so the
-            // scheduler always has a peer to switch to, even when every other
-            // task is blocked or has exited. Idle with interrupts on until a
-            // keystroke lands instead of blocking: blocking here would strand
-            // the shell once its runnable peers exit without producing input,
-            // and a later block (e.g. `initd` parking on its channel) would
-            // find no runnable peer and misfire as an IPC deadlock. `hlt`
-            // still lets the timer preempt to any runnable task, so peers make
-            // progress while the shell waits.
-            unsafe {
-                core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
-            }
-            while !crate::serial::input_available() {
+            // Wait for a byte, sleeping in `hlt` and letting the other
+            // tasks run between checks.
+            //
+            // Each wake rewinds the saved `rip` past the two-byte `int 0x80`
+            // before handing the task off, exactly like `block_with_retry`.
+            // That is what makes the hand-off sound: a tick cannot preempt
+            // out of a handler (see `sched_tick`), so this is the only way a
+            // waiting task ever gives up the CPU, and it saves a *user*
+            // frame — never the kernel frame the handler is standing on.
+            // The task is not marked blocked, so it stays the idle anchor:
+            // with no runnable peer the hand-off is refused, the rewind is
+            // undone, and the wait simply continues.
+            //
+            // Re-enabling interrupts here is what makes the dedicated device
+            // stack load-bearing: a tick can now arrive inside this handler,
+            // and it must not land on the stack the handler is running on.
+            // See `idt::IST_INDEX_DEVICE`.
+            //
+            // The volatile read in `input_available` forces re-evaluation
+            // every pass; a plain snapshot lets the compiler hoist the read
+            // out of the loop and hides bytes that arrived after the first
+            // check. The check that exits and the pop that consumes stay
+            // masked against the timer.
+            loop {
                 unsafe {
-                    core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
+                    core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
                 }
-            }
-            unsafe {
-                core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
+                if crate::serial::input_available() {
+                    break;
+                }
+                frame.rip = frame.rip.wrapping_sub(2);
+                unsafe {
+                    core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
+                    core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
+                    core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
+                }
+                match tasks.switch_from(regs, frame) {
+                    Ok(_) => {
+                        publish_next_cr3(tasks);
+                        return 0;
+                    }
+                    Err(_) => frame.rip = frame.rip.wrapping_add(2),
+                }
             }
             match crate::serial::read_input() {
                 Some(byte) => {
@@ -1905,6 +1929,80 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             regs.set_result(0);
             0
         }
+        Ok(Action::Poweroff) => {
+            // The serial shell is the machine's operator: it runs the keystrokes
+            // of whoever sits at the console. Every other task — the window
+            // client above all, which runs untrusted input — is refused, so a
+            // typed line in the wrong place cannot kill the machine.
+            if tasks.current() != service::SHELL_TASK {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            // Clean means the writable volume went through its unmount path
+            // (flush, `mark_clean`, slot cleared) before power dies. ramfs,
+            // tmpfs, and devfs are RAM and die with the machine; only `/data`
+            // has anything durable to lose. An unmounted-or-absent `/data`
+            // needs no flush, so that stays clean too.
+            let mut clean = true;
+            // SAFETY: mounted once during setup before any task runs.
+            let mounted = unsafe { (&*addr_of!(MOUNTS)).resolve(b"/data").is_ok() };
+            if mounted {
+                match crate::zcfs_proxy::flush() {
+                    Ok(()) => {}
+                    Err(zc_kernel::vfs::VfsError::WouldBlock) => {
+                        tasks.unblock_all();
+                        return block_with_retry(tasks, regs, frame, 0);
+                    }
+                    Err(_) => clean = false,
+                }
+                match crate::zcfs_proxy::unmount() {
+                    Ok(()) => {}
+                    Err(zc_kernel::vfs::VfsError::WouldBlock) => {
+                        tasks.unblock_all();
+                        return block_with_retry(tasks, regs, frame, 0);
+                    }
+                    Err(_) => clean = false,
+                }
+                // SAFETY: as above; the proxy calls already flushed.
+                if unsafe { (&mut *addr_of_mut!(MOUNTS)).unmount(b"/data").is_err() } {
+                    clean = false;
+                }
+            }
+            if clean {
+                crate::serial::write_str("power: halt clean\n");
+            } else {
+                crate::serial::write_str("power: halt dirty\n");
+            }
+            // Enter ACPI mode if firmware needs the dance, then write S5. The
+            // enable spin is bounded: a dead SMI handler must not hang a
+            // shutdown, and the S5 write is attempted regardless.
+            if let Some(power) = crate::acpi::power() {
+                use zc_kernel::acpi::SCI_EN;
+                if power.smi_cmd != 0 {
+                    crate::serial::outb(power.smi_cmd, power.acpi_enable);
+                    let mut spins = 0;
+                    while crate::serial::inw(power.pm1a_cnt) & SCI_EN == 0 && spins < 10_000 {
+                        spins += 1;
+                    }
+                }
+                let value =
+                    (u16::from(power.slp_typa) << 10) | zc_kernel::acpi::SLP_EN;
+                crate::serial::outw(power.pm1a_cnt, value);
+                if power.pm1b_cnt != 0 {
+                    let value_b =
+                        (u16::from(power.slp_typb) << 10) | zc_kernel::acpi::SLP_EN;
+                    crate::serial::outw(power.pm1b_cnt, value_b);
+                }
+            } else {
+                crate::serial::write_str("power: no acpi\n");
+            }
+            // The S5 write powers the machine off (QEMU exits); if control
+            // ever returns, halting is the only honest thing left.
+            loop {
+                // SAFETY: halting is always valid at ring 0 and never returns.
+                unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)) };
+            }
+        }
         Ok(Action::MouseRead) => {
             use zc_abi::cursor::{MOUSE_NO_REPORT, MOUSE_SCRIPT, pack_report, script_len};
             // The scripted session runs first, so the boot proof derives the
@@ -2085,6 +2183,18 @@ pub unsafe extern "C" fn sched_tick(regs: *mut SyscallRegs, frame: *mut IrqFrame
         tasks.unblock_all();
     }
     if tasks.alive_count() == 0 {
+        return;
+    }
+    // A tick that landed inside a handler interrupted ring 0, so this frame is
+    // a kernel frame pointing into the handler's interrupt stack. Saving it
+    // as a task's resumption point is unsound: the resumed task would return
+    // into the kernel mid-handler, on a stack the next task's own trap has
+    // since overwritten.
+    //
+    // So a tick never switches *out of* a handler. Nothing is lost: the only
+    // handler that sleeps is the serial reader, and it hands the CPU over
+    // itself with a rewound user frame.
+    if frame.cs & 3 == 0 {
         return;
     }
     if tasks.switch_from(regs, frame).is_err() {

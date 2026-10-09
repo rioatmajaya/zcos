@@ -34,8 +34,8 @@ pub(crate) fn inb(port: u16) -> u8 {
 
 /// Writes a 16-bit word to an I/O port.
 ///
-/// Kept for future device-manager work; same safety contract as [`outb`].
-#[allow(dead_code)]
+/// Used by the ACPI poweroff path for the `PM1_CNT` sleep write; same safety
+/// contract as [`outb`].
 pub(crate) fn outw(port: u16, value: u16) {
     // SAFETY: the kernel runs at ring 0; port I/O is permitted.
     unsafe {
@@ -45,8 +45,8 @@ pub(crate) fn outw(port: u16, value: u16) {
 
 /// Reads a 16-bit word from an I/O port.
 ///
-/// Kept for future device-manager work; same safety contract as [`inb`].
-#[allow(dead_code)]
+/// Used by the ACPI poweroff path to poll `SCI_EN`; same safety contract as
+/// [`inb`].
 pub(crate) fn inw(port: u16) -> u16 {
     let value: u16;
     // SAFETY: the kernel runs at ring 0; port I/O is permitted.
@@ -132,9 +132,20 @@ pub fn poll_input() {
 }
 
 /// Returns whether the receive ring holds a byte.
+///
+/// Volatile read on purpose: the serial wait loop in `SYS_SERIAL_READ` spins
+/// on this, and a plain snapshot lets the compiler hoist the read out of the
+/// loop — the waiter then sleeps through bytes that already arrived. That
+/// exact failure hid late serial input for as long as every byte arrived
+/// before the first check (which is why the scripted transcript always
+/// worked and only live typing died).
 pub fn input_available() -> bool {
     // SAFETY: read-only and interrupt-masked here.
-    unsafe { !core::ptr::addr_of!(INPUT_RING).read().is_empty() }
+    unsafe {
+        !core::ptr::addr_of!(INPUT_RING)
+            .read_volatile()
+            .is_empty()
+    }
 }
 
 /// Removes and returns the oldest buffered byte, if any.

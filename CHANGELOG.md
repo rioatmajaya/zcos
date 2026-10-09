@@ -58,10 +58,49 @@ manager scans the bus and brokers the BAR it finds, so the kernel never touches
 it and `kernel/zc-kernel-image/src/pci.rs` is gone. It brokers device memory
 too: the same manager discovers the AHCI controller's ABAR and the kernel maps
 it into the domain, so a ring-3 driver can touch its registers while ring 0
-still learns no address.
+still learns no address. F8k has started: `SYS_POWEROFF` is a syscall the
+serial shell alone may call, which flushes and unmounts `/data` through the
+same path as `SYS_UMOUNT` and then writes ACPI S5 taken from firmware tables —
+FADT for the PM1 control block, DSDT `_S5_` for the two `SLP_TYP` values —
+never a hardcoded QEMU constant. A machine can now be stopped cleanly instead
+of having its emulator killed. See
+[ADR 0032](docs/adr/0032-clean-shutdown-is-a-syscall.md).
 
 ### Fixed
 
+- **Every trap shared one interrupt stack, and a waiting syscall proved it was
+  not safe** (F8k). All IDT gates named IST1 on the reasoning that an interrupt
+  gate clears IF, so handlers cannot nest and one stack per CPU suffices. That
+  holds only while no handler re-enables interrupts — and `SYS_SERIAL_READ`
+  does, because waiting for a keystroke is `sti` + `hlt`. A timer tick landing
+  inside that handler reset the stack pointer to the top of the very stack the
+  handler was standing on, overwriting its frames; the handler's later `iretq`
+  then popped a frame that was not its own.
+
+  The symptoms pointed everywhere except the cause: the shell's `serial_read`
+  returned byte after byte with userspace never advancing, `#GP` landed at the
+  timer's own `iretq`, and `#PF` repeated at task entry addresses. Each read
+  like a scheduler, lost-result, or page-table bug, and none of them was. The
+  machine also looked healthy until someone typed, because a syscall that
+  finishes in microseconds rarely loses the race.
+
+  Device gates now use IST2, so the one nesting that can occur — a device
+  interrupt inside a trap handler — lands on a different stack. Same-vector
+  nesting stays impossible, so two stacks are enough. `sched_tick` also no
+  longer switches out of a handler: that frame is a kernel frame on an
+  interrupt stack, and saving it as a task's resumption point would resume the
+  task into the kernel mid-handler. The serial reader hands the CPU over
+  itself instead, rewinding past the two-byte `int 0x80` first so what it saves
+  is a user frame that re-enters fresh. While waiting it also reads the ring
+  through `read_volatile`, because a plain snapshot let the compiler hoist the
+  availability check out of the loop and hide every byte that arrived after the
+  first one.
+
+  Three mutations confirm the checks catch this rather than merely passing
+  beside it: sharing IST1 again turns `check-live-input` red with a
+  kernel-context exception, letting a tick switch out of a handler turns it red
+  with `ipc deadlock`, and dropping the rewind turns `check-poweroff` red.
+  See [ADR 0033](docs/adr/0033-device-interrupts-get-their-own-stack.md).
 - **A false claim about the desktop was recorded as fact, and it was wrong.** The
   ADR for F8b-7 and my own commit message asserted that the window "still shows
   the terminal's scripted keystrokes rather than anything typed". Typed input has

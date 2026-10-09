@@ -28,11 +28,29 @@ use zc_kernel::trap::{
 /// Kernel code-segment selector installed by the loader's GDT.
 const KERNEL_CS: u16 = 0x08;
 
-/// IST slot every IDT gate uses; the TSS (see `gdt`) must be installed first.
+/// IST slot the trap gates use: exceptions and `int 0x80`.
 ///
 /// Every handler runs on the dedicated interrupt stack, so no trap ever
 /// borrows a user stack or the interrupted red zone.
 const IST_INDEX: u8 = 1;
+
+/// IST slot the device gates use: timer, keyboard, mouse, spurious.
+///
+/// A separate stack, so a tick that lands while a trap handler has
+/// interrupts re-enabled (the serial reader waits that way) cannot overwrite
+/// the frames of the handler it interrupted. See [`IST_INDEX`].
+const IST_INDEX_DEVICE: u8 = 2;
+
+/// Returns whether `vector` is one of the device interrupts.
+///
+/// These are the only gates that may nest inside a trap handler, because
+/// only a waiting handler re-enables interrupts.
+fn is_device_vector(vector: u8) -> bool {
+    matches!(
+        vector,
+        TIMER_VECTOR | KBD_VECTOR | MOUSE_VECTOR | SPURIOUS_VECTOR
+    )
+}
 
 /// How many vectors have a dedicated handler (exceptions, timer, keyboard,
 /// syscall, and spurious).
@@ -406,14 +424,21 @@ struct Idtr {
 /// Every vector resolves to a handler, so no trap can fall through to the
 /// firmware tables released by `ExitBootServices`. The syscall vector uses
 /// DPL 3 so userspace may invoke it; all other gates stay at DPL 0. Every
-/// gate uses IST1, so handlers never run on a user stack.
+/// gate runs on its own interrupt stack, so no trap ever borrows a user
+/// stack or the interrupted red zone, and the device gates get a second
+/// stack so they cannot land on top of a waiting trap handler.
 pub fn install() {
     for vector in 0..=255u8 {
         let dpl = if vector == SYSCALL_VECTOR { 3 } else { 0 };
+        let ist = if is_device_vector(vector) {
+            IST_INDEX_DEVICE
+        } else {
+            IST_INDEX
+        };
         let entry = IdtEntry::new(
             handler_for(vector),
             KERNEL_CS,
-            IST_INDEX,
+            ist,
             GateType::Interrupt,
             dpl,
             true,

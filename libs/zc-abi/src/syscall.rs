@@ -129,6 +129,16 @@ pub const SYS_MOUSE_READ: u64 = 32;
 /// to close. This is the same end-of-session signal the shell's exit posts, so
 /// one client path serves both causes.
 pub const SYS_WINDOW_CLOSE: u64 = 33;
+/// Powers the machine off through ACPI S5; never returns on success.
+///
+/// Only the serial shell may invoke it (see `SYS_POWEROFF` in the syscall ABI
+/// spec): it runs the operator's keystrokes, and a window client running
+/// untrusted input must not be able to kill the machine. The kernel flushes
+/// and unmounts the writable volume first, so the shutdown is clean
+/// (`power: halt clean`) rather than a yank, then writes the sleep type the
+/// firmware's `_S5_` package named. Without usable firmware power info it logs
+/// `power: no acpi` and halts instead of guessing at a control port.
+pub const SYS_POWEROFF: u64 = 34;
 
 /// Error codes returned by failed syscalls.
 ///
@@ -218,6 +228,7 @@ mod tests {
         assert_eq!(SYS_MMIO_MAP, 31);
         assert_eq!(SYS_MOUSE_READ, 32);
         assert_eq!(SYS_WINDOW_CLOSE, 33);
+        assert_eq!(SYS_POWEROFF, 34);
     }
 
     #[test]

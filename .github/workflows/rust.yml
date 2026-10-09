@@ -63,7 +63,7 @@ jobs:
         grep -q "task 1: consumer received 2000" build/boot.log
         grep -q "task 1: hello verified" build/boot.log
         grep -q "task 0: manifest ok" build/boot.log
-        grep -q "task 2: Commands: help echo cat stat write tmp persist chmod mount umount exit" build/boot.log
+        grep -q "task 2: Commands: help echo cat stat write tmp persist chmod mount umount poweroff exit" build/boot.log
         grep -q "task 2: hello os" build/boot.log
         grep -q "task 2: hello from the ZC OS initramfs" build/boot.log
         grep -q "task 2: hello.txt: file, 31 bytes" build/boot.log
@@ -272,6 +272,17 @@ jobs:
       run: ./tools/build-efi.sh
     - name: Prove typed input reaches the window
       run: ./tools/check-live-input.sh
+
+    # `check-live-input` types into the *window client*, which reads
+    # `SYS_TERM_READ`. Nothing yet drove the other input path: the shell's
+    # `SYS_SERIAL_READ`, the one a person at a serial console actually uses.
+    # That path is where a waiting syscall re-enables interrupts, and where
+    # the shared-IST bug hid (ADR 0033), so it needs its own end-to-end
+    # proof. It ends the session by powering the machine off, which also
+    # covers F8k-1: the guest must flush `/data`, announce the shutdown, and
+    # let QEMU exit 0 with the filesystem still consistent on the host.
+    - name: Prove a typed shell command powers the machine off cleanly
+      run: ./tools/check-poweroff.sh
 
     # A red boot step currently shows nothing: both runs redirect the emulator
     # output into a log file that no later step reads, so a failure like

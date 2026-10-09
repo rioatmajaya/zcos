@@ -9,7 +9,7 @@
 use zc_abi::{
     SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOSE, SYS_CREATE, SYS_FB_INFO, SYS_IRQ_CLAIM, SYS_IRQ_TEST,
     SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_MMIO_MAP, SYS_MOUNT, SYS_MOUSE_READ, SYS_OPEN,
-    SYS_PORT_CLAIM, SYS_READ, SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ,
+    SYS_PORT_CLAIM, SYS_POWEROFF, SYS_READ, SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ,
     SYS_SERVICE_START,
     SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY,
     SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TERM_READ, SYS_UMOUNT, SYS_WINDOW_CLOSE, SYS_WRITE, SYS_YIELD,
@@ -90,6 +90,8 @@ pub enum Action {
     MouseRead,
     /// End the window input session, so a blocked client observes the end.
     WindowClose,
+    /// Power the machine off through ACPI S5 after flushing filesystems.
+    Poweroff,
 }
 
 /// Maps a raw syscall number to its [`Action`].
@@ -132,6 +134,7 @@ pub const fn dispatch(number: u64) -> Result<Action, SyscallError> {
         SYS_MMIO_MAP => Ok(Action::MmioMap),
         SYS_MOUSE_READ => Ok(Action::MouseRead),
         SYS_WINDOW_CLOSE => Ok(Action::WindowClose),
+        SYS_POWEROFF => Ok(Action::Poweroff),
         _ => Err(SyscallError::InvalidNumber),
     }
 }
@@ -176,12 +179,13 @@ mod tests {
         assert_eq!(dispatch(SYS_MMIO_MAP), Ok(Action::MmioMap));
         assert_eq!(dispatch(SYS_MOUSE_READ), Ok(Action::MouseRead));
         assert_eq!(dispatch(SYS_WINDOW_CLOSE), Ok(Action::WindowClose));
+        assert_eq!(dispatch(SYS_POWEROFF), Ok(Action::Poweroff));
     }
 
     #[test]
     fn unknown_numbers_are_rejected() {
-        // The last assigned number is SYS_WINDOW_CLOSE (33), so probe past it.
-        assert_eq!(dispatch(34), Err(SyscallError::InvalidNumber));
+        // The last assigned number is SYS_POWEROFF (34), so probe past it.
+        assert_eq!(dispatch(35), Err(SyscallError::InvalidNumber));
         assert_eq!(
             dispatch(u64::MAX),
             Err(SyscallError::InvalidNumber)

@@ -14,7 +14,7 @@ pub use zc_abi::{
     FS_ID_ZCFS, FS_OP_STOP, IPC_FS, IPC_SUPERVISE, IPC_WM, IPC_WM_REPLY, KIND_CHR, KIND_DIR,
     KIND_FILE, SERVICE_KIND_EXIT, SERVICE_KIND_FAULT, SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOSE,
     SYS_CREATE, SYS_FB_INFO, SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME,
-    SYS_MMIO_MAP, SYS_MOUNT, SYS_MOUSE_READ, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ, SYS_RECV,
+    SYS_MMIO_MAP, SYS_MOUNT, SYS_MOUSE_READ, SYS_OPEN, SYS_PORT_CLAIM, SYS_POWEROFF, SYS_READ, SYS_RECV,
     SYS_RECV_FROM, SYS_SEND,
     SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START, SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT,
     SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TERM_READ,
@@ -233,6 +233,16 @@ pub fn mouse_read() -> u64 {
 #[inline(always)]
 pub fn window_close() -> u64 {
     syscall0(SYS_WINDOW_CLOSE)
+}
+
+/// Powers the machine off through ACPI S5; never returns on success.
+///
+/// Only the serial shell may call it — the kernel refuses every other task.
+/// The kernel flushes and unmounts the writable volume first, so the shutdown
+/// is clean rather than a yank.
+#[inline(always)]
+pub fn poweroff() -> u64 {
+    syscall0(SYS_POWEROFF)
 }
 
 /// Closes a descriptor, returning 0 or `u64::MAX` on failure.

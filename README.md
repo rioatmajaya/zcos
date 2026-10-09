@@ -191,7 +191,7 @@ looks like it is acting on its own: the window drags itself to the left edge,
 minimizes, and is restored from the taskbar. It ends with the window **on screen**
 and every task still running, so afterwards you can move the pointer, type into the
 window, and use the serial shell on the QEMU terminal (`help`, `cat`, `stat`,
-`write`, `tmp`, `chmod`, `exit` — listed in `tools/boot-script.txt`).
+`write`, `tmp`, `chmod`, `poweroff`, `exit` — listed in `tools/boot-script.txt`).
 
 A normal build never arms the task watchdog, so the machine stays up
 indefinitely; only the `--test` builds arm it, because a wedged task must fail CI
@@ -201,6 +201,14 @@ Type `cat hello.txt` and press Enter, and the window reads that file back throug
 the F7 VFS. That is not a scripted line — it is your keystrokes — and
 `tools/check-live-input.sh` proves it by typing into a running desktop and
 asserting the frame changed. Backspace works too.
+
+Type `poweroff` and the machine stops itself: it flushes `/data`, marks the
+volume clean through the ordinary unmount path, and writes ACPI S5 read from the
+firmware tables — the same shutdown a physical power button would produce, not
+an emulator kill. `tools/check-poweroff.sh` proves it end to end and checks that
+the disk is still consistent afterwards, so "it turned off" and "it turned off
+*cleanly*" are separate claims. See
+[ADR 0032](docs/adr/0032-clean-shutdown-is-a-syscall.md).
 
 One thing that does **not** work, so you are not left hunting for it: a button
 drawn *inside* a window cannot be clicked. `SYS_MOUSE_READ` holds a single pending
@@ -216,6 +224,15 @@ CI runs the boot twice, because the two frame proofs need different final frames
 See [ADR 0029](docs/adr/0029-two-scripted-sessions.md). Those two prove the
 *scripted* frame, which says nothing about live input — hence the separate live
 check above.
+
+Neither of those live checks typed into the *shell*, which reads a different
+input path than the window client and is the one waiting syscalls actually wait
+on. That gap is where a real kernel bug hid: every trap shared a single
+interrupt stack, so a timer tick landing inside the serial reader overwrote the
+frames the reader was standing on, and the machine could drain a keystroke
+without ever giving it back to the shell.
+[ADR 0033](docs/adr/0033-device-interrupts-get-their-own-stack.md) records it;
+`tools/check-poweroff.sh` now covers that path.
 
 ## Documentation
 

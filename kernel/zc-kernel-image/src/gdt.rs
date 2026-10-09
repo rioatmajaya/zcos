@@ -33,11 +33,22 @@ const INTERRUPT_STACK_BYTES: usize = 64 * 1024;
 /// never re-enter, so sharing it is safe and keeps per-task state small.
 static mut RSP0_STACK: [u8; INTERRUPT_STACK_BYTES] = [0; INTERRUPT_STACK_BYTES];
 
-/// Interrupt stack referenced by every IDT gate.
+/// Interrupt stack used by the trap gates: exceptions and `int 0x80`.
 ///
-/// Like [`RSP0_STACK`], one per CPU is enough: an interrupt gate clears IF,
-/// so a second interrupt cannot arrive while this stack is in use.
+/// The CPU enters on this stack, so it stays busy for the whole handler.
 static mut IST1_STACK: [u8; INTERRUPT_STACK_BYTES] = [0; INTERRUPT_STACK_BYTES];
+
+/// Interrupt stack used by the device gates: timer, keyboard, mouse.
+///
+/// A handler that waits for input (`SYS_SERIAL_READ`) re-enables
+/// interrupts, so a tick *can* arrive while a trap handler is running. Two
+/// gates sharing one IST would make the CPU reset the stack pointer to the
+/// top of that stack for the nested trap, overwriting the frames of the
+/// handler it interrupted — the resumed handler then runs clobbered code,
+/// and its own `iretq` faults. Giving the device gates their own stack makes
+/// that nesting safe. Same-vector nesting stays impossible: an interrupt
+/// gate clears IF, so a tick cannot interrupt another tick.
+static mut IST2_STACK: [u8; INTERRUPT_STACK_BYTES] = [0; INTERRUPT_STACK_BYTES];
 
 /// The kernel's GDT: five segments plus a two-slot TSS descriptor.
 static mut GDT: [u64; GDT_SLOTS] = [0; GDT_SLOTS];
@@ -45,8 +56,8 @@ static mut GDT: [u64; GDT_SLOTS] = [0; GDT_SLOTS];
 /// 104-byte Task State Segment plus I/O bitmap.
 ///
 /// Layout: RSP0 at offset 4, IST1 at offset 36 (after RSP0-RSP2 and a
-/// reserved qword), the 8 KiB port bitmap at offset 104, and a terminating
-/// `0xFF` byte. The first four bytes are reserved.
+/// reserved qword), IST2 at offset 44, the 8 KiB port bitmap at offset 104,
+/// and a terminating `0xFF` byte. The first four bytes are reserved.
 ///
 /// There is exactly one TSS: the CPU marks a TSS descriptor busy once `LTR`
 /// loads it and refuses to load a busy one, so per-task TSS descriptors
@@ -171,12 +182,14 @@ pub fn allowed_ports(task: usize) -> usize {
 pub fn install() {
     let rsp0_top = aligned_top(addr_of!(RSP0_STACK) as u64, INTERRUPT_STACK_BYTES as u64);
     let ist1_top = aligned_top(addr_of!(IST1_STACK) as u64, INTERRUPT_STACK_BYTES as u64);
+    let ist2_top = aligned_top(addr_of!(IST2_STACK) as u64, INTERRUPT_STACK_BYTES as u64);
 
     // SAFETY: single early-boot initialisation; all objects are owned here.
     unsafe {
         let tss = addr_of_mut!(TSS).cast::<u8>();
         write_u64(tss, 4, rsp0_top);
         write_u64(tss, 36, ist1_top);
+        write_u64(tss, 44, ist2_top);
         // I/O map base points past the base structure; the whole bitmap
         // starts denied and the trailing byte stays 0xFF-terminated.
         tss.add(102).cast::<u16>().write_unaligned(MAP_OFFSET as u16);
