@@ -91,7 +91,9 @@ const fn step(buttons: u8, dx: i8, dy: i8) -> MouseStep {
 /// 3. click the minimize glyph, so the window leaves the screen entirely,
 /// 4. click the taskbar's task button, so the window comes back exactly where it
 ///    was,
-/// 5. *(close proof only)* walk to the close glyph and click it, ending the
+/// 5. walk to the window's click button, press it, and walk back to where the
+///    shared prefix ends,
+/// 6. *(close proof only)* walk to the close glyph and click it, ending the
 ///    window's session for good.
 ///
 /// The last step is a **prefix choice, not a different script**: [`script`]
@@ -100,7 +102,9 @@ const fn step(buttons: u8, dx: i8, dy: i8) -> MouseStep {
 ///
 /// A session that only moved the pointer would leave the window-management path
 /// unproven in CI, and the button bitmask would cross the syscall with nothing
-/// acting on it.
+/// acting on it. Step 5 is what proves the *client's* pointer stream: the
+/// kernel derives the same window-local reports the client reads, and the
+/// shared terminal state must show the click in both.
 ///
 /// The window-up prefix ends with the pointer over the window it dragged, so the
 /// proof exercises the pointer-over-window path rather than steering clear of it,
@@ -111,7 +115,9 @@ const fn step(buttons: u8, dx: i8, dy: i8) -> MouseStep {
 ///
 /// Coordinates are tuned for the 1280x800 boot display: the drag lands the
 /// window near the left edge so its minimize glyph is a short walk from the
-/// pointer, and the pointer then climbs to the task button on the far left.
+/// pointer, the pointer then climbs to the task button on the far left, and the
+/// button detour returns to the same place so the close suffix below is
+/// unchanged.
 pub const MOUSE_SCRIPT: &[MouseStep] = &[
     step(0, 127, -127),
     step(0, 127, -97),
@@ -135,6 +141,16 @@ pub const MOUSE_SCRIPT: &[MouseStep] = &[
     step(0, 0, 0),
     step(0, 127, 127),
     step(0, 50, 7),
+    // Step 5: the window's click button. Two moves reach its centre, the press
+    // and release are one click, and two moves return to (300, 150) so the
+    // close suffix starts exactly where it used to.
+    step(0, 127, 127),
+    step(0, 43, 12),
+    step(BUTTON_LEFT, 0, 0),
+    step(0, 0, 0),
+    step(0, -127, -127),
+    step(0, -43, -12),
+    // Step 6: the close glyph.
     step(0, 127, -99),
     step(0, 89, 0),
     step(BUTTON_LEFT, 0, 0),
@@ -143,11 +159,11 @@ pub const MOUSE_SCRIPT: &[MouseStep] = &[
 
 /// Index of the first step that belongs to the close proof.
 ///
-/// Everything before it ends with the window restored and on screen. Naming the
-/// boundary rather than a bare count keeps the two variants tied to the gesture
-/// they split at: inserting a step anywhere in the shared prefix moves the
-/// boundary with it.
-pub const MOUSE_SCRIPT_LEN_WINDOW_UP: usize = 22;
+/// Everything before it ends with the window restored, the button clicked, and
+/// the pointer back over the window. Naming the boundary rather than a bare
+/// count keeps the two variants tied to the gesture they split at: inserting a
+/// step anywhere in the shared prefix moves the boundary with it.
+pub const MOUSE_SCRIPT_LEN_WINDOW_UP: usize = 28;
 
 /// Returns how many steps of [`MOUSE_SCRIPT`] a variant serves.
 ///

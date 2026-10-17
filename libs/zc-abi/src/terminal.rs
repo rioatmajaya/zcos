@@ -41,6 +41,28 @@ pub const DECORATION_CLOSE_COLOR: (u8, u8, u8) = (226, 96, 96);
 /// Minimize-button glyph color.
 pub const DECORATION_MIN_COLOR: (u8, u8, u8) = (226, 200, 120);
 
+/// Click-button fill color.
+const BUTTON_BG: (u8, u8, u8) = (48, 54, 66);
+/// Click-button border color.
+const BUTTON_EDGE: (u8, u8, u8) = (92, 102, 122);
+/// Click-button label color.
+///
+/// Public so a test can confirm the label really paints inside the rectangle
+/// hit-testing claims for it.
+pub const BUTTON_FG: (u8, u8, u8) = (235, 238, 245);
+
+/// Click-button width in pixels: twelve 8-pixel cells.
+///
+/// "Clicks: " is eight cells and the counter is capped at four digits, so the
+/// label always fits and the button never resizes as the count grows.
+pub const BUTTON_W: u32 = 96;
+/// Click-button height in pixels.
+pub const BUTTON_H: u32 = 18;
+/// Inset of the button from the window border.
+const BUTTON_INSET: u32 = 8;
+/// Horizontal inset of the label inside the button.
+const BUTTON_PAD_X: u32 = 4;
+
 /// Terminal width in character cells.
 const TERM_COLS: usize = 44;
 /// Terminal height in character rows.
@@ -96,6 +118,7 @@ pub struct Term {
     lines: [[u8; TERM_COLS]; TERM_ROWS],
     len: [u8; TERM_ROWS],
     rows: u8,
+    clicks: u32,
 }
 
 impl Term {
@@ -114,7 +137,30 @@ impl Term {
             lines,
             len,
             rows: 1,
+            clicks: 0,
         }
+    }
+
+    /// Clicks the button when `(x, y)` — window-local — falls inside it.
+    ///
+    /// The button is the window's first widget and the boot proof's first
+    /// clickable target: the scripted session presses it, and the kernel replays
+    /// the same reports through [`crate::session::replay_pointer`] so the label
+    /// the client paints is recomputed, not trusted. A miss changes nothing, so
+    /// a routed coordinate that lands beside the button fails the content check
+    /// instead of passing silently.
+    pub fn click(&mut self, x: u32, y: u32, w: u32, h: u32) -> bool {
+        if !button_rect(w, h).contains(x, y) {
+            return false;
+        }
+        self.clicks = self.clicks.saturating_add(1);
+        true
+    }
+
+    /// Returns how many times the button has been clicked.
+    #[must_use]
+    pub const fn clicks(&self) -> u32 {
+        self.clicks
     }
 
     /// Applies one keystroke for editing.
@@ -214,6 +260,13 @@ impl Term {
                 return glyph_over(font, b'-', lx - minimize.x, ly - minimize.y, base, DECORATION_MIN_COLOR);
             }
             return base;
+        }
+        // The click button sits in the free strip below the ten text rows. It
+        // is part of the shared render, so the client paints it and the kernel's
+        // verifier recomputes it — including the count after a scripted click.
+        let button = button_rect(w, h);
+        if button.contains(lx, ly) {
+            return button_pixel(font, self.clicks, lx - button.x, ly - button.y);
         }
         let body_y = ly - TITLE_HEIGHT;
         if body_y < PAD_Y {
@@ -410,6 +463,85 @@ const fn glyph_over(font: Font<'_>, ch: u8, gx: u32, gy: u32, base: (u8, u8, u8)
 /// Below this the title bar has no room for them and both decoration rectangles
 /// are [`crate::desktop::Rect::EMPTY`].
 pub const DECORATION_MIN_W: u32 = 80;
+
+/// The click button's rectangle in window-local coordinates.
+///
+/// It sits in the free strip below the ten text rows, inset from the window
+/// border, so it never covers the transcript. [`Term::render`] paints it and
+/// [`Term::click`] hit-tests it through this one function, so the region a
+/// click can hit is exactly the region the label is drawn in.
+#[must_use]
+pub const fn button_rect(w: u32, h: u32) -> crate::desktop::Rect {
+    if w < BUTTON_W + BUTTON_INSET * 2 || h < TITLE_HEIGHT + BUTTON_H + BUTTON_INSET * 2 {
+        return crate::desktop::Rect::EMPTY;
+    }
+    crate::desktop::Rect::new(
+        w - BUTTON_INSET - BUTTON_W,
+        h - BUTTON_INSET - BUTTON_H,
+        BUTTON_W,
+        BUTTON_H,
+    )
+}
+
+/// Renders one pixel of the click button, in button-local coordinates.
+#[must_use]
+const fn button_pixel(font: Font<'_>, clicks: u32, x: u32, y: u32) -> (u8, u8, u8) {
+    if x == 0 || y == 0 || x + 1 == BUTTON_W || y + 1 == BUTTON_H {
+        return BUTTON_EDGE;
+    }
+    if x >= BUTTON_PAD_X && y >= 1 && y < 1 + GLYPH_H {
+        let gx = x - BUTTON_PAD_X;
+        let col = gx / GLYPH_W;
+        if col < BUTTON_W / GLYPH_W {
+            let ch = button_label_byte(clicks, col);
+            if glyph_bit(font, ch, y - 1, gx % GLYPH_W) {
+                return BUTTON_FG;
+            }
+        }
+    }
+    BUTTON_BG
+}
+
+/// Returns the label byte at cell `col` of the button.
+///
+/// The count is capped at four digits so the label always fits the twelve cells
+/// the button holds; the cap also means the button never changes size.
+#[must_use]
+const fn button_label_byte(clicks: u32, col: u32) -> u8 {
+    const PREFIX: &[u8] = b"Clicks: ";
+    if col < PREFIX.len() as u32 {
+        return PREFIX[col as usize];
+    }
+    let value = if clicks > 9999 { 9999 } else { clicks };
+    let digits = digit_count(value);
+    let at = col - PREFIX.len() as u32;
+    if at >= digits {
+        return b' ';
+    }
+    (value / pow10(digits - 1 - at) % 10) as u8 + b'0'
+}
+
+/// Returns how many decimal digits `value` needs.
+#[must_use]
+const fn digit_count(mut value: u32) -> u32 {
+    let mut count = 1;
+    while value >= 10 {
+        value /= 10;
+        count += 1;
+    }
+    count
+}
+
+/// Returns `10` raised to `power`.
+#[must_use]
+const fn pow10(mut power: u32) -> u32 {
+    let mut value = 1;
+    while power > 0 {
+        value *= 10;
+        power -= 1;
+    }
+    value
+}
 
 /// Vertical offset of the decoration glyphs inside the title bar.
 const fn decoration_y() -> u32 {
@@ -681,5 +813,85 @@ mod tests {
         let term = Term::new();
         assert!(term.pixel(Font::embedded(), PixelFormat::Rgbx8888, 0, 0, 64, 64).is_some());
         assert_eq!(term.pixel(Font::embedded(), PixelFormat::Bitmask, 0, 0, 64, 64), None);
+    }
+
+    #[test]
+    fn the_click_button_paints_a_label_and_the_label_changes() {
+        let (w, h) = (426u32, 266u32);
+        let button = button_rect(w, h);
+        assert!(!button.is_empty());
+        // The button sits below the ten text rows, so it never covers the
+        // transcript.
+        let text_bottom = TITLE_HEIGHT + PAD_Y + TERM_ROWS as u32 * LINE_H;
+        assert!(button.y >= text_bottom, "the button covers the terminal text");
+        let term = Term::new();
+        let mut before = [0u32; (BUTTON_W * BUTTON_H) as usize];
+        let mut at = 0;
+        let mut saw_label = false;
+        let mut ly = button.y;
+        while ly < button.bottom() {
+            let mut lx = button.x;
+            while lx < button.right() {
+                let (r, g, b) = term.render(Font::embedded(), lx, ly, w, h);
+                if (r, g, b) == BUTTON_FG {
+                    saw_label = true;
+                }
+                before[at] = u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b);
+                at += 1;
+                lx += 1;
+            }
+            ly += 1;
+        }
+        assert!(saw_label, "the button label does not paint");
+        // A click changes the rendered count, so the content proof can see it.
+        let mut clicked = Term::new();
+        assert!(clicked.click(button.x + BUTTON_W / 2, button.y + BUTTON_H / 2, w, h));
+        let mut changed = false;
+        at = 0;
+        ly = button.y;
+        while ly < button.bottom() {
+            let mut lx = button.x;
+            while lx < button.right() {
+                let (r, g, b) = clicked.render(Font::embedded(), lx, ly, w, h);
+                if (u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)) != before[at] {
+                    changed = true;
+                }
+                at += 1;
+                lx += 1;
+            }
+            ly += 1;
+        }
+        assert!(changed, "the label did not change after a click");
+    }
+
+    #[test]
+    fn a_click_only_counts_inside_the_button() {
+        let (w, h) = (426u32, 266u32);
+        let button = button_rect(w, h);
+        let mut term = Term::new();
+        assert!(!term.click(0, 0, w, h));
+        assert!(!term.click(button.x - 1, button.y + 1, w, h));
+        assert!(!term.click(button.x + 1, button.y - 1, w, h));
+        assert!(!term.click(button.right(), button.y + 1, w, h));
+        assert!(!term.click(button.x + 1, button.bottom(), w, h));
+        assert_eq!(term.clicks(), 0);
+        // The top-left corner is inside, and the counter saturates rather than
+        // wrapping when a live user clicks far past the label's four digits.
+        assert!(term.click(button.x, button.y, w, h));
+        assert_eq!(term.clicks(), 1);
+        term.clicks = u32::MAX;
+        assert!(term.click(button.x + 1, button.y + 1, w, h));
+        assert_eq!(term.clicks(), u32::MAX);
+    }
+
+    #[test]
+    fn a_window_too_small_for_the_button_has_none() {
+        // Both rectangles empty: no label paints and no click lands, rather
+        // than a button hanging off the border.
+        assert!(button_rect(BUTTON_W + BUTTON_INSET * 2 - 1, 266).is_empty());
+        assert!(button_rect(426, TITLE_HEIGHT + BUTTON_H + BUTTON_INSET * 2 - 1).is_empty());
+        let mut term = Term::new();
+        assert!(!term.click(0, 0, 64, 64));
+        assert_eq!(term.clicks(), 0);
     }
 }

@@ -68,7 +68,11 @@ of having its emulator killed. See
 widget blocker from ADR 0030: the kernel derives a window-local pointer stream
 and `SYS_WINDOW_READ` serves it beside the keyboard, so a client can hit-test
 inside its own window without touching the compositor's pointer. See
-[ADR 0034](docs/adr/0034-a-window-has-its-own-pointer-stream.md).
+[ADR 0034](docs/adr/0034-a-window-has-its-own-pointer-stream.md). F8e-4 puts the
+first widget on that stream — a clickable `Clicks: N` button — and makes the
+scripted click a proof: the kernel replays the pointer script into the same
+terminal state and fails if nothing was clicked. See
+[ADR 0035](docs/adr/0035-a-scripted-click-is-a-proof.md).
 
 ### Fixed
 
@@ -168,6 +172,21 @@ inside its own window without touching the compositor's pointer. See
 
 ### Added
 
+- **A scripted click is proven, not demonstrated** (F8e-4): the window now has a
+  real widget — a `Clicks: N` button in the free strip below the terminal's ten
+  text rows. Its rectangle and state live in `zc_abi::terminal`, so the client
+  paints it and the kernel recomputes it from the same code. The pointer script
+  detours to the button, presses it, and returns to where the shared prefix used
+  to end, so the close suffix is unchanged. The verifier replays the pointer
+  script through `zc_abi::session::replay_pointer` — a fresh `Wm`/`Cursor`/`Input`,
+  the same `wm::window_pointer_at` routing the kernel uses, and edges derived
+  from the routed subset alone — and **fails if the script clicked nothing**, so
+  a routing regression cannot silently expect `Clicks: 0`. The client logs
+  `client: click ok`, the kernel logs `wm: click ok`, and the content check
+  compares the clicked label pixel for pixel. The window-up checksum changes to
+  `0x669550faab101ec6` because the button is painted in every window frame; the
+  close run keeps `0x6d66e82d0f2d6fb8` because it erases the window. See
+  [ADR 0035](docs/adr/0035-a-scripted-click-is-a-proof.md).
 - **A window has its own pointer stream, so widgets can be clicked** (F8e-3):
   the blocker recorded in ADR 0030 is gone. The kernel already sees every
   pointer report and applies it to its own cursor and window machine, so it now
@@ -180,9 +199,8 @@ inside its own window without touching the compositor's pointer. See
   its own stream cannot steal a report from the drag; `user/zc-ui::Window`
   wraps the new syscall and hands the client a typed event with the derived
   edge. The kernel logs `wm: pointer routed` when it derives the first event and
-  the client logs `client: pointer ok` when it receives one; both frame
-  checksums are unchanged (`0x3a43f97916fcc691`, `0x6d66e82d0f2d6fb8`), which is
-  the evidence this adds a stream and paints nothing. See
+  the client logs `client: pointer ok` when it receives one; the stream itself
+  paints nothing. See
   [ADR 0034](docs/adr/0034-a-window-has-its-own-pointer-stream.md).
 - **CI explains its own boot failures.** Both QEMU runs redirect into log files
   that no later step read, so `Boot test the close proof` once failed with exit

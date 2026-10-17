@@ -194,6 +194,12 @@ jobs:
         # stream was produced but never crossed the syscall.
         grep -q "wm: pointer routed" build/boot.log
         grep -q "task 8: client: pointer ok" build/boot.log
+        # The first widget, and a scripted click the verifier replays (F8e-4,
+        # ADR 0035). The client must have hit the button and the kernel must
+        # have derived the same click, or the content check would be trusting
+        # the client's label rather than recomputing it.
+        grep -q "task 8: client: click ok" build/boot.log
+        grep -q "wm: click ok" build/boot.log
         # The pointer is not just drawn, it is driven: the scripted mouse session
         # presses the left button on the window's title bar, drags the window off
         # its scripted frame position, releases, clicks the minimize glyph, and
@@ -259,6 +265,10 @@ jobs:
         # delivered before the end-of-session sentinel.
         grep -q "wm: pointer routed" build/boot-close.log
         grep -q "task 8: client: pointer ok" build/boot-close.log
+        # The click is in the shared prefix, so the close run proves it too
+        # before the window is erased.
+        grep -q "task 8: client: click ok" build/boot-close.log
+        grep -q "wm: click ok" build/boot-close.log
         # Same font pipeline as the window-up run: the close run drags,
         # minimizes, and restores before closing, so all three sides render.
         grep -q "task 8: client: font vfs ok" build/boot-close.log

@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 7 grants`, `task 6: devmgr: blk published`, `dma: window coherent ok` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–7, F8e-1–3, live-input check, F8g-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: font vfs ok`; `compositor: font vfs ok`; `font: vfs ok`; `client: window painted`; `client: vfs ok`; `client: pointer ok`; `wm: window mapped`; `wm: pointer routed`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed` (close run); `compositor: window erased` (close run); `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui host tests pass |
+| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–7, F8e-1–4, live-input check, F8g-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: font vfs ok`; `compositor: font vfs ok`; `font: vfs ok`; `client: window painted`; `client: vfs ok`; `client: pointer ok`; `client: click ok`; `wm: window mapped`; `wm: pointer routed`; `wm: click ok`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed` (close run); `compositor: window erased` (close run); `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui/session host tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -708,13 +708,24 @@ full browser. Note them as follow-ups, do not build them here.
         `WindowEvent`; the client logs `client: pointer ok` and the kernel logs
         `wm: pointer routed`, while both frame checksums stay unchanged. See
         [`adr/0034`](adr/0034-a-window-has-its-own-pointer-stream.md).
-      - [ ] *(follow-up)* widgets and layout on top of it. The stream is in
-        place: a widget can hit-test with `WindowEvent::Pointer`'s local
-        coordinates and the shared `ui::hit_topmost`. What is left is the
-        widget set itself (button, label, list) and a layout pass, plus an exact
-        boot proof for one of them — the scripted session already ends with the
-        pointer inside the content area, so a click can be added to the script
-        and replayed by the kernel verifier like the keystrokes are.
+      - [x] F8e-4: the first widget, and a scripted click that is a proof. The
+        window now carries a `Clicks: N` button in the free strip below the ten
+        text rows; its rectangle and state live in `zc_abi::terminal`, so the
+        client paints it and the kernel recomputes it from the same code. The
+        pointer script detours to the button, presses it, and returns to where
+        the shared prefix used to end, so the close suffix is unchanged.
+        `zc_abi::session::replay_pointer` replays the script through a fresh
+        `Wm`/`Cursor`/`Input`, derives the window-local subset with the same
+        `wm::window_pointer_at` the router uses, and feeds `Term::click`; the
+        verifier fails if the script clicked nothing, so a routing regression
+        cannot silently expect `Clicks: 0`. The client logs `client: click ok`
+        and the kernel `wm: click ok`; the window-up checksum changes to
+        `0x669550faab101ec6` because the button is painted, while the close run
+        keeps `0x6d66e82d0f2d6fb8` because it erases the window. See
+        [`adr/0035`](adr/0035-a-scripted-click-is-a-proof.md).
+      - [ ] *(follow-up)* the rest of the widget set and a layout pass. One
+        button proves the path; labels, lists, focus between widgets, and a
+        layout container are still to come, and belong with F8h's apps.
       - [ ] *(follow-up)* prove live input, not just the scripted frame.
         **Done** as `tools/check-live-input.sh`: it boots the real image, checks
         the idle desktop is byte-stable, types `cat hello.txt` + Enter through
@@ -868,6 +879,14 @@ full browser. Note them as follow-ups, do not build them here.
   and only reports inside `wm::content`, so a title-bar drag is never delivered
   as a widget click; `zc-abi` host tests cover the codec, the content region,
   and the scripted session ending inside it.
+- A scripted click is proven, not demonstrated (F8e-4): the client logs
+  `task 8: client: click ok` and the kernel logs `wm: click ok`, the content
+  check recomputes the `Clicks: 1` label through
+  `zc_abi::session::replay_pointer`, and the verifier fails if the script clicked
+  nothing. `zc-abi` host tests assert the scripted click lands inside
+  `terminal::button_rect`, that a placement gesture never reaches the body, and
+  that the rendered label changes after the click. The window-up checksum is
+  `0x669550faab101ec6`; the close run keeps `0x6d66e82d0f2d6fb8`.
 - Clean shutdown: `power: halt clean`.
 - Audio plays a known tone and the driver reports no XRUN under a stress
   buffer: `snd: playback ok`.

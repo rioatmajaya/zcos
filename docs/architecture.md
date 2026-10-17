@@ -234,6 +234,15 @@ pixel (`wm: content ok`), so a client that drops a key or mis-renders fails
 even though the general checksum no longer knows the content. See
 [ADR 0018](adr/0018-window-placement-proof.md).
 
+The window's first widget is a clickable `Clicks: N` button below the terminal's
+text rows. A click changes what is painted, so the exact content check has to
+know about it: `zc_abi::session::replay_pointer` runs the pointer script through
+a fresh window machine, derives the same window-local subset the router sends
+the client, and feeds the shared `Term`. The verifier fails if the script
+clicked nothing, so a routing regression cannot turn the expected label into
+`Clicks: 0` and still pass. See
+[ADR 0035](adr/0035-a-scripted-click-is-a-proof.md).
+
 The terminal's commands run through one shared `run_command`: `help` and `echo`
 are pure, and `cat` reads through a reader the caller injects — the client
 supplies the VFS syscalls, the kernel's verifier supplies its own mount table —

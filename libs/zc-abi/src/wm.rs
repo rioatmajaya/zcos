@@ -88,6 +88,22 @@ pub const fn content(window: Rect) -> Rect {
     Rect::new(window.x, window.y + TITLE_HEIGHT, window.w, window.h - TITLE_HEIGHT)
 }
 
+/// Returns the window-local position of a pointer report, or `None` when the
+/// report is a placement gesture rather than a client event.
+///
+/// This is the routing decision in one place: the kernel uses it to decide what
+/// to enqueue for the focused window, and the boot proof uses it to replay the
+/// same stream into the shared terminal state. A report on the title bar, a
+/// decoration, or the bare desktop is the window manager's; only the content
+/// area below the title bar belongs to the client.
+#[must_use]
+pub const fn window_pointer_at(window: Rect, x: u32, y: u32) -> Option<(u32, u32)> {
+    if !content(window).contains(x, y) {
+        return None;
+    }
+    Some((x - window.x, y - window.y))
+}
+
 /// What a press on a window or the taskbar asks the window manager to do.
 ///
 /// Returned rather than applied, so a caller that only needs to know *whether*
@@ -533,6 +549,24 @@ mod tests {
         // underflowing into a rectangle above its own title bar.
         assert!(content(Rect::new(0, 0, 64, TITLE_HEIGHT)).is_empty());
         assert!(content(Rect::EMPTY).is_empty());
+    }
+
+    #[test]
+    fn a_pointer_report_is_client_owned_only_inside_the_content() {
+        let window = start().window();
+        // The title bar is a placement gesture, never a client event.
+        assert_eq!(window_pointer_at(window, window.x + 4, window.y + 4), None);
+        // A decoration is inside the title bar and likewise not the client's.
+        let strip = decorations(window);
+        assert_eq!(window_pointer_at(window, strip.x + 1, strip.y + 1), None);
+        // The body translates into window-local coordinates.
+        assert_eq!(
+            window_pointer_at(window, window.x + 10, window.y + TITLE_HEIGHT + 10),
+            Some((10, TITLE_HEIGHT + 10))
+        );
+        // Outside the window, and on a hidden window's empty rectangle.
+        assert_eq!(window_pointer_at(window, window.x - 1, window.y + 40), None);
+        assert_eq!(window_pointer_at(Rect::EMPTY, 0, 0), None);
     }
 
     #[test]

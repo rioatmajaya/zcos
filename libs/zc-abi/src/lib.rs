@@ -19,6 +19,7 @@ pub mod fb;
 pub mod ipc;
 pub mod mmio;
 pub mod service;
+pub mod session;
 pub mod surface;
 pub mod syscall;
 pub mod terminal;
@@ -60,6 +61,7 @@ pub use service::{
     SERVICE_KIND_EXIT, SERVICE_KIND_FAULT, service_cap, supervise_event, supervise_kind,
     supervise_service,
 };
+pub use session::replay_pointer;
 pub use surface::{
     SURFACE_CAP_TAG, SURFACE_END, SURFACE_FACTORY, SURFACE_MAX_PAGES, SURFACE_SLOTS,
     SURFACE_SLOT_STRIDE, SURFACE_VIRT, SurfaceInfo, surface_cap,
@@ -75,12 +77,15 @@ pub use syscall::{
     SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TERM_READ, SYS_UMOUNT, SYS_WINDOW_CLOSE,
     SYS_WINDOW_READ, SYS_WRITE, SYS_YIELD, SyscallError,
 };
+pub use terminal::{
+    BUTTON_FG, BUTTON_H, BUTTON_W, Term, button_rect,
+};
 pub use ui::{
     Event, Input, WINDOW_MAX_COORD, WINDOW_NO_EVENT, WINDOW_POINTER_TAG, WindowEvent,
     WindowPointer, decode_window_event, hit_all, hit_topmost, pack_window_pointer,
 };
 pub use vfs::{KIND_CHR, KIND_DIR, KIND_FILE, STAT_LEN, Stat};
-pub use wm::{Action, Wm, content, decorations, hit, title_bar};
+pub use wm::{Action, Wm, content, decorations, hit, title_bar, window_pointer_at};
 
 /// Current version of the loader-to-kernel boot protocol.
 pub const BOOT_PROTOCOL_VERSION: u32 = 2;

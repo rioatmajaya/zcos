@@ -162,7 +162,11 @@ of the same device. F8e-3 gives a window its own pointer stream: the kernel
 derives the reports that landed inside the window's content area, in the window's
 own coordinates, and `SYS_WINDOW_READ` serves them beside the keyboard, so a
 client can hit-test a widget without reading the compositor's global pointer —
-see [ADR 0034](docs/adr/0034-a-window-has-its-own-pointer-stream.md).
+see [ADR 0034](docs/adr/0034-a-window-has-its-own-pointer-stream.md). F8e-4 puts
+the first widget on that stream: a clickable `Clicks: N` button, with the
+scripted click replayed by the kernel's content verifier, which fails if the
+script clicked nothing — see
+[ADR 0035](docs/adr/0035-a-scripted-click-is-a-proof.md).
 
 ## Development
 
@@ -214,15 +218,18 @@ the disk is still consistent afterwards, so "it turned off" and "it turned off
 *cleanly*" are separate claims. See
 [ADR 0032](docs/adr/0032-clean-shutdown-is-a-syscall.md).
 
-One thing that does **not** work yet, so you are not left hunting for it: a
-button drawn *inside* a window has nothing to click. The input path is in place —
-the kernel forwards window-local pointer reports to the client, and
-`user/zc-ui::Window` hands them over with their position and derived edge — but
-the widget set and layout pass are still the next task (F8e follow-up). The
-compositor keeps the global pointer for placement and the sprite; a client reads
-its own derived stream through `SYS_WINDOW_READ`, so it cannot steal a drag. See
-[ADR 0030](docs/adr/0030-the-pointer-has-one-owner.md) and
-[ADR 0034](docs/adr/0034-a-window-has-its-own-pointer-stream.md).
+One thing that does **not** work yet, so you are not left hunting for it: the
+window has exactly one widget — the `Clicks: N` button at its bottom right.
+A general widget set (labels, lists, focus between widgets) and a layout pass
+are the next task. The path they will use is already proven: the kernel forwards
+window-local pointer reports to the client, `user/zc-ui::Window` hands them over
+with their position and derived edge, and the scripted click is replayed by the
+kernel's verifier rather than trusted. The compositor keeps the global pointer
+for placement and the sprite; a client reads its own derived stream through
+`SYS_WINDOW_READ`, so it cannot steal a drag. See
+[ADR 0030](docs/adr/0030-the-pointer-has-one-owner.md),
+[ADR 0034](docs/adr/0034-a-window-has-its-own-pointer-stream.md), and
+[ADR 0035](docs/adr/0035-a-scripted-click-is-a-proof.md).
 
 CI runs the boot twice, because the two frame proofs need different final frames:
 `--test` leaves a window up (proving the compositor placed the client's pixels,

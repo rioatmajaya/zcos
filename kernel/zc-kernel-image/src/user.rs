@@ -2322,6 +2322,23 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface) {
         crate::fail("window script read no file");
     }
     crate::serial::write_str("wm: vfs content ok\n");
+    // The pointer script's window-local reports, replayed through the same
+    // routing the client's stream came from. The button click changes the
+    // terminal's label, so this must run before the pixels are compared — and
+    // the script must click something, or the proof would silently degrade to
+    // "the client painted whatever it liked".
+    zc_abi::replay_pointer(
+        &mut terminal,
+        info.width,
+        info.height,
+        surface.width,
+        surface.height,
+        cfg!(feature = "close-proof"),
+    );
+    if terminal.clicks() == 0 {
+        crate::fail("window script clicked nothing");
+    }
+    crate::serial::write_str("wm: click ok\n");
     let cursor = expected_cursor();
     let mut hash = HASH_OFFSET;
     let mut ly = 0;
@@ -3948,19 +3965,19 @@ fn route_window_pointer(buttons: u8, dx: i8, dy: i8) {
     unsafe {
         let wm = &*addr_of!(WM);
         let window = wm.rect();
-        let body = zc_abi::wm::content(window);
         let cursor = *addr_of!(CURSOR);
-        if !body.contains(cursor.x, cursor.y) {
-            return;
+        // One routing decision, shared with the boot proof: a report on the
+        // title bar, a decoration, or the desktop is the window manager's.
+        if let Some((x, y)) = zc_abi::wm::window_pointer_at(window, cursor.x, cursor.y) {
+            let word = zc_abi::ui::pack_window_pointer(
+                x as u16,
+                y as u16,
+                buttons,
+                dx,
+                dy,
+            );
+            push_window_pointer(word);
         }
-        let word = zc_abi::ui::pack_window_pointer(
-            (cursor.x - window.x) as u16,
-            (cursor.y - window.y) as u16,
-            buttons,
-            dx,
-            dy,
-        );
-        push_window_pointer(word);
     }
 }
 
