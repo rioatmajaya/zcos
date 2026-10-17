@@ -281,6 +281,25 @@ pub const fn window_rect(frame: u32, width: u32, height: u32) -> Rect {
     Rect::new(x, y, w, h)
 }
 
+/// Returns the initial rectangle for window `id`.
+///
+/// Window 0 keeps the two proof frames. Later windows cascade down-right from
+/// the lower left: the first one sits clear of window 0's scripted path, so the
+/// pointer proof still lands where it always did while a second window is on
+/// screen, and clear of the taskbar so the placement clamp never has to move
+/// it. `frame` only affects window 0; the proof moves one window, not two.
+#[must_use]
+pub const fn window_rect_for(id: u32, frame: u32, width: u32, height: u32) -> Rect {
+    if id == 0 {
+        return window_rect(frame, width, height);
+    }
+    let panel = panel_height(height);
+    let w = if width / 3 < 64 { 64 } else { width / 3 };
+    let h = if height / 3 < 48 { 48 } else { height / 3 };
+    let step = 24 * (id - 1);
+    Rect::new(width / 16 + step, panel + height / 2 + step, w, h)
+}
+
 /// Returns the `(red, green, blue)` channels of one pixel inside a window.
 ///
 /// Coordinates are local to the window's top-left corner. The window content is
@@ -325,8 +344,6 @@ const CLOCK_FG: (u8, u8, u8) = (170, 176, 186);
 
 /// The launcher button label.
 const LAUNCHER_LABEL: &str = "ZC";
-/// The running window's taskbar label.
-const TASK_LABEL: &str = "Terminal";
 /// A fixed clock string. A live clock is a later step; a fixed value keeps the
 /// panel deterministic so the frame checksum covers it.
 const CLOCK_LABEL: &str = "12:00";
@@ -359,6 +376,29 @@ pub const fn task_button_rect(height: u32) -> Rect {
     task_button_rect_at(height, 0)
 }
 
+/// Task buttons the panel can lay out; matches `wm::MAX_WINDOWS`.
+///
+/// Kept here because the panel is the lower module: `wm` imports the layout,
+/// not the other way round.
+pub const MAX_TASK_BUTTONS: usize = 4;
+
+/// Labels for the task buttons, in registration order.
+///
+/// Fixed strings keep the panel deterministic for the frame checksum. They name
+/// the window's role, not its client binary: F8h-1b runs a second terminal,
+/// F8h-2 replaces it with the file manager and changes only this table.
+const TASK_LABELS: [&str; MAX_TASK_BUTTONS] = ["Terminal", "Terminal 2", "App 3", "App 4"];
+
+/// Returns the label for the task button at `index`.
+#[must_use]
+const fn task_label(index: u32) -> &'static str {
+    if (index as usize) < TASK_LABELS.len() {
+        TASK_LABELS[index as usize]
+    } else {
+        TASK_LABELS[TASK_LABELS.len() - 1]
+    }
+}
+
 /// The task button for the window registered at `index`.
 ///
 /// Buttons are laid out left to right in registration order, so a window's
@@ -386,6 +426,24 @@ pub const fn task_button_rect_at(height: u32, index: u32) -> Rect {
 /// loaded from the initramfs asset.
 #[must_use]
 pub const fn panel_color_at(font: Font<'_>, x: u32, y: u32, width: u32, height: u32) -> (u8, u8, u8) {
+    panel_color_at_count(font, x, y, width, height, 1)
+}
+
+/// Returns one taskbar pixel for a desktop with `windows` windows.
+///
+/// The launcher and clock never move; one task button is drawn per registered
+/// window, in registration order. `windows == 1` is pixel-identical to the
+/// single-window panel, so the existing proof frames are unchanged until a
+/// second window is actually added.
+#[must_use]
+pub const fn panel_color_at_count(
+    font: Font<'_>,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    windows: u32,
+) -> (u8, u8, u8) {
     let panel = panel_height(height);
     if panel == 0 {
         return PANEL_BG;
@@ -406,9 +464,22 @@ pub const fn panel_color_at(font: Font<'_>, x: u32, y: u32, width: u32, height: 
             LAUNCHER_BG,
         );
     }
-    let task = task_button_rect(height);
-    if task.contains(x, y) {
-        return button_label(font, TASK_LABEL, task.x, task.w, x, y, ty, TASK_BG);
+    let mut index = 0;
+    while index < windows {
+        let task = task_button_rect_at(height, index);
+        if task.contains(x, y) {
+            return button_label(
+                font,
+                task_label(index),
+                task.x,
+                task.w,
+                x,
+                y,
+                ty,
+                TASK_BG,
+            );
+        }
+        index += 1;
     }
     // Clock, right-aligned with an 8px margin.
     let clock_w = text_width(CLOCK_LABEL);
@@ -456,11 +527,30 @@ pub const fn color_at_with_window(
     height: u32,
     window: Rect,
 ) -> (u8, u8, u8) {
+    color_at_with_window_count(font, x, y, width, height, window, 1)
+}
+
+/// Returns one desktop pixel with an explicit window count for the taskbar.
+///
+/// The `window` rectangle is the placeholder the painter draws before the
+/// compositor blits the client's surfaces over it; with several windows the
+/// caller passes [`Rect::EMPTY`] and blits every visible window on top. Only
+/// the taskbar depends on `windows`, because it draws one button per window.
+#[must_use]
+pub const fn color_at_with_window_count(
+    font: Font<'_>,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    window: Rect,
+    windows: u32,
+) -> (u8, u8, u8) {
     if window.contains(x, y) {
         return window_color_at(font, x - window.x, y - window.y, window.w, window.h);
     }
     if y < panel_height(height) {
-        return panel_color_at(font, x, y, width, height);
+        return panel_color_at_count(font, x, y, width, height, windows);
     }
     // Background: a vertical/horizontal gradient, guarded for empty sizes.
     let r = if width == 0 {
@@ -503,6 +593,22 @@ pub const fn pixel_at_with_window(
     window: Rect,
 ) -> Option<u32> {
     let (r, g, b) = color_at_with_window(font, x, y, width, height, window);
+    encode(format, r, g, b)
+}
+
+/// Encodes one desktop pixel with an explicit window count for the taskbar.
+#[must_use]
+pub const fn pixel_at_with_window_count(
+    font: Font<'_>,
+    format: PixelFormat,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    window: Rect,
+    windows: u32,
+) -> Option<u32> {
+    let (r, g, b) = color_at_with_window_count(font, x, y, width, height, window, windows);
     encode(format, r, g, b)
 }
 

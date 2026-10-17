@@ -14,12 +14,13 @@ pub const MESSAGE_WORDS: usize = 4;
 /// carry the filesystem bridge: the kernel proxy sends requests on channel 2
 /// and the block domain replies on channel 3, so a request can never be
 /// mistaken for a reply. Channel 4 carries supervision events: the kernel
-/// posts a service going down and `initd` consumes them. Channels 5 and 6
-/// carry the window protocol: the compositor assigns a surface on channel 5
-/// and the client acknowledges on channel 6. Queues are fully separate, so
-/// discovery traffic can never corrupt the data sequence — the property a
-/// shared bus scan could never give.
-pub const IPC_CHANNELS: usize = 7;
+/// posts a service going down and `initd` consumes them. Channel 5 is window
+/// 0's assignment channel and channel 6 is the shared window-reply channel;
+/// each further window takes the next odd channel (7, 9, ...) for its own
+/// assignment. Queues are fully separate, so discovery traffic can never
+/// corrupt the data sequence — the property a shared bus scan could never
+/// give.
+pub const IPC_CHANNELS: usize = 8;
 
 /// Data-stream channel: the legacy `SYS_SEND`/`SYS_RECV` path.
 pub const IPC_DATA: usize = 0;
@@ -39,19 +40,57 @@ pub const IPC_FS_REPLY: usize = 3;
 /// direction is one-way (kernel to supervisor), so no reply channel is needed.
 pub const IPC_SUPERVISE: usize = 4;
 
-/// Window-assignment channel: the compositor hands a client its surface.
+/// Window-assignment channel: the compositor hands window 0 its surface.
 ///
 /// One word per message: the capability object id of the window surface the
-/// client should map and paint.
+/// client should map and paint. Later windows use [`wm_assign`], so two clients
+/// can block on their own channel and neither can consume the other's
+/// assignment.
 pub const IPC_WM: usize = 5;
 
-/// Window-reply channel: the client tells the compositor it painted.
+/// Window-reply channel: every client tells the compositor it painted.
 ///
-/// One word per message: [`WM_ACK`] after each repaint and a final [`WM_DONE`].
-/// The direction is one-way (client to compositor); a separate channel from
+/// One word per message, encoded by [`wm_reply`]: the low half is [`WM_ACK`]
+/// or [`WM_DONE`], the high half the window id. One shared channel is enough
+/// because the id travels in the message, and it keeps the compositor on a
+/// single blocking `recv_from` rather than a select it does not have. The
+/// direction is one-way (client to compositor); a separate channel from
 /// [`IPC_WM`] means the compositor can never read back its own assignment and
 /// mistake it for the acknowledgement.
 pub const IPC_WM_REPLY: usize = 6;
+
+/// Returns the assignment channel for `window`.
+///
+/// Window 0 keeps channel 5; each later window takes the next odd channel, so
+/// the shared reply channel 6 stays free and assignments never collide.
+#[must_use]
+pub const fn wm_assign(window: u32) -> usize {
+    IPC_WM + 2 * window as usize
+}
+
+/// Encodes a window reply: `kind` with the window id in bits 32..47.
+///
+/// The magic (`0x574D`) lives above the window field, so the id must be masked
+/// into 16 bits rather than simply shifted into the high half. Window 0's
+/// words are exactly [`WM_ACK`] and [`WM_DONE`], which keeps the single-window
+/// protocol byte-identical.
+#[must_use]
+pub const fn wm_reply(kind: u64, window: u32) -> u64 {
+    (kind & 0xffff_0000_ffff_ffff) | (((window as u64) & 0xffff) << 32)
+}
+
+/// Returns the window id a reply word names.
+#[must_use]
+pub const fn wm_reply_window(word: u64) -> u32 {
+    ((word >> 32) & 0xffff) as u32
+}
+
+/// Returns the kind a reply word carries ([`WM_ACK`], [`WM_DONE`], or
+/// [`WM_MOUSE`]).
+#[must_use]
+pub const fn wm_reply_kind(word: u64) -> u64 {
+    word & 0xffff_0000_ffff_ffff
+}
 
 /// The acknowledgement a window client sends once it has painted its surface.
 ///
@@ -154,7 +193,7 @@ mod tests {
 
     #[test]
     fn channels_are_distinct_and_bounded() {
-        assert_eq!(IPC_CHANNELS, 7);
+        assert_eq!(IPC_CHANNELS, 8);
         assert_ne!(IPC_DATA, IPC_DISCOVERY);
         assert_ne!(IPC_FS, IPC_FS_REPLY);
         assert_ne!(IPC_SUPERVISE, IPC_DATA);
@@ -163,6 +202,10 @@ mod tests {
         assert_ne!(IPC_SUPERVISE, IPC_FS_REPLY);
         assert_ne!(IPC_WM, IPC_WM_REPLY);
         assert_ne!(IPC_WM, IPC_DATA);
+        assert_eq!(wm_assign(0), IPC_WM);
+        assert_eq!(wm_assign(1), 7);
+        assert_ne!(wm_assign(1), IPC_WM_REPLY);
+        assert!(wm_assign(1) < IPC_CHANNELS);
         assert!(IPC_DATA < IPC_CHANNELS);
         assert!(IPC_DISCOVERY < IPC_CHANNELS);
         assert!(IPC_FS < IPC_CHANNELS);
@@ -178,5 +221,17 @@ mod tests {
         assert_ne!(WM_MOUSE, WM_ACK);
         assert_ne!(WM_MOUSE, WM_DONE);
         assert_ne!(WM_MOUSE, u64::from(crate::surface::SURFACE_FACTORY));
+    }
+
+    #[test]
+    fn a_reply_carries_its_window_without_changing_window_zero() {
+        // Window 0 must stay byte-identical to the pre-table protocol.
+        assert_eq!(wm_reply(WM_ACK, 0), WM_ACK);
+        assert_eq!(wm_reply(WM_DONE, 0), WM_DONE);
+        assert_eq!(wm_reply(WM_ACK, 1), 0x574D_0001_0000_0001);
+        assert_eq!(wm_reply_window(wm_reply(WM_ACK, 3)), 3);
+        assert_eq!(wm_reply_kind(wm_reply(WM_DONE, 3)), WM_DONE);
+        // A nudge names no window but must still decode as itself.
+        assert_eq!(wm_reply_kind(WM_MOUSE), WM_MOUSE);
     }
 }

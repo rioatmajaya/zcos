@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 7 grants`, `task 6: devmgr: blk published`, `dma: window coherent ok` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–7, F8e-1–4, F8h-0/0b/1a, live-input check, F8g-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: font vfs ok`; `compositor: font vfs ok`; `font: vfs ok`; `client: window painted`; `client: vfs ok`; `client: pointer ok`; `client: click ok`; `client: ls ok`; `wm: window mapped`; `wm: pointer routed`; `wm: click ok`; `wm: ls ok`; `task 2: data/`; `task 2: kbd`; `task 2: probe`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed` (close run); `compositor: window erased` (close run); `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui/session/vfs host tests pass; `zc-storage` zcfs read_dir tests pass |
+| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–7, F8e-1–4, F8h-0/0b/1a/1b, live-input check, F8g-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: font vfs ok`; `compositor: font vfs ok`; `font: vfs ok`; `client: window painted`; `client: vfs ok`; `client: pointer ok`; `client: click ok`; `client: ls ok`; `wm: window mapped`; `wm: pointer routed`; `wm: click ok`; `wm: ls ok`; `task 2: data/`; `task 2: kbd`; `task 2: probe`; `win1 entry`; `task 9: client: window 1 idle`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed` (close run); `compositor: window erased` (close run); `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui/session/vfs host tests pass; `zc-storage` zcfs read_dir tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -815,12 +815,25 @@ full browser. Note them as follow-ups, do not build them here.
         are unchanged (`0xd616ad79aaefb099` / `0x6d66e82d0f2d6fb8`); per-window
         surfaces, queues, and the second client are F8h-1b. See
         [`adr/0038`](adr/0038-the-window-manager-holds-a-table.md).
-      - [ ] F8h-1b: a second client and the per-window state it needs. The
-        compositor still creates one surface and one handshake, the kernel
-        still keeps one delegated surface, one pointer queue, and one input
-        session, and the verifier still compares one window region. F8h-1b
-        turns each of those into a table entry keyed by window id and launches
-        the file manager as a second task.
+      - [x] F8h-1b: a second client and the per-window state it needs. The
+        kernel's delegated surfaces, pointer queues, input sessions, and verifier
+        snapshots are tables keyed by window id (`window_of_task` resolves the
+        slot), `SYS_WINDOW_ID` (37) tells a client which window it owns, and
+        `wm_assign(window) = IPC_WM + 2*window` separates the two clients'
+        assignment channels while `wm_reply(kind, window)` returns an ack or done
+        to the right one. The second client is the same `win.elf` binary — no
+        second initramfs entry, so the boot frame's `ls` output and both frame
+        checksums are byte-identical — spawned as task 9, window 1; it proves it
+        booted and wired to the right channel, then exits cleanly, because a
+        client blocked on a channel with no sender deadlocks the scripted boot.
+        The address-space audit now compares physical frames, not virtual entry
+        points, so two tasks sharing one image are not a false leak. The visible
+        second window (file manager) is F8h-1c. See
+        [`adr/0039`](adr/0039-a-second-window-client-and-per-window-state.md).
+      - [ ] F8h-1c: the visible second window. Launch the file manager as a real
+        client on a launcher or task action, so window 1 gets a surface and the
+        per-window machinery from F8h-1b routes its input, snapshots its frame,
+        and placement-checks it; idle task 9 becomes a live client.
 - [ ] F8i: audio stack (virtio-snd first, then HD Audio) after the desktop is
       stable.
 - [ ] F8j: USB stack (xHCI) for keyboard, mouse, and mass storage.
@@ -961,6 +974,13 @@ full browser. Note them as follow-ups, do not build them here.
   focused window moves focus to the topmost visible one, and that a drag moves
   only the window it grabbed. The boot still has one window, so both checksums
   are unchanged — the evidence that the refactor painted nothing.
+- A second client boots per-window and proves itself (F8h-1b): the boot logs
+  `win1 entry` (the same `win.elf` binary as window 0, so the initramfs listing
+  and the frame are untouched) and `task 9: client: window 1 idle (F8h-1c)` —
+  the client learned its id through `SYS_WINDOW_ID` and found its assignment
+  channel — then exits cleanly, so the scripted boot still reaches idle. Both
+  checksums are unchanged (`0xd616ad79aaefb099` / `0x6d66e82d0f2d6fb8`) although
+  a second window task now runs. See [`adr/0039`](adr/0039-a-second-window-client-and-per-window-state.md).
 - Clean shutdown: `power: halt clean`.
 - Audio plays a known tone and the driver reports no XRUN under a stress
   buffer: `snd: playback ok`.

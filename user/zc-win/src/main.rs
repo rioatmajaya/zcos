@@ -2,7 +2,8 @@
 //!
 //! The compositor owns the display and the surface factory. It creates a
 //! window surface and delegates a read/write capability to this task, then
-//! assigns the object id over [`IPC_WM`]. This client maps the surface and
+//! assigns the object id over this window's assignment channel
+//! ([`zc_abi::wm_assign`]). This client maps the surface and
 //! runs an event loop: it reads one event at a time from `SYS_WINDOW_READ`,
 //! repaints the terminal on a keystroke, and sends [`WM_ACK`] so the compositor
 //! can re-composite the window. The kernel serves the scripted session first,
@@ -23,11 +24,13 @@
 
 use zc_abi::terminal::{Listing, Term, run_command_with};
 use zc_abi::{
-    BUTTON_LEFT, DIRENT_LEN, DirEntry, Event, FONT_LEN, FONT_PATH, Font, IPC_WM, IPC_WM_REPLY,
-    PixelFormat, READDIR_END, READDIR_ENTRY, SurfaceInfo, WM_ACK, WM_DONE,
+    BUTTON_LEFT, DIRENT_LEN, DirEntry, Event, FONT_LEN, FONT_PATH, Font, IPC_WM_REPLY,
+    PixelFormat, READDIR_END, READDIR_ENTRY, SurfaceInfo, WM_ACK, WM_DONE, wm_assign, wm_reply,
 };
 use zc_ui::{Window, WindowEvent};
-use zc_user::{close, log, open, read, readdir, recv_from, send_to, surface_map, task_exit};
+use zc_user::{
+    close, log, open, read, readdir, recv_from, send_to, surface_map, task_exit, window_id,
+};
 
 /// Whether the client has logged its first successful VFS read.
 static mut VFS_LOGGED: bool = false;
@@ -93,8 +96,29 @@ fn load_font() -> Font<'static> {
 /// Task entry point; the kernel provides a fresh user stack.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
-    // Block until the compositor assigns this client its window surface.
-    let object = recv_from(IPC_WM as u64) as u32;
+    // Which window this task is. The kernel assigns it from the task slot, so
+    // the same binary serves every window without a compile-time constant.
+    let window = window_id();
+    if window == u64::MAX {
+        log("client: not a window task\n");
+        task_exit()
+    }
+    let window = window as u32;
+    if window == 1 {
+        // The second window client proves it booted and learned its id, then
+        // exits cleanly. The compositor does not assign a surface at boot, and
+        // the scripted boot requires every spawned task to reach a terminal
+        // state; blocking on this window's assignment channel with no sender
+        // would leave a lone blocked task and trip the scheduler's ipc
+        // deadlock. The visible second window (a file manager) is F8h-1c. CI
+        // greps this line to confirm the second client is live and wired to the
+        // right id.
+        log("client: window 1 idle (F8h-1c)\n");
+        task_exit();
+    }
+    // Block until the compositor assigns this client its window surface, on
+    // this window's own channel: two clients never race for one message.
+    let object = recv_from(wm_assign(window) as u64) as u32;
     let mut surface = SurfaceInfo::UNAVAILABLE;
     let mapped = surface_map(object, Some(&mut surface));
     if mapped == u64::MAX || !surface.is_available() {
@@ -117,7 +141,7 @@ pub unsafe extern "C" fn _start() -> ! {
             surface.width,
             surface.height,
         );
-        let _ = send_to(IPC_WM_REPLY as u64, WM_ACK);
+        let _ = send_to(IPC_WM_REPLY as u64, wm_reply(WM_ACK, window));
         // One stream for both devices. `SYS_WINDOW_READ` serves the scripted
         // keystrokes, the live keyboard, and the pointer reports that landed
         // inside this window, in this window's own coordinates. The global
@@ -126,9 +150,9 @@ pub unsafe extern "C" fn _start() -> ! {
         // because it places the window and draws the sprite. The per-window
         // stream is the kernel's copy, so consuming it cannot freeze the drag
         // (ADR 0034).
-        let mut window = Window::new();
+        let mut win = Window::new();
         loop {
-            let Some(event) = window.next() else {
+            let Some(event) = win.next() else {
                 break;
             };
             match event {
@@ -145,7 +169,7 @@ pub unsafe extern "C" fn _start() -> ! {
                         surface.width,
                         surface.height,
                     );
-                    let _ = send_to(IPC_WM_REPLY as u64, WM_ACK);
+                    let _ = send_to(IPC_WM_REPLY as u64, wm_reply(WM_ACK, window));
                 }
                 // The event already carries the window-local position and the
                 // derived edge, so the button hit-test needs no device
@@ -168,7 +192,7 @@ pub unsafe extern "C" fn _start() -> ! {
                             surface.width,
                             surface.height,
                         );
-                        let _ = send_to(IPC_WM_REPLY as u64, WM_ACK);
+                        let _ = send_to(IPC_WM_REPLY as u64, wm_reply(WM_ACK, window));
                     }
                 }
             }
@@ -180,7 +204,7 @@ pub unsafe extern "C" fn _start() -> ! {
     // Tell the compositor the session is over on every path, so it never waits
     // for a frame that will not come; a map or format failure leaves its
     // window blank, and the kernel's frame checksum catches that.
-    let _ = send_to(IPC_WM_REPLY as u64, WM_DONE);
+    let _ = send_to(IPC_WM_REPLY as u64, wm_reply(WM_DONE, window));
     task_exit()
 }
 

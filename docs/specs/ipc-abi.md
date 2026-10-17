@@ -49,8 +49,9 @@ other channel.
 | 2 | `IPC_FS` | kernel proxy / shell → `zc-blk` | request word: `(seq << 32) \| op` |
 | 3 | `IPC_FS_REPLY` | `zc-blk` → kernel proxy | reply word: `(seq << 32) \| status` |
 | 4 | `IPC_SUPERVISE` | kernel → `initd` | supervision event (below) |
-| 5 | `IPC_WM` | compositor → window client | surface object id |
-| 6 | `IPC_WM_REPLY` | window client → compositor | `WM_ACK` or `WM_DONE` |
+| 5 | `IPC_WM` (window 0) | compositor → window client | surface object id |
+| 6 | `IPC_WM_REPLY` | window client → compositor | `WM_ACK` or `WM_DONE`, window id in bits 32..47 |
+| 7 | `IPC_WM` (window 1) | compositor → window client | surface object id |
 
 Channels 2/3 carry only the opcode and sequence; the request arguments and
 payload travel in the filesystem exchange page, described in
@@ -72,11 +73,16 @@ wake-up, so the grant must already be in its capability table when the word
 lands. The driver blocks for exactly one word, so the manager must send one on
 every path, including failure, or the driver would wait forever.
 
-### Window protocol (channels 5/6)
+### Window protocol (channels 5/6/7)
 
 `IPC_WM` carries the capability object id of the window surface from the
-compositor to the client; `IPC_WM_REPLY` carries one word back. Two sentinels
-are reserved:
+compositor to the client; `IPC_WM_REPLY` carries one word back. Each window has
+its own assignment channel: `wm_assign(window) = IPC_WM + 2*window`, so window 0
+listens on channel 5 and window 1 on channel 7, and two clients never race for
+one message. Replies share `IPC_WM_REPLY` (6) with the window id folded into
+bits 32..47 behind a `0x574D` magic (`wm_reply(kind, window)`), so the compositor
+routes an ack or done back to the client that sent it. Two sentinels are
+reserved:
 
 | Constant | Value | Meaning |
 |---|---|---|

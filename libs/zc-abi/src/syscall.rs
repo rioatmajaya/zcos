@@ -164,6 +164,15 @@ pub const SYS_WINDOW_READ: u64 = 35;
 /// below the directory, so `ls /` shows `data`, `dev`, and `tmp` without any
 /// filesystem having to know they exist.
 pub const SYS_READDIR: u64 = 36;
+/// Returns the calling task's window id, or `u64::MAX` when it is not a window
+/// client.
+///
+/// A client needs this before it can pick its assignment channel: window 0
+/// reads channel 5, window 1 channel 7 ([`crate::ipc::wm_assign`]). The id is
+/// the task's position among the window-client slots, assigned by the kernel
+/// at spawn, so two instances of the same client binary need no compile-time
+/// configuration and cannot race for the same channel.
+pub const SYS_WINDOW_ID: u64 = 37;
 
 /// Returned by `SYS_READDIR` when an entry was written into the buffer.
 pub const READDIR_ENTRY: u64 = 0;
@@ -262,6 +271,7 @@ mod tests {
         assert_eq!(SYS_POWEROFF, 34);
         assert_eq!(SYS_WINDOW_READ, 35);
         assert_eq!(SYS_READDIR, 36);
+        assert_eq!(SYS_WINDOW_ID, 37);
         assert_eq!(READDIR_ENTRY, 0);
         assert_eq!(READDIR_END, 1);
     }

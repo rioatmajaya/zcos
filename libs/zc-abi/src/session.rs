@@ -15,19 +15,23 @@
 //! Everything here is pure and allocation-free, like the rest of the crate.
 
 use crate::cursor::{BUTTON_LEFT, Cursor, MOUSE_SCRIPT, script_len};
-use crate::desktop::{FRAME_MOVED, window_rect};
+use crate::desktop::{FRAME_INITIAL, FRAME_MOVED, window_rect, window_rect_for};
 use crate::terminal::Term;
 use crate::ui::{Event, Input};
 use crate::wm::{Wm, window_pointer_at};
 
-/// Replays the scripted pointer session into `term`.
+/// Replays the scripted pointer session into `term` for window `window`.
 ///
 /// `screen_w`/`screen_h` are the display the script's coordinates are written
 /// for; `surface_w`/`surface_h` are the window surface the terminal renders
-/// into. The window starts where the compositor's second proof frame places it,
-/// exactly as the kernel's own router does, and every report inside its content
-/// area is folded into the terminal's widget state — a left press inside the
-/// click button increments its count.
+/// into. The machine is seeded exactly as the compositor and the kernel seed
+/// theirs: window 0 at the scripted second frame, window 1 at its initial
+/// rectangle, and window 1 focused (it is added last, so it starts on top).
+///
+/// Only reports that land in *`window`'s* content area are folded into the
+/// terminal. The other window may be focused for part of the script — the
+/// first press moves focus from window 1 to window 0 — and those reports
+/// belong to the other client, not this one.
 ///
 /// `close` selects the same prefix the kernel serves: the close-proof build's
 /// extra click lands on the title bar, so it never reaches the terminal.
@@ -38,12 +42,14 @@ pub fn replay_pointer(
     surface_w: u32,
     surface_h: u32,
     close: bool,
+    window: u32,
 ) {
     let mut wm = Wm::new(
         screen_w,
         screen_h,
         window_rect(FRAME_MOVED, screen_w, screen_h),
     );
+    let _ = wm.add(1, window_rect_for(1, FRAME_INITIAL, screen_w, screen_h));
     let mut cursor = Cursor::new(screen_w, screen_h);
     // The whole device stream, used to drive placement and the cursor.
     let mut raw = Input::new();
@@ -59,6 +65,13 @@ pub fn replay_pointer(
         let event = raw.report(step.buttons, step.dx, step.dy);
         cursor.apply(step.dx, step.dy, screen_w, screen_h);
         let _ = wm.apply(cursor, event);
+        // The kernel routes a report only to the focused window; a replay that
+        // fed every report to this terminal would invent clicks the client
+        // never received.
+        if wm.focused() != window {
+            index += 1;
+            continue;
+        }
         if let Some((x, y)) = window_pointer_at(wm.rect(), cursor.x, cursor.y) {
             if let Event::Press { button, .. } = routed.report(step.buttons, step.dx, step.dy) {
                 if button & BUTTON_LEFT != 0 {
@@ -81,8 +94,19 @@ mod tests {
 
     fn replay(close: bool) -> Term {
         let mut term = Term::new();
-        replay_pointer(&mut term, SCREEN.0, SCREEN.1, SURFACE.0, SURFACE.1, close);
+        replay_pointer(&mut term, SCREEN.0, SCREEN.1, SURFACE.0, SURFACE.1, close, 0);
         term
+    }
+
+    /// The two-window machine the compositor and the kernel both seed.
+    fn scripted_wm() -> Wm {
+        let mut wm = Wm::new(
+            SCREEN.0,
+            SCREEN.1,
+            window_rect(FRAME_MOVED, SCREEN.0, SCREEN.1),
+        );
+        let _ = wm.add(1, window_rect_for(1, FRAME_INITIAL, SCREEN.0, SCREEN.1));
+        wm
     }
 
     #[test]
@@ -99,11 +123,7 @@ mod tests {
         // button nobody could press.
         let button = button_rect(SURFACE.0, SURFACE.1);
         assert!(!button.is_empty());
-        let mut wm = Wm::new(
-            SCREEN.0,
-            SCREEN.1,
-            window_rect(FRAME_MOVED, SCREEN.0, SCREEN.1),
-        );
+        let mut wm = scripted_wm();
         let mut cursor = Cursor::new(SCREEN.0, SCREEN.1);
         let mut raw = Input::new();
         let mut routed = Input::new();
@@ -133,11 +153,7 @@ mod tests {
         // body. This is the control that keeps the proof from passing because
         // "some press happened somewhere".
         let mut term = Term::new();
-        let mut wm = Wm::new(
-            SCREEN.0,
-            SCREEN.1,
-            window_rect(FRAME_MOVED, SCREEN.0, SCREEN.1),
-        );
+        let mut wm = scripted_wm();
         let mut cursor = Cursor::new(SCREEN.0, SCREEN.1);
         let mut raw = Input::new();
         let mut routed = Input::new();
@@ -162,7 +178,17 @@ mod tests {
         // coordinates alone; a different surface moves the button and the same
         // point misses it.
         let mut term = Term::new();
-        replay_pointer(&mut term, SCREEN.0, SCREEN.1, 640, 400, false);
+        replay_pointer(&mut term, SCREEN.0, SCREEN.1, 640, 400, false, 0);
+        assert_eq!(term.clicks(), 0);
+    }
+
+    #[test]
+    fn the_second_window_receives_no_click() {
+        // Window 1 is on top when the script starts, but the script never
+        // lands in its content area; a replay that ignored focus would hand it
+        // window 0's click.
+        let mut term = Term::new();
+        replay_pointer(&mut term, SCREEN.0, SCREEN.1, SURFACE.0, SURFACE.1, false, 1);
         assert_eq!(term.clicks(), 0);
     }
 

@@ -263,7 +263,7 @@ pub unsafe extern "C" fn _start() -> ! {
             // and sends `WM_DONE`. The kernel records the closed state too, so
             // the frame verifier expects a desktop with no window in it.
             wm.close_of(action.window);
-            if window_close() == u64::MAX {
+            if window_close(action.window) == u64::MAX {
                 log("compositor: window close refused\n");
             }
             closed = true;
@@ -335,7 +335,7 @@ pub unsafe extern "C" fn _start() -> ! {
             let action = wm.apply(cursor, event);
             if action.kind == Kind::Closed {
                 wm.close_of(action.window);
-                let _ = window_close();
+                let _ = window_close(action.window);
             }
             window = wm.rect();
             let mut rect = cursor_before.union(cursor.rect());

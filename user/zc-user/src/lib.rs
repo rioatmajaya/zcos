@@ -20,7 +20,8 @@ pub use zc_abi::{
     SYS_RECV_FROM, SYS_SEND,
     SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START, SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT,
     SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TERM_READ,
-    SYS_UMOUNT, SYS_WINDOW_CLOSE, SYS_WINDOW_READ, SYS_WRITE, SYS_YIELD, MmioInfo, Stat,
+    SYS_UMOUNT, SYS_WINDOW_CLOSE, SYS_WINDOW_ID, SYS_WINDOW_READ, SYS_WRITE, SYS_YIELD,
+    MmioInfo, Stat,
     SurfaceInfo, SyscallError,
     WM_ACK,
     supervise_kind, supervise_service,
@@ -256,15 +257,25 @@ pub fn window_read() -> u64 {
     syscall0(SYS_WINDOW_READ)
 }
 
-/// Ends the window input session, so the window client blocked in
-/// [`term_read`] returns `u64::MAX` instead of waiting for a keystroke.
+/// Returns this task's window id, or `u64::MAX` when it is not a window client.
+///
+/// A client uses it to pick its assignment channel ([`zc_abi::wm_assign`]) and
+/// to tag its replies, so two instances of the same binary need no compile-time
+/// configuration.
+#[inline(always)]
+pub fn window_id() -> u64 {
+    syscall0(SYS_WINDOW_ID)
+}
+
+/// Ends `window`'s input session, so that client blocked in [`window_read`]
+/// returns `WINDOW_NO_EVENT` instead of waiting for an event that cannot come.
 ///
 /// Only the task holding the surface factory — the window manager — may call
 /// it; `u64::MAX` means the kernel refused. Non-blocking: the client observes
 /// the end on its next scheduler turn, not inside this call.
 #[inline(always)]
-pub fn window_close() -> u64 {
-    syscall0(SYS_WINDOW_CLOSE)
+pub fn window_close(window: u32) -> u64 {
+    syscall1(SYS_WINDOW_CLOSE, u64::from(window))
 }
 
 /// Powers the machine off through ACPI S5; never returns on success.

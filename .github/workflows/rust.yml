@@ -170,6 +170,12 @@ jobs:
         grep -q "task 3: wm: move ok" build/boot.log
         grep -q "task 3: compositor: frame updated" build/boot.log
         grep -q "task 3: compositor: ready" build/boot.log
+        # The second window client is spawned from the same `win.elf` binary
+        # (distinguished only by its task slot and window id), learns its id,
+        # and exits cleanly — proven live but idle until F8h-1c gives it a
+        # surface, so the single-window frame (and its checksum) is unchanged.
+        grep -q "win1 entry" build/boot.log
+        grep -q "task 9: client: window 1 idle" build/boot.log
         grep -q "wm: content ok" build/boot.log
         grep -q "wm: vfs content ok" build/boot.log
         grep -q "task 8: client: vfs ok" build/boot.log

@@ -86,7 +86,17 @@ press selects the topmost window, focuses and raises it, then classifies the
 same press; the kernel runs the identical machine, so focus and the destination
 of `SYS_WINDOW_READ` are derived from the report stream. The boot still launches
 one window, so both frame checksums are unchanged. See
-[ADR 0038](docs/adr/0038-the-window-manager-holds-a-table.md).
+[ADR 0038](docs/adr/0038-the-window-manager-holds-a-table.md). F8h-1b makes the
+window subsystem a per-window table and launches a second client: the kernel
+keys its delegated surfaces, pointer queues, and verifier snapshots by window
+id, `SYS_WINDOW_ID` (37) tells a client which window it owns, and
+`wm_assign(window) = IPC_WM + 2*window` gives each window its own assignment
+channel while replies share `IPC_WM_REPLY` with the id encoded. The second
+client is the same `win.elf` binary — no second initramfs entry, so the boot
+frame's `ls` output and both checksums are byte-identical — spawned as task 9,
+window 1; it proves it booted and wired, then exits, because a client blocked on
+an unassignment channel deadlocks the scripted boot. See
+[ADR 0039](docs/adr/0039-a-second-window-client-and-per-window-state.md).
 
 ### Fixed
 

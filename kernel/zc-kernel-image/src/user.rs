@@ -43,7 +43,7 @@ const USER_WINDOW_END: u64 = 0x60_0000;
 const STACK_ZONE_START: u64 = 0x40_4000;
 
 /// End of the reserved user-stack zone.
-const STACK_ZONE_END: u64 = 0x40_D000;
+const STACK_ZONE_END: u64 = 0x40_E000;
 
 /// Each task links at its own base (producer at [`USER_CODE_VIRT`], the
 /// consumer 64 KiB higher), so images never share pages and absolute
@@ -100,12 +100,21 @@ const STACK_H_PAGE: u64 = STACK_H_TOP - PAGE_SIZE;
 
 /// Top of the window client's user stack.
 ///
-/// The last page before the consumer image at `0x410000`; the zone ends at
-/// [`STACK_ZONE_END`].
+/// The stack zone continues one page above it for the second window client;
+/// the zone ends at [`STACK_ZONE_END`].
 const STACK_I_TOP: u64 = 0x40_D000;
 
 /// Window-client stack page backing that top.
 const STACK_I_PAGE: u64 = STACK_I_TOP - PAGE_SIZE;
+
+/// Top of the second window client's user stack.
+///
+/// The stack zone now ends at `0x40E000`, one page above this top; the
+/// consumer image starts at `0x410000`.
+const STACK_J_TOP: u64 = 0x40_E000;
+
+/// Second window-client stack page backing that top.
+const STACK_J_PAGE: u64 = STACK_J_TOP - PAGE_SIZE;
 
 /// File names of the bring-up tasks inside the initramfs.
 const PRODUCER_NAME: &str = "producer.elf";
@@ -140,8 +149,18 @@ const DEVMGR_NAME: &str = "devmgr.elf";
 /// File name of the `initd` supervisor inside the initramfs.
 const INITD_NAME: &str = "initd.elf";
 
-/// File name of the window client inside the initramfs.
+/// File name of the first window client inside the initramfs.
 const WINDOW_CLIENT_NAME: &str = "win.elf";
+
+/// File name of the second window client inside the initramfs.
+///
+/// The same binary as [`WINDOW_CLIENT_NAME`] (`win.elf`): it asks the kernel
+/// which window it owns (`SYS_WINDOW_ID`), so the image needs no second build.
+/// Reusing the one binary keeps the initramfs listing — and therefore the
+/// boot frame's `ls` output and its checksum — byte-identical to the
+/// single-window boot; only a distinct task slot and window id separate the
+/// two instances.
+const SECOND_WINDOW_CLIENT_NAME: &str = "win.elf";
 
 /// User virtual address the display framebuffer is mapped at.
 const FB_VIRT: u64 = 0x10_00000;
@@ -738,7 +757,7 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             // must observe the end instead of waiting forever. `exit_current`
             // then unblocks every task, so the client's retry sees it closed.
             if me as usize == service::SHELL_TASK {
-                close_window_input();
+                close_all_window_input();
             }
             // SAFETY: as above; the data-channel depth is diagnostic only.
             let depth = unsafe { endpoint_for(zc_abi::IPC_DATA as u64).map_or(0, |e| e.len()) };
@@ -1531,14 +1550,19 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             };
             match source_table.delegate(handle, dest_table, requested) {
                 Ok(_) => {
-                    // A surface delegated to the window client is the window
+                    // A surface delegated to a window client is the window
                     // the frame verifier must prove placement for; remember it
-                    // so the destroy path can snapshot its pixels.
-                    if target == service::WINDOW_CLIENT_TASK {
+                    // so the destroy path can snapshot its pixels. The window
+                    // id comes from the target slot, the same id the client
+                    // learns through `SYS_WINDOW_ID`.
+                    if let Some(window) = window_of_task(target) {
                         if let Some(slot) = surface_slot(object) {
                             // SAFETY: owned here; interrupts are masked through
                             // this arm.
-                            unsafe { addr_of_mut!(WINDOW_SURFACE).write(Some(slot)); }
+                            unsafe {
+                                (*addr_of_mut!(WINDOW_SURFACES))[window as usize] =
+                                    Some(slot);
+                            }
                         }
                     }
                     let _ = crate::serial::print(format_args!(
@@ -1831,13 +1855,19 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 regs.set_result(u64::MAX);
                 return 0;
             }
-            // The window client's surface is the one the frame verifier must
+            // A window client's surface is the one the frame verifier must
             // prove placement for. The compositor releases it before the boot
             // ends, so snapshot its pixels now, while they are still ours.
-            if unsafe { addr_of!(WINDOW_SURFACE).read() } == Some(slot) {
-                snapshot_window_surface(surface);
+            // SAFETY: owned here; interrupts are masked through this arm.
+            let owner = unsafe { addr_of!(WINDOW_SURFACES).read() }
+                .iter()
+                .position(|entry| *entry == Some(slot));
+            if let Some(window) = owner {
+                snapshot_window_surface(surface, window as u32);
                 // SAFETY: owned here; interrupts are masked through this arm.
-                unsafe { addr_of_mut!(WINDOW_SURFACE).write(None); }
+                unsafe {
+                    (*addr_of_mut!(WINDOW_SURFACES))[window] = None;
+                }
             }
             let Some(surface) = surfaces.remove(slot) else {
                 regs.set_result(u64::MAX);
@@ -1910,11 +1940,13 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             0
         }
         Ok(Action::TermRead) => {
+            // The legacy keys-only path belongs to window 0; the client uses
+            // `SYS_WINDOW_READ`, which serves keys and its own pointer stream.
             let me = tasks.current();
-            if let Some(word) = next_window_event(me, false) {
+            if let Some(word) = next_window_event(me, false, 0) {
                 regs.set_result(word);
                 0
-            } else if window_input_open() {
+            } else if window_open(0) {
                 // No byte yet: sleep until the drain routes one (or the shell
                 // exits and closes the session). The kernel rewinds this
                 // syscall, so the retry re-evaluates from the top.
@@ -1926,20 +1958,27 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 0
             }
         }
+        Ok(Action::WindowId) => {
+            // The id is the caller's offset from the first window slot, so the
+            // same binary serves every window and two instances cannot race
+            // for one assignment channel.
+            regs.set_result(window_of_task(tasks.current()).map_or(u64::MAX, u64::from));
+            0
+        }
         Ok(Action::WindowRead) => {
             // The stream belongs to the window's client: it is derived from the
             // focused window, and another task draining it would take events
             // the client never sees. The compositor reads the global pointer
             // through `SYS_MOUSE_READ` instead.
-            if tasks.current() != service::WINDOW_CLIENT_TASK {
+            let Some(window) = window_of_task(tasks.current()) else {
                 regs.set_result(u64::MAX);
                 return 0;
-            }
+            };
             let me = tasks.current();
-            if let Some(word) = next_window_event(me, true) {
+            if let Some(word) = next_window_event(me, true, window) {
                 regs.set_result(word);
                 0
-            } else if window_input_open() {
+            } else if window_open(window) {
                 // Neither a key nor a pointer report is waiting: sleep until
                 // the drain or the pointer router produces one.
                 block_with_retry(tasks, regs, frame, 0)
@@ -1963,14 +2002,20 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 regs.set_result(u64::MAX);
                 return 0;
             }
+            let window = regs.rdi as u32;
+            if window as usize >= service::WINDOW_TASKS {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
             // Mark the window closed on the authoritative machine before the
             // client can observe the session end, so the frame verifier sees a
             // window with no pixels rather than one that merely went quiet.
             // SAFETY: owned here; interrupts are masked through this arm.
-            unsafe { (*addr_of_mut!(WM)).close() };
-            close_window_input();
-            // A client blocked in `SYS_TERM_READ` is rewound and retried by the
-            // scheduler, so it must be made runnable now to observe the close.
+            unsafe { (*addr_of_mut!(WM)).close_of(window) };
+            close_window(window);
+            // A client blocked in `SYS_WINDOW_READ` is rewound and retried by
+            // the scheduler, so it must be made runnable now to observe the
+            // close.
             tasks.unblock_all();
             regs.set_result(0);
             0
@@ -2308,15 +2353,17 @@ fn verify_dma_window() {
     }
 }
 
-/// Hashes the client's window surface and proves its deterministic content.
+/// Hashes window `window`'s surface and proves its deterministic content.
 ///
 /// Called from the surface-destroy path while the client's frames are still
-/// mapped. The hash is the placement reference [`verify_framebuffer`] compares
-/// the display's window region against; the same pass also compares every
-/// pixel to the terminal the kernel served through `SYS_TERM_READ`, so the
-/// boot's scripted content is proven too (`wm: content ok`). A client that
-/// dropped a key or painted the wrong pixels fails here.
-fn snapshot_window_surface(surface: &zc_kernel::surface::Surface) {
+/// mapped. The hash covers the pixels *visible* in the final stacking — pixels
+/// a higher window covers belong to that window and are skipped on both sides
+/// — and is the placement reference [`verify_framebuffer`] compares the
+/// display's region against. The same pass compares every pixel to the
+/// terminal the kernel served through `SYS_WINDOW_READ`, so the boot's
+/// scripted content is proven too (`wm: content ok`). A client that dropped a
+/// key or painted the wrong pixels fails here.
+fn snapshot_window_surface(surface: &zc_kernel::surface::Surface, window: u32) {
     use zc_abi::terminal::{SCRIPT, Term, run_command_with};
     use zc_abi::{HASH_OFFSET, PixelFormat, hash_step};
 
@@ -2331,10 +2378,13 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface) {
     // The window's *remembered* rectangle, which survives a minimize: the surface
     // carries window-local pixels, so both its geometry and the origin the
     // placement hash is compared at come from the placement, never from the
-    // visibility. `expected_window()` would be empty here if the window were
-    // minimized, and this snapshot runs on the destroy path either way.
-    let window = unsafe { &*addr_of!(WM) }.window();
-    if surface.width != window.w || surface.height != window.h {
+    // visibility.
+    // SAFETY: read-only; written only through the mouse syscall.
+    let wm = unsafe { addr_of!(WM).read() };
+    let Some(placed) = wm.window_of(window) else {
+        crate::fail("window surface has no window");
+    };
+    if surface.width != placed.w || surface.height != placed.h {
         crate::fail("window surface geometry mismatch");
     }
     // The content is the terminal screen the kernel served the client. The
@@ -2373,7 +2423,8 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface) {
     // routing the client's stream came from. The button click changes the
     // terminal's label, so this must run before the pixels are compared — and
     // the script must click something, or the proof would silently degrade to
-    // "the client painted whatever it liked".
+    // "the client painted whatever it liked". Window 0 is the click target;
+    // window 1 is on top at the start but the script never lands in its body.
     zc_abi::replay_pointer(
         &mut terminal,
         info.width,
@@ -2381,8 +2432,9 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface) {
         surface.width,
         surface.height,
         cfg!(feature = "close-proof"),
+        window,
     );
-    if terminal.clicks() == 0 {
+    if window == 0 && terminal.clicks() == 0 {
         crate::fail("window script clicked nothing");
     }
     crate::serial::write_str("wm: click ok\n");
@@ -2402,7 +2454,12 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface) {
             // pixel, so the placement hash skips those pixels on both sides. The
             // content comparison below still covers every pixel: the client
             // never draws the pointer.
-            if cursor.color_at(window.x + lx, window.y + ly).is_none() {
+            //
+            // A pixel another window covers is not on the display either, so it
+            // is skipped here exactly as `verify_framebuffer` skips it. A hidden
+            // window has no visible pixel at all and hashes to the offset.
+            let on_screen = wm.top_at(placed.x + lx, placed.y + ly) == Some(window);
+            if on_screen && cursor.color_at(placed.x + lx, placed.y + ly).is_none() {
                 hash = hash_step(hash, pixel);
             }
             let Some(expected) = terminal.pixel(font, format, lx, ly, surface.width, surface.height)
@@ -2417,7 +2474,9 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface) {
         ly += 1;
     }
     // SAFETY: owned here; interrupts are masked on the destroy path.
-    unsafe { addr_of_mut!(WINDOW_SNAPSHOT).write(Some(hash)) };
+    unsafe {
+        (*addr_of_mut!(WINDOW_SNAPSHOTS))[window as usize] = Some(hash);
+    }
     crate::serial::write_str("wm: content ok\n");
 }
 
@@ -2478,23 +2537,23 @@ fn kernel_list_dir(path: &[u8], index: usize) -> zc_abi::terminal::Listing {
 /// Verifies the final desktop frame: exact where it is deterministic,
 /// placement-checked where it is not.
 ///
-/// Reads every pixel back through the identity map. Outside the window the
-/// expected pixel is recomputed from the shared layout against
-/// [`expected_window`], so a compositor that forgot to repaint a window's old
-/// position leaves stale pixels and fails the hash — the proof that damage
-/// tracking is correct, not just that some colors changed. That rectangle is
-/// the one the kernel's own window machine derived from the reports it served,
-/// so a drag moves the expected region instead of weakening the check. Inside
-/// the window the client's pixels are unknowable (they are whatever the user
-/// typed), so that region is checked for *placement*: it must equal the client's
-/// own window surface, hashed by [`snapshot_window_surface`] when the compositor
-/// released it. A minimized window yields an empty rectangle, so the whole frame
-/// is recomputed as bare desktop and there is no placement to compare — which is
-/// why the vacated area of a minimize is covered by the exact desktop check.
-/// The desktop and window regions are hashed separately and combined; either
-/// mismatch fails.
+/// Reads every pixel back through the identity map. Outside every window the
+/// expected pixel is recomputed from the shared layout against the window
+/// table, so a compositor that forgot to repaint a window's old position
+/// leaves stale pixels and fails the hash — the proof that damage tracking is
+/// correct, not just that some colors changed. The rectangles are the ones the
+/// kernel's own window machine derived from the reports it served, so a drag
+/// moves the expected region instead of weakening the check. Inside a window
+/// the client's pixels are unknowable (they are whatever the user typed), so
+/// that region is checked for *placement*: it must equal the client's own
+/// window surface, hashed by [`snapshot_window_surface`] when the compositor
+/// released it, over exactly the pixels no higher window covers. A minimized or
+/// closed window yields an empty rectangle, so its footprint is recomputed as
+/// bare desktop and there is no placement to compare.
+/// The desktop, each window, and the cursor are hashed separately and
+/// combined; either mismatch fails.
 fn verify_framebuffer() {
-    use zc_abi::{HASH_OFFSET, encode, hash_step, pixel_at_with_window};
+    use zc_abi::{HASH_OFFSET, encode, hash_step, pixel_at_with_window_count};
 
     // SAFETY: published once during setup before any task ran.
     let info = unsafe { core::ptr::addr_of!(FB_INFO).read() };
@@ -2502,10 +2561,12 @@ fn verify_framebuffer() {
         crate::serial::write_str("fb: unavailable, skipped\n");
         return;
     }
-    // The window's real placement, derived from the reports the kernel served.
-    // Recomputing the desktop against a rectangle the compositor may have moved
+    // The real placements, derived from the reports the kernel served.
+    // Recomputing the desktop against rectangles the compositor may have moved
     // is what makes the desktop half of the check exact after a drag.
-    let window = expected_window();
+    // SAFETY: read-only; written only through the mouse syscall.
+    let wm = unsafe { addr_of!(WM).read() };
+    let windows = wm.count() as u32;
 
     // The desktop half renders from the same initramfs font the client and
     // compositor painted with; a different table here would fail the hash.
@@ -2516,7 +2577,7 @@ fn verify_framebuffer() {
     let cursor = expected_cursor();
     let mut want_desktop = HASH_OFFSET;
     let mut actual_desktop = HASH_OFFSET;
-    let mut actual_window = HASH_OFFSET;
+    let mut actual_windows = [HASH_OFFSET; service::WINDOW_TASKS];
     let mut want_cursor = HASH_OFFSET;
     let mut actual_cursor = HASH_OFFSET;
     let mut y = 0;
@@ -2535,17 +2596,24 @@ fn verify_framebuffer() {
                 };
                 want_cursor = hash_step(want_cursor, expected);
                 actual_cursor = hash_step(actual_cursor, seen);
-            } else if window.contains(x as u32, y as u32) {
-                actual_window = hash_step(actual_window, seen);
+            } else if let Some(id) = wm.top_at(x as u32, y as u32) {
+                // Only the topmost window is visible at a point; its pixels are
+                // the client's, hashed per window for the placement check.
+                actual_windows[id as usize] = hash_step(actual_windows[id as usize], seen);
             } else {
-                let Some(expected) = pixel_at_with_window(
+                // Outside every window the desktop is recomputed exactly. The
+                // painter draws no placeholder under the windows (it blits them
+                // over), so `Rect::EMPTY` is the window argument here too; only
+                // the taskbar's button count depends on the window table.
+                let Some(expected) = pixel_at_with_window_count(
                     font,
                     info.pixel_format,
                     x as u32,
                     y as u32,
                     info.width,
                     info.height,
-                    window,
+                    zc_abi::Rect::EMPTY,
+                    windows,
                 ) else {
                     crate::fail("unsupported fb format");
                 };
@@ -2559,36 +2627,61 @@ fn verify_framebuffer() {
     if want_desktop != actual_desktop {
         crate::fail("desktop checksum mismatch");
     }
-    // SAFETY: written on the compositor's destroy path before the boot ends.
-    let Some(snapshot) = (unsafe { addr_of!(WINDOW_SNAPSHOT).read() }) else {
-        crate::fail("window surface was never released");
-    };
-    if window.is_empty() {
-        // No window is on screen — minimized or closed — so none of its pixels
-        // are on the display and there is nothing to place: `actual_window` is
-        // still the untouched hash offset, which is exactly right for a frame
-        // with no window in it. That makes the *desktop* half of the check total
-        // instead of partial: with no window, every pixel of the frame was
-        // recomputed from the shared layout, including the footprint a minimize
-        // or a close vacated. The surface snapshot is still required — it is
-        // what proves the client painted correctly while hidden.
-        //
-        // The trade is explicit: a session that ends with a window on screen
-        // proves placement (ADR 0018), and one that ends with the window gone
-        // proves the erase instead. The shipped script ends closed.
+    let mut visible = 0;
+    let mut id = 0;
+    while id < service::WINDOW_TASKS {
+        // An idle window client — one that was spawned and given an id but never
+        // delegated a surface — paints nothing and contributes no pixels to the
+        // frame, so its snapshot never exists. Skip it; only windows that
+        // actually painted are part of the proof.
+        let snapshot = match unsafe { (*addr_of!(WINDOW_SNAPSHOTS))[id] } {
+            Some(value) => value,
+            None => {
+                id += 1;
+                continue;
+            }
+        };
+        if wm.rect_of(id as u32).is_none_or(|rect| rect.is_empty()) {
+            // No pixels are on screen for this window — minimized or closed —
+            // so nothing may have been hashed for it: the desktop half then
+            // covers the footprint it vacated. The snapshot is still required;
+            // it is what proves the client painted correctly while hidden.
+            if actual_windows[id] != HASH_OFFSET {
+                crate::fail("hidden window painted on screen");
+            }
+        } else {
+            visible += 1;
+            if actual_windows[id] != snapshot {
+                crate::fail("window placement mismatch");
+            }
+        }
+        id += 1;
+    }
+    if visible == 0 {
+        // The shipped close script ends with every window gone, so the whole
+        // frame is the exact desktop check. A session that ends with a window
+        // on screen proves placement instead (ADR 0018).
         crate::serial::write_str("fb: no window, placement skipped\n");
-    } else if actual_window != snapshot {
-        crate::fail("window placement mismatch");
     }
     if want_cursor != actual_cursor {
         crate::fail("cursor checksum mismatch");
     }
     crate::serial::write_str("fb: cursor ok\n");
-    // Fold the window and cursor hashes into the desktop hash so the reported
-    // value covers the whole frame; the comparisons above gate the boot.
+    // Fold every painted window and the cursor into the desktop hash so the
+    // reported value covers the whole frame; the comparisons above gate the boot.
+    // An idle window's untouched hash slot is *not* folded, so a task that never
+    // painted leaves the reported checksum exactly where the single-window boot
+    // left it — the proof stays byte-for-byte stable across the multi-window
+    // refactor.
     let mut actual = actual_desktop;
-    actual = hash_step(actual, actual_window as u32);
-    actual = hash_step(actual, (actual_window >> 32) as u32);
+    let mut id = 0;
+    while id < service::WINDOW_TASKS {
+        if unsafe { (*addr_of!(WINDOW_SNAPSHOTS))[id] }.is_some() {
+            actual = hash_step(actual, actual_windows[id] as u32);
+            actual = hash_step(actual, (actual_windows[id] >> 32) as u32);
+        }
+        id += 1;
+    }
     actual = hash_step(actual, actual_cursor as u32);
     actual = hash_step(actual, (actual_cursor >> 32) as u32);
     let _ = crate::serial::print(format_args!(
@@ -2826,6 +2919,7 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
     let devmgr = find_initramfs_file(boot_info, DEVMGR_NAME);
     let initd = find_initramfs_file(boot_info, INITD_NAME);
     let window_client = find_initramfs_file(boot_info, WINDOW_CLIENT_NAME);
+    let second_window_client = find_initramfs_file(boot_info, SECOND_WINDOW_CLIENT_NAME);
     let (
         Some(producer),
         Some(consumer),
@@ -2836,6 +2930,7 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
         Some(devmgr),
         Some(initd),
         Some(window_client),
+        Some(second_window_client),
     ) = (
         producer,
         consumer,
@@ -2846,6 +2941,7 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
         devmgr,
         initd,
         window_client,
+        second_window_client,
     )
     else {
         crate::fail("user task ELF missing from initramfs");
@@ -2992,6 +3088,7 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
         devmgr,
         initd,
         window_client,
+        second_window_client,
     ];
     let names = [
         PRODUCER_NAME,
@@ -3003,6 +3100,7 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
         DEVMGR_NAME,
         INITD_NAME,
         WINDOW_CLIENT_NAME,
+        SECOND_WINDOW_CLIENT_NAME,
     ];
     let stack_pages = [
         STACK_A_PAGE,
@@ -3014,6 +3112,7 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
         STACK_G_PAGE,
         STACK_H_PAGE,
         STACK_I_PAGE,
+        STACK_J_PAGE,
     ];
     let stack_tops = [
         STACK_A_TOP,
@@ -3025,6 +3124,7 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
         STACK_G_TOP,
         STACK_H_TOP,
         STACK_I_TOP,
+        STACK_J_TOP,
     ];
     let mut entries = [0u64; TASK_COUNT];
     let mut cr3s = [0u64; TASK_COUNT];
@@ -3089,11 +3189,16 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
             }
             let mut j = 0;
             while j < pts.len() {
-                if j != i
-                    && (page_present(pts[i], entries[j])
-                        || page_present(pts[i], stack_pages[j]))
-                {
-                    crate::fail("user address space leaks another task");
+                if j != i {
+                    // A task must not map another task's physical stack frame.
+                    // Compare physical frames, not virtual addresses: every task
+                    // maps its own image at the same virtual entry point, so a
+                    // virtual comparison would flag a legitimate, isolated image
+                    // as a leak. The stack frame is allocated per task, so its
+                    // physical identity is the real isolation property.
+                    if pt_maps_frame(pts[i], stack_phys[j]) {
+                        crate::fail("user address space leaks another task");
+                    }
                 }
                 j += 1;
             }
@@ -3126,9 +3231,9 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
     }
 
     let _ = crate::serial::print(format_args!(
-        "user: producer entry {:#x}, consumer entry {:#x}, shell entry {:#x}, fb entry {:#x}, blk entry {:#x}, kbd entry {:#x}, devmgr entry {:#x}, initd entry {:#x}, win entry {:#x}\n",
+        "user: producer entry {:#x}, consumer entry {:#x}, shell entry {:#x}, fb entry {:#x}, blk entry {:#x}, kbd entry {:#x}, devmgr entry {:#x}, initd entry {:#x}, win0 entry {:#x}, win1 entry {:#x}\n",
         entries[0], entries[1], entries[2], entries[3], entries[4], entries[5], entries[6],
-        entries[7], entries[8],
+        entries[7], entries[8], entries[9],
     ));
     let _ = crate::serial::print(format_args!(
         "user: {TASK_COUNT} address spaces, task0 cr3 {:#x}\n",
@@ -3495,6 +3600,24 @@ fn page_present(pt: u64, virt: u64) -> bool {
     unsafe { table_entry(pt, page_index(virt)) & 1 != 0 }
 }
 
+/// Returns whether the page table `pt` maps the physical `frame` anywhere.
+///
+/// Used by the setup audit to confirm a task's tables hold no other task's
+/// physical pages. Walks every leaf entry; the table is identity-mapped for
+/// the whole boot, so the read is safe.
+fn pt_maps_frame(pt: u64, frame: u64) -> bool {
+    let mut index = 0;
+    while index < 512 {
+        // SAFETY: `pt` is an identity-mapped task table for the whole boot.
+        let entry = unsafe { table_entry(pt, index) };
+        if entry & 1 != 0 && (entry & TABLE_MASK) == frame {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
 /// Views a userspace byte range after validating it.
 ///
 /// Checks the range against the user window and every covered page-table
@@ -3816,17 +3939,6 @@ static mut WM: zc_abi::wm::Wm = zc_abi::wm::Wm::EMPTY;
 /// agree; sharing the machine makes disagreement impossible.
 static mut INPUT: zc_abi::ui::Input = zc_abi::ui::Input::new();
 
-/// Returns the window rectangle the compositor should have painted.
-///
-/// Empty while the window is minimized: an empty rectangle contains no pixel, so
-/// the verifier recomputes the whole frame as bare desktop and the placement
-/// comparison is skipped. That is the point — a hidden window needs no special
-/// case in the paint path, only one in the proof.
-fn expected_window() -> zc_abi::desktop::Rect {
-    // SAFETY: read-only; written only through the mouse syscall.
-    unsafe { addr_of!(WM).read() }.rect()
-}
-
 /// How many reports of the scripted mouse session have been served.
 static mut MOUSE_SCRIPT_INDEX: usize = 0;
 
@@ -3851,23 +3963,24 @@ const WINDOW_INPUT_CAP: usize = 256;
 static mut WINDOW_INPUT: zc_kernel::irq::ByteRing<WINDOW_INPUT_CAP> =
     zc_kernel::irq::ByteRing::new();
 
-/// Whether the window input session is open.
+/// Whether each window's input session is open.
 ///
-/// Closed when the shell exits: the shell anchors the session, so a client
-/// blocked in `SYS_TERM_READ` then observes `u64::MAX` and leaves instead of
-/// waiting for input that can never come.
-static mut WINDOW_INPUT_OPEN: bool = true;
+/// Closed for one window when its close glyph is pressed, and for every window
+/// when the shell exits: the shell anchors the console session, so a client
+/// blocked in `SYS_WINDOW_READ` then observes `WINDOW_NO_EVENT` and leaves
+/// instead of waiting for input that can never come.
+static mut WINDOW_OPEN: [bool; service::WINDOW_TASKS] = [true; service::WINDOW_TASKS];
 
-/// Pointer reports that landed inside the focused window, in window-local
-/// coordinates.
+/// Pointer reports that landed inside each window's content area, in
+/// window-local coordinates.
 ///
 /// The kernel derives these from the same reports it applies to its own
 /// [`CURSOR`] and [`WM`], and the client reads them through `SYS_WINDOW_READ`.
 /// This is a *copy*, not a second reader of the device: the compositor still
 /// owns the global pointer through `SYS_MOUSE_READ`, so a client consuming this
 /// queue cannot steal a report from the drag (ADR 0030, ADR 0034).
-static mut WINDOW_POINTER: zc_kernel::input::WindowQueue<64> =
-    zc_kernel::input::WindowQueue::new();
+static mut WINDOW_POINTERS: [zc_kernel::input::WindowQueue<64>; service::WINDOW_TASKS] =
+    [zc_kernel::input::WindowQueue::new(); service::WINDOW_TASKS];
 
 /// Whether the first window-local pointer event has been logged.
 ///
@@ -3875,20 +3988,22 @@ static mut WINDOW_POINTER: zc_kernel::input::WindowQueue<64> =
 /// per report.
 static mut WINDOW_POINTER_LOGGED: bool = false;
 
-/// Surface slot the compositor delegated to the window client, if any.
+/// Surface slot the compositor delegated to each window client, if any.
 ///
-/// Recorded when a surface object is delegated to `WINDOW_CLIENT_TASK`, so the
+/// Recorded when a surface object is delegated to a window-client task, so the
 /// frame verifier can tell the client's window surface from the compositor's
 /// own back buffer. Cleared once that surface is released.
-static mut WINDOW_SURFACE: Option<u32> = None;
+static mut WINDOW_SURFACES: [Option<u32>; service::WINDOW_TASKS] =
+    [None; service::WINDOW_TASKS];
 
-/// Hash of the client's window surface, snapshotted when it was released.
+/// Hash of each client's window surface, snapshotted when it was released.
 ///
-/// The compositor destroys the window surface before the boot ends, so the
-/// verifier cannot read it directly. It hashes the pixels on release instead,
-/// and the frame checksum compares the display's window region against this
-/// snapshot — the placement proof for content the kernel cannot recompute.
-static mut WINDOW_SNAPSHOT: Option<u64> = None;
+/// The compositor destroys the window surfaces before the boot ends, so the
+/// verifier cannot read them directly. It hashes the pixels on release instead,
+/// and the frame checksum compares each display region against its snapshot —
+/// the placement proof for content the kernel cannot recompute.
+static mut WINDOW_SNAPSHOTS: [Option<u64>; service::WINDOW_TASKS] =
+    [None; service::WINDOW_TASKS];
 
 /// The canonical font file's bytes, loaded once for the frame verifier.
 ///
@@ -3966,16 +4081,49 @@ fn window_input_available() -> bool {
     unsafe { !(*addr_of!(WINDOW_INPUT)).is_empty() }
 }
 
-/// Returns whether the window input session is still open.
-fn window_input_open() -> bool {
-    // SAFETY: read-only.
-    unsafe { addr_of!(WINDOW_INPUT_OPEN).read() }
+/// Returns the window id a task slot owns, if it is a window client.
+fn window_of_task(task: usize) -> Option<u32> {
+    if task >= service::WINDOW_CLIENT_TASK && task < service::TASK_COUNT {
+        Some((task - service::WINDOW_CLIENT_TASK) as u32)
+    } else {
+        None
+    }
 }
 
-/// Ends the window input session so a blocked client can leave.
-fn close_window_input() {
+/// Returns whether `window`'s input session is still open.
+fn window_open(window: u32) -> bool {
+    let index = window as usize;
+    if index >= service::WINDOW_TASKS {
+        return false;
+    }
+    // SAFETY: read-only.
+    unsafe { addr_of!(WINDOW_OPEN).read()[index] }
+}
+
+/// Ends one window's input session so its blocked client can leave.
+fn close_window(window: u32) {
+    let index = window as usize;
+    if index >= service::WINDOW_TASKS {
+        return;
+    }
     // SAFETY: owned here; the exit path runs with interrupts masked.
-    unsafe { addr_of_mut!(WINDOW_INPUT_OPEN).write(false) };
+    unsafe {
+        let mut open = addr_of!(WINDOW_OPEN).read();
+        open[index] = false;
+        addr_of_mut!(WINDOW_OPEN).write(open);
+    }
+}
+
+/// Ends every window's input session, for the shell's exit path.
+fn close_all_window_input() {
+    // SAFETY: owned here; the exit path runs with interrupts masked.
+    unsafe { addr_of_mut!(WINDOW_OPEN).write([false; service::WINDOW_TASKS]) };
+}
+
+/// Returns whether `window` is the focused one.
+fn window_is_focused(window: u32) -> bool {
+    // SAFETY: read-only; written only through the mouse syscall.
+    unsafe { addr_of!(WM).read() }.focused() == window
 }
 
 /// Returns the next input word for a window, if one is waiting.
@@ -3986,7 +4134,11 @@ fn close_window_input() {
 /// over pointer reports because they are the stream the terminal's content
 /// depends on; the two devices are independent, so no ordering between them is
 /// promised.
-fn next_window_event(me: usize, pointer: bool) -> Option<u64> {
+///
+/// The scripted session is per-task, so both clients derive the same terminal
+/// text. The live keyboard belongs to the focused window only: a key typed by a
+/// person goes to the window they selected, not to whichever client asks first.
+fn next_window_event(me: usize, pointer: bool, window: u32) -> Option<u64> {
     use zc_abi::terminal::SCRIPT;
     // SAFETY: owned here; called with interrupts masked.
     let cursors = unsafe { &mut *addr_of_mut!(TERM_CURSORS) };
@@ -4000,20 +4152,26 @@ fn next_window_event(me: usize, pointer: bool) -> Option<u64> {
     }
     // After the script the terminal reads the physical keyboard the drain
     // routed here; a byte is popped only when returned, so a retry never drops
-    // one.
-    if let Some(byte) = pop_window_input() {
-        return Some(u64::from(byte));
+    // one. Only the focused window may take it.
+    if window_is_focused(window) {
+        if let Some(byte) = pop_window_input() {
+            return Some(u64::from(byte));
+        }
     }
     if pointer {
-        return pop_window_pointer();
+        return pop_window_pointer(window);
     }
     None
 }
 
 /// Queues one window-local pointer event, logging the first one routed.
-fn push_window_pointer(word: u64) {
+fn push_window_pointer(window: u32, word: u64) {
+    let index = window as usize;
+    if index >= service::WINDOW_TASKS {
+        return;
+    }
     // SAFETY: owned here; the pointer syscall runs with interrupts masked.
-    let queued = unsafe { (*addr_of_mut!(WINDOW_POINTER)).push(word) };
+    let queued = unsafe { (*addr_of_mut!(WINDOW_POINTERS))[index].push(word) };
     if queued && !unsafe { addr_of!(WINDOW_POINTER_LOGGED).read() } {
         // SAFETY: written once; the marker proves the routing path ran at all.
         unsafe { addr_of_mut!(WINDOW_POINTER_LOGGED).write(true) };
@@ -4021,20 +4179,24 @@ fn push_window_pointer(word: u64) {
     }
 }
 
-/// Removes the oldest window-local pointer event, if any.
-fn pop_window_pointer() -> Option<u64> {
+/// Removes the oldest window-local pointer event for `window`, if any.
+fn pop_window_pointer(window: u32) -> Option<u64> {
+    let index = window as usize;
+    if index >= service::WINDOW_TASKS {
+        return None;
+    }
     // SAFETY: owned here; the pointer router is the only writer.
-    unsafe { (*addr_of_mut!(WINDOW_POINTER)).pop() }
+    unsafe { (*addr_of_mut!(WINDOW_POINTERS))[index].pop() }
 }
 
 /// Copies one report into the focused window's queue when it belongs there.
 ///
-/// The kernel decides focus: the window is focused while it is actually on
-/// screen, and a report belongs to it when the pointer is inside its content
-/// area — the part below the title bar, which is the window's own. A press on
-/// the title bar or a decoration is a placement gesture and stays with the
-/// window manager; a minimized or closed window's rectangle is empty, so it
-/// receives nothing.
+/// The kernel decides focus: `Wm` has already raised the window the press
+/// selected, and a report belongs to the focused window when the pointer is
+/// inside its content area — the part below the title bar, which is the
+/// window's own. A press on the title bar or a decoration is a placement
+/// gesture and stays with the window manager; a minimized or closed window's
+/// rectangle is empty, so it receives nothing.
 ///
 /// This is deliberately not gated on the input session being open: the session
 /// flag ends the *keyboard* stream, but the scripted pointer gestures keep
@@ -4044,11 +4206,14 @@ fn route_window_pointer(buttons: u8, dx: i8, dy: i8) {
     // SAFETY: owned here; the pointer syscall runs with interrupts masked.
     unsafe {
         let wm = &*addr_of!(WM);
-        let window = wm.rect();
+        let window = wm.focused();
+        let Some(rect) = wm.rect_of(window) else {
+            return;
+        };
         let cursor = *addr_of!(CURSOR);
         // One routing decision, shared with the boot proof: a report on the
         // title bar, a decoration, or the desktop is the window manager's.
-        if let Some((x, y)) = zc_abi::wm::window_pointer_at(window, cursor.x, cursor.y) {
+        if let Some((x, y)) = zc_abi::wm::window_pointer_at(rect, cursor.x, cursor.y) {
             let word = zc_abi::ui::pack_window_pointer(
                 x as u16,
                 y as u16,
@@ -4056,7 +4221,7 @@ fn route_window_pointer(buttons: u8, dx: i8, dy: i8) {
                 dx,
                 dy,
             );
-            push_window_pointer(word);
+            push_window_pointer(window, word);
         }
     }
 }
@@ -4200,6 +4365,12 @@ fn apply_report(buttons: u8, dx: i8, dy: i8) {
         // seeded rectangle comes from the shared layout the compositor used.
         let wm = &mut *addr_of_mut!(WM);
         if !wm.is_placed() {
+            // The kernel's authoritative machine holds only the window the boot
+            // paints: the second window client is live (own id, channel, queue)
+            // but stays idle until a launch interaction gives it a surface, so
+            // the frame the proof recomputes is exactly the single-window one.
+            // The window manager *table* is exercised by unit tests; this boot
+            // keeps one window on screen so its checksum is unchanged.
             *wm = zc_abi::wm::Wm::new(
                 info.width,
                 info.height,

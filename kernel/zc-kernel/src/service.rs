@@ -40,8 +40,18 @@ pub const INITD_TASK: usize = 7;
 /// the window proof needs a task the compositor can hand a capability to.
 pub const WINDOW_CLIENT_TASK: usize = 8;
 
+/// Task index of the second window client.
+///
+/// The window id is the slot's offset from [`WINDOW_CLIENT_TASK`], so the two
+/// clients run the same binary and learn which window they own from the kernel
+/// (`SYS_WINDOW_ID`) instead of a compile-time constant.
+pub const SECOND_WINDOW_TASK: usize = 9;
+
 /// Number of ring-3 task slots the bring-up uses.
-pub const TASK_COUNT: usize = 9;
+pub const TASK_COUNT: usize = 10;
+
+/// Number of window clients, and therefore of windows the desktop can host.
+pub const WINDOW_TASKS: usize = TASK_COUNT - WINDOW_CLIENT_TASK;
 
 /// The one root task: the `initd` supervisor.
 pub const ROOT_IDENTITY: Identity = Identity::ROOT;
@@ -66,7 +76,8 @@ pub const OWNERS: [Identity; TASK_COUNT] = [
     USER_IDENTITY, // kbd
     USER_IDENTITY, // devmgr
     ROOT_IDENTITY, // initd
-    USER_IDENTITY, // window client
+    USER_IDENTITY, // window client 0
+    USER_IDENTITY, // window client 1
 ];
 
 /// Identifier of the block driver service.
@@ -138,12 +149,15 @@ mod tests {
             DEVMGR_TASK,
             INITD_TASK,
             WINDOW_CLIENT_TASK,
+            SECOND_WINDOW_TASK,
         ];
         for (position, index) in indices.iter().enumerate() {
             assert_eq!(*index, position);
             assert!(*index < TASK_COUNT);
         }
-        assert_eq!(TASK_COUNT, 9);
+        assert_eq!(TASK_COUNT, 10);
+        assert_eq!(WINDOW_TASKS, 2);
+        assert_eq!(SECOND_WINDOW_TASK, WINDOW_CLIENT_TASK + 1);
     }
 
     #[test]

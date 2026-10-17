@@ -110,7 +110,7 @@ pub const fn window_pointer_at(window: Rect, x: u32, y: u32) -> Option<(u32, u32
 /// keep a `Wm` in a `static`, and this is the smallest bound that holds the
 /// terminal plus the first apps. A fifth window is refused at [`Wm::add`] with
 /// `false`, never silently dropped.
-pub const MAX_WINDOWS: usize = 4;
+pub const MAX_WINDOWS: usize = crate::desktop::MAX_TASK_BUTTONS;
 
 /// What a press on a window or the taskbar asks the window manager to do.
 ///

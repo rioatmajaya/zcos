@@ -66,10 +66,19 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 30 | `SYS_TERM_READ` | — | keystroke byte, or `u64::MAX` at end of session | — |
 | 31 | `SYS_MMIO_MAP` | object id, `MmioInfo` out ptr, length | mapped virtual address | `u64::MAX` |
 | 32 | `SYS_MOUSE_READ` | — | packed report, or `MOUSE_NO_REPORT` when none | — |
-| 33 | `SYS_WINDOW_CLOSE` | — | 0 | `u64::MAX` |
+| 33 | `SYS_WINDOW_CLOSE` | window id | 0 | `u64::MAX` |
 | 34 | `SYS_POWEROFF` | — | never returns on success | `u64::MAX` |
 | 35 | `SYS_WINDOW_READ` | — | packed `WindowEvent`, or `WINDOW_NO_EVENT` at end of session | `u64::MAX` |
 | 36 | `SYS_READDIR` | path ptr, length, entry index, `DirEntry` out ptr (`r10`) | 0 (`READDIR_ENTRY`) or 1 (`READDIR_END`) | `u64::MAX` |
+| 37 | `SYS_WINDOW_ID` | — | the caller's window id, or `u64::MAX` if it owns none | — |
+
+### Window identity
+
+`SYS_WINDOW_ID` (37) returns the window the calling task owns, derived from its
+task slot (`window_of_task`), so one client binary serves every window: it learns
+its id, then listens on its own assignment channel
+(`wm_assign(window) = IPC_WM + 2*window`) and encodes replies with
+`wm_reply(kind, window)`. A task that is not a window client gets `u64::MAX`.
 
 ### Directory listings
 
@@ -91,8 +100,10 @@ enumerate: `ramfs`, `tmpfs`, and `devfs` directly, and zcfs through the
 
 ### `SYS_WINDOW_CLOSE`
 
-`SYS_WINDOW_CLOSE` (33) ends the window input session. A client blocked in
-`SYS_TERM_READ` is rewound, made runnable, and on its retry observes
+`SYS_WINDOW_CLOSE` (33) ends window `window`'s input session. It carries the
+window id (the compositor's close arm passes `action.window`) so closing one
+window ends only that client's session. A client blocked in `SYS_TERM_READ` or
+`SYS_WINDOW_READ` is rewound, made runnable, and on its retry observes
 `u64::MAX` — the same end-of-session result the serial shell's exit produces — so
 it paints a final frame and sends `WM_DONE` through the path it already uses.
 There is deliberately no separate client-side protocol: one path serves both

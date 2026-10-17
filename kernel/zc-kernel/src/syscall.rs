@@ -13,7 +13,7 @@ use zc_abi::{
     SYS_SERVICE_START,
     SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY,
     SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TERM_READ, SYS_UMOUNT, SYS_WINDOW_CLOSE,
-    SYS_WINDOW_READ, SYS_WRITE, SYS_YIELD, SYS_READDIR, SyscallError,
+    SYS_WINDOW_ID, SYS_WINDOW_READ, SYS_WRITE, SYS_YIELD, SYS_READDIR, SyscallError,
 };
 
 /// The kernel operation a syscall number requests.
@@ -96,6 +96,8 @@ pub enum Action {
     Poweroff,
     /// Read the next key or window-local pointer event for the caller's window.
     WindowRead,
+    /// Return the caller's window id.
+    WindowId,
 }
 
 /// Maps a raw syscall number to its [`Action`].
@@ -141,6 +143,7 @@ pub const fn dispatch(number: u64) -> Result<Action, SyscallError> {
         SYS_WINDOW_CLOSE => Ok(Action::WindowClose),
         SYS_POWEROFF => Ok(Action::Poweroff),
         SYS_WINDOW_READ => Ok(Action::WindowRead),
+        SYS_WINDOW_ID => Ok(Action::WindowId),
         _ => Err(SyscallError::InvalidNumber),
     }
 }
@@ -187,13 +190,14 @@ mod tests {
         assert_eq!(dispatch(SYS_WINDOW_CLOSE), Ok(Action::WindowClose));
         assert_eq!(dispatch(SYS_POWEROFF), Ok(Action::Poweroff));
         assert_eq!(dispatch(SYS_WINDOW_READ), Ok(Action::WindowRead));
+        assert_eq!(dispatch(SYS_WINDOW_ID), Ok(Action::WindowId));
         assert_eq!(dispatch(SYS_READDIR), Ok(Action::ReadDir));
     }
 
     #[test]
     fn unknown_numbers_are_rejected() {
-        // The last assigned number is SYS_READDIR (36), so probe past it.
-        assert_eq!(dispatch(37), Err(SyscallError::InvalidNumber));
+        // The last assigned number is SYS_WINDOW_ID (37), so probe past it.
+        assert_eq!(dispatch(38), Err(SyscallError::InvalidNumber));
         assert_eq!(
             dispatch(u64::MAX),
             Err(SyscallError::InvalidNumber)

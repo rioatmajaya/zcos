@@ -243,8 +243,17 @@ the topmost window containing the point, focuses and raises it, and then
 classifies the same press as a decoration, a drag, or a client event. The kernel
 runs that machine over the reports it serves, so the focused window — and
 therefore which client receives the report — is derived from the input stream
-rather than requested by the compositor. Per-window surfaces and a second client
-task build on this table.
+rather than requested by the compositor.
+
+The kernel's own per-window state follows the same table: delegated surfaces,
+pointer queues, and verifier snapshots are indexed by window id, and
+`window_of_task` resolves a task to its slot, so a client and its surface, queue,
+and snapshot travel together. `SYS_WINDOW_ID` (37) tells a client which window it
+owns, and `wm_assign(window) = IPC_WM + 2*window` gives each window its own
+assignment channel while `wm_reply(kind, window)` routes the ack back to the
+right client. A second client — the same `win.elf` binary, distinguished only by
+its task slot and window id — boots beside the first and finds its channel; the
+visible file manager that fills window 1 is a later slice.
 
 The window pixels remain proven, not trusted, but the proof splits by what is
 knowable. Outside the window the frame checksum recomputes `pixel_at` exactly.
