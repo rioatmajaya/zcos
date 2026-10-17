@@ -356,8 +356,19 @@ pub const fn launcher_button_rect(height: u32) -> Rect {
 /// This is the restore target: clicking it brings a minimized window back.
 #[must_use]
 pub const fn task_button_rect(height: u32) -> Rect {
+    task_button_rect_at(height, 0)
+}
+
+/// The task button for the window registered at `index`.
+///
+/// Buttons are laid out left to right in registration order, so a window's
+/// button keeps its place when another window is raised. Index 0 is exactly
+/// [`task_button_rect`], which keeps a one-window desktop pixel-identical to
+/// the layout that existed before the table did.
+#[must_use]
+pub const fn task_button_rect_at(height: u32, index: u32) -> Rect {
     Rect::new(
-        TASK_X,
+        TASK_X + index * (TASK_W + 4),
         button_margin(panel_height(height)),
         TASK_W,
         BUTTON_H,

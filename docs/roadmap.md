@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 7 grants`, `task 6: devmgr: blk published`, `dma: window coherent ok` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–7, F8e-1–4, F8h-0/0b, live-input check, F8g-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: font vfs ok`; `compositor: font vfs ok`; `font: vfs ok`; `client: window painted`; `client: vfs ok`; `client: pointer ok`; `client: click ok`; `client: ls ok`; `wm: window mapped`; `wm: pointer routed`; `wm: click ok`; `wm: ls ok`; `task 2: data/`; `task 2: kbd`; `task 2: probe`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed` (close run); `compositor: window erased` (close run); `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui/session/vfs host tests pass; `zc-storage` zcfs read_dir tests pass |
+| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–7, F8e-1–4, F8h-0/0b/1a, live-input check, F8g-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: font vfs ok`; `compositor: font vfs ok`; `font: vfs ok`; `client: window painted`; `client: vfs ok`; `client: pointer ok`; `client: click ok`; `client: ls ok`; `wm: window mapped`; `wm: pointer routed`; `wm: click ok`; `wm: ls ok`; `task 2: data/`; `task 2: kbd`; `task 2: probe`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed` (close run); `compositor: window erased` (close run); `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui/session/vfs host tests pass; `zc-storage` zcfs read_dir tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -800,10 +800,27 @@ full browser. Note them as follow-ups, do not build them here.
         frame checksums are unchanged because the listing is in the shell, not
         the window. See
         [`adr/0037`](adr/0037-a-served-filesystem-can-list.md).
-      - [ ] F8h-1: the first app, and the multi-window focus it needs. The
-        kernel and compositor still assume one window client (task 8) and one
-        task button, so a file manager cannot coexist with the terminal until
-        that assumption is replaced.
+      - [x] F8h-1a: the window manager holds a table. `Wm` keeps up to four
+        windows with a bottom-to-top stacking order and one focus; every
+        `Action` names `{ window, kind }`. A press selects the topmost window
+        containing the point, focuses and raises it, and then classifies the
+        same press — decorations minimize or close, the title bar grabs, the
+        body belongs to the client. Task buttons follow registration order,
+        with index 0 byte-identical to the old single-window rectangle. The
+        kernel runs the same machine over the reports it serves, so focus —
+        and therefore the destination of `SYS_WINDOW_READ` — is derived rather
+        than requested. Host tests prove focus on a background window,
+        occlusion, per-window restore, and a drag that moves only the window it
+        grabbed. The boot still launches one window, so both frame checksums
+        are unchanged (`0xd616ad79aaefb099` / `0x6d66e82d0f2d6fb8`); per-window
+        surfaces, queues, and the second client are F8h-1b. See
+        [`adr/0038`](adr/0038-the-window-manager-holds-a-table.md).
+      - [ ] F8h-1b: a second client and the per-window state it needs. The
+        compositor still creates one surface and one handshake, the kernel
+        still keeps one delegated surface, one pointer queue, and one input
+        session, and the verifier still compares one window region. F8h-1b
+        turns each of those into a table entry keyed by window id and launches
+        the file manager as a second task.
 - [ ] F8i: audio stack (virtio-snd first, then HD Audio) after the desktop is
       stable.
 - [ ] F8j: USB stack (xHCI) for keyboard, mouse, and mass storage.
@@ -938,6 +955,12 @@ full browser. Note them as follow-ups, do not build them here.
   `DirEntry` wire format, `ramfs`/`tmpfs`/`devfs` enumeration, mount-point
   ordering, and the search-permission check. See
   [`adr/0036`](adr/0036-a-directory-can-be-listed.md).
+- The window manager holds a table (F8h-1a): `zc-abi` host tests prove that a
+  press focuses and raises a background window, that an overlap resolves to the
+  top window, that a task button restores the window it names, that closing the
+  focused window moves focus to the topmost visible one, and that a drag moves
+  only the window it grabbed. The boot still has one window, so both checksums
+  are unchanged — the evidence that the refactor painted nothing.
 - Clean shutdown: `power: halt clean`.
 - Audio plays a known tone and the driver reports no XRUN under a stress
   buffer: `snd: playback ok`.

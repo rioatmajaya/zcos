@@ -104,15 +104,36 @@ pub const fn window_pointer_at(window: Rect, x: u32, y: u32) -> Option<(u32, u32
     Some((x - window.x, y - window.y))
 }
 
+/// Maximum number of windows one machine can hold.
+///
+/// Fixed rather than growable: the compositor, the kernel, and the verifier all
+/// keep a `Wm` in a `static`, and this is the smallest bound that holds the
+/// terminal plus the first apps. A fifth window is refused at [`Wm::add`] with
+/// `false`, never silently dropped.
+pub const MAX_WINDOWS: usize = 4;
+
 /// What a press on a window or the taskbar asks the window manager to do.
 ///
 /// Returned rather than applied, so a caller that only needs to know *whether*
 /// something happened can ignore the detail, and so the kernel's replay of the
-/// same reports can be compared action for action.
+/// same reports can be compared action for action. Every action names the
+/// window it concerns: with more than one window, "a window moved" is not
+/// enough for the compositor to know what to repaint.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Action {
+pub struct Action {
+    /// Id of the window the action concerns.
+    pub window: u32,
+    /// What happened.
+    pub kind: Kind,
+}
+
+/// The kinds of change a report can ask for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Kind {
     /// Nothing: a move with no button, a press on the body, or a miss.
     None,
+    /// Focus or stacking changed; the affected windows must be repainted.
+    Focused,
     /// The left button went down over the title bar; a drag may follow.
     Grabbed,
     /// The window moved to a new rectangle.
@@ -127,24 +148,73 @@ pub enum Action {
     Closed,
 }
 
-/// The window placement the pointer drives, shared by painter and verifier.
-///
-/// Holds the window's rectangle, whether it is currently shown, whether a drag
-/// is in progress, and the screen it must stay inside. Every transition is a
-/// pure function of the reports the caller feeds it, so two independent runs
-/// over the same reports reach the same rectangle *and the same visibility* —
-/// which is what lets the verifier describe a desktop whose window is
-/// minimized.
+impl Action {
+    /// An action that asks for nothing, naming window 0.
+    pub const NONE: Self = Self {
+        window: 0,
+        kind: Kind::None,
+    };
+
+    const fn of(window: u32, kind: Kind) -> Self {
+        Self { window, kind }
+    }
+}
+
+/// One window's placement and visibility.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Wm {
-    window: Rect,
-    screen_w: u32,
-    screen_h: u32,
-    grab_x: u32,
-    grab_y: u32,
-    dragging: bool,
+struct Window {
+    id: u32,
+    rect: Rect,
     shown: bool,
     closed: bool,
+}
+
+impl Window {
+    const EMPTY: Self = Self {
+        id: 0,
+        rect: Rect::EMPTY,
+        shown: false,
+        closed: false,
+    };
+
+    /// The window's on-screen rectangle, or [`Rect::EMPTY`] while hidden.
+    const fn on_screen(&self) -> Rect {
+        if self.shown && !self.closed {
+            self.rect
+        } else {
+            Rect::EMPTY
+        }
+    }
+}
+
+/// The window placements the pointer drives, shared by painter and verifier.
+///
+/// Holds a bounded table of windows, a bottom-to-top stacking order, and the
+/// focused window. Every transition is a pure function of the reports the
+/// caller feeds it, so two independent runs over the same reports reach the
+/// same rectangles, the same stacking, *and the same focus* — which is what
+/// lets the verifier describe a desktop with several windows, one of them
+/// minimized, and a client whose stream went to the window that was on top.
+///
+/// A press selects the topmost window containing the point, focuses it, and
+/// raises it. That decision is made here rather than by the compositor because
+/// the kernel must make the identical one: focus decides which client receives
+/// the report ([`crate::wm::window_pointer_at`] is applied to the focused
+/// window's rectangle).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Wm {
+    windows: [Window; MAX_WINDOWS],
+    count: usize,
+    /// Bottom-to-top stacking order; `z[..z_len]` holds window ids.
+    z: [u32; MAX_WINDOWS],
+    z_len: usize,
+    focus: u32,
+    /// The window being dragged, if any. One pointer means one drag.
+    dragging: Option<u32>,
+    grab_x: u32,
+    grab_y: u32,
+    screen_w: u32,
+    screen_h: u32,
 }
 
 impl Wm {
@@ -154,47 +224,147 @@ impl Wm {
     /// rectangle are only known once the framebuffer is published, so the
     /// placement is written then, before any task runs.
     pub const EMPTY: Self = Self {
-        window: Rect::EMPTY,
-        screen_w: 0,
-        screen_h: 0,
+        windows: [Window::EMPTY; MAX_WINDOWS],
+        count: 0,
+        z: [0; MAX_WINDOWS],
+        z_len: 0,
+        focus: 0,
+        dragging: None,
         grab_x: 0,
         grab_y: 0,
-        dragging: false,
-        shown: false,
-        closed: false,
+        screen_w: 0,
+        screen_h: 0,
     };
 
-    /// A window manager holding `window` on a `screen_w` x `screen_h` display.
+    /// A window manager holding one window, id 0, on a `screen_w` x `screen_h`
+    /// display.
     ///
     /// The window is clamped into the screen and below the taskbar, so a
     /// rectangle from the shared layout and one from a drag are held the same
-    /// way. It starts shown, because the placement phases exist to put it on
-    /// screen.
+    /// way. It starts shown and focused, because the placement phases exist to
+    /// put it on screen.
     #[must_use]
     pub const fn new(screen_w: u32, screen_h: u32, window: Rect) -> Self {
-        Self {
-            window: clamp_window(window, screen_w, screen_h),
-            screen_w,
-            screen_h,
-            grab_x: 0,
-            grab_y: 0,
-            dragging: false,
+        let mut windows = [Window::EMPTY; MAX_WINDOWS];
+        windows[0] = Window {
+            id: 0,
+            rect: clamp_window(window, screen_w, screen_h),
             shown: true,
             closed: false,
+        };
+        let mut z = [0u32; MAX_WINDOWS];
+        z[0] = 0;
+        Self {
+            windows,
+            count: 1,
+            z,
+            z_len: 1,
+            focus: 0,
+            dragging: None,
+            grab_x: 0,
+            grab_y: 0,
+            screen_w,
+            screen_h,
         }
     }
 
-    /// The window's rectangle, whether or not it is currently shown.
+    /// Adds `id` at `rect`, on top of every existing window, and focuses it.
     ///
-    /// A minimized window keeps its size and position, so a restore puts it back
-    /// exactly where it was. Prefer [`Self::rect`] when painting or verifying:
-    /// this rectangle still describes the window even while it is off screen.
-    #[must_use]
-    pub const fn window(&self) -> Rect {
-        self.window
+    /// Returns `false` when the table is full or the id is already present: a
+    /// duplicate id would make the stacking order ambiguous, and a silently
+    /// dropped window would leave a client painting into a surface nobody
+    /// composites. The caller is expected to treat `false` as a failed launch.
+    pub fn add(&mut self, id: u32, rect: Rect) -> bool {
+        if self.count == MAX_WINDOWS || self.find(id).is_some() {
+            return false;
+        }
+        self.windows[self.count] = Window {
+            id,
+            rect: clamp_window(rect, self.screen_w, self.screen_h),
+            shown: true,
+            closed: false,
+        };
+        self.count += 1;
+        self.z[self.z_len] = id;
+        self.z_len += 1;
+        self.focus = id;
+        true
     }
 
-    /// The window's on-screen rectangle, or [`Rect::EMPTY`] while minimized.
+    /// Returns the number of windows in the table, shown or not.
+    #[must_use]
+    pub const fn count(&self) -> usize {
+        self.count
+    }
+
+    /// Returns the id of the window registered at `index`, if any.
+    ///
+    /// Registration order, not stacking order: the taskbar lays its buttons out
+    /// this way so a window's button keeps its place when another is raised.
+    #[must_use]
+    pub const fn id_at(&self, index: usize) -> Option<u32> {
+        if index < self.count {
+            Some(self.windows[index].id)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the window id at `index` in the stacking order, bottom first.
+    ///
+    /// The compositor blits in this order and the verifier hashes in this
+    /// order, so an overlap is resolved identically on both sides. Indexing
+    /// rather than returning a slice keeps the fixed array private; the table
+    /// is four entries, so a loop costs nothing.
+    #[must_use]
+    pub const fn z_at(&self, index: usize) -> Option<u32> {
+        if index < self.z_len {
+            Some(self.z[index])
+        } else {
+            None
+        }
+    }
+
+    /// Returns the number of entries in the stacking order.
+    #[must_use]
+    pub const fn z_len(&self) -> usize {
+        self.z_len
+    }
+
+    /// Returns the focused window's id.
+    ///
+    /// Focus moves to the topmost visible window when the focused one is
+    /// minimized or closed. If nothing else is visible it stays on the window
+    /// that left, so the compositor can still ask [`Self::is_closed`] and erase
+    /// the remembered footprint.
+    #[must_use]
+    pub const fn focused(&self) -> u32 {
+        self.focus
+    }
+
+    /// Returns the index of `id` in the table.
+    #[must_use]
+    pub const fn find(&self, id: u32) -> Option<usize> {
+        let mut index = 0;
+        while index < self.count {
+            if self.windows[index].id == id {
+                return Some(index);
+            }
+            index += 1;
+        }
+        None
+    }
+
+    /// Returns a window's remembered rectangle, shown or not.
+    #[must_use]
+    pub const fn window_of(&self, id: u32) -> Option<Rect> {
+        match self.find(id) {
+            Some(index) => Some(self.windows[index].rect),
+            None => None,
+        }
+    }
+
+    /// Returns a window's on-screen rectangle, or [`Rect::EMPTY`] while hidden.
     ///
     /// An empty rectangle is the whole trick behind the hidden-window proof: an
     /// empty rectangle contains no pixel, so
@@ -202,36 +372,76 @@ impl Wm {
     /// bare desktop, and the compositor's clip bounds reject the blit outright.
     /// Callers therefore need no separate "is it visible" branch.
     #[must_use]
-    pub const fn rect(&self) -> Rect {
-        if self.shown && !self.closed {
-            self.window
-        } else {
-            Rect::EMPTY
+    pub const fn rect_of(&self, id: u32) -> Option<Rect> {
+        match self.find(id) {
+            Some(index) => Some(self.windows[index].on_screen()),
+            None => None,
         }
     }
 
-    /// Returns whether the window is currently shown.
+    /// Returns whether `id` is currently shown.
     ///
     /// A closed window is never shown again: the task button restores a
     /// *minimized* window, never one whose session has ended.
     #[must_use]
-    pub const fn is_shown(&self) -> bool {
-        self.shown && !self.closed
+    pub const fn is_shown_of(&self, id: u32) -> bool {
+        match self.find(id) {
+            Some(index) => self.windows[index].shown && !self.windows[index].closed,
+            None => false,
+        }
     }
 
-    /// Returns whether the close glyph has ended this window's session.
+    /// Returns whether `id`'s close glyph has ended its session.
     ///
-    /// Terminal: a closed window can be neither minimized, restored, nor dragged,
-    /// and [`Self::rect`] stays empty however the pointer moves afterwards.
+    /// Terminal: a closed window can be neither minimized, restored, nor
+    /// dragged, and its on-screen rectangle stays empty however the pointer
+    /// moves afterwards.
+    #[must_use]
+    pub const fn is_closed_of(&self, id: u32) -> bool {
+        match self.find(id) {
+            Some(index) => self.windows[index].closed,
+            None => false,
+        }
+    }
+
+    /// Returns the focused window's remembered rectangle.
+    ///
+    /// A minimized window keeps its size and position, so a restore puts it back
+    /// exactly where it was. Prefer [`Self::rect`] when painting or verifying:
+    /// this rectangle still describes the window even while it is off screen.
+    #[must_use]
+    pub const fn window(&self) -> Rect {
+        match self.window_of(self.focus) {
+            Some(rect) => rect,
+            None => Rect::EMPTY,
+        }
+    }
+
+    /// The focused window's on-screen rectangle, or [`Rect::EMPTY`].
+    #[must_use]
+    pub const fn rect(&self) -> Rect {
+        match self.rect_of(self.focus) {
+            Some(rect) => rect,
+            None => Rect::EMPTY,
+        }
+    }
+
+    /// Returns whether the focused window is currently shown.
+    #[must_use]
+    pub const fn is_shown(&self) -> bool {
+        self.is_shown_of(self.focus)
+    }
+
+    /// Returns whether the focused window has been closed.
     #[must_use]
     pub const fn is_closed(&self) -> bool {
-        self.closed
+        self.is_closed_of(self.focus)
     }
 
     /// Returns whether a drag is in progress.
     #[must_use]
     pub const fn is_dragging(&self) -> bool {
-        self.dragging
+        self.dragging.is_some()
     }
 
     /// Returns whether this machine has been given a display to hold a window on.
@@ -244,32 +454,129 @@ impl Wm {
         self.screen_w != 0
     }
 
-    /// Ends the window's session, returning whether this call was the one to do it.
-///
-/// Separate from [`Self::apply`] because the *deciding* side is the compositor —
-/// it owns the window and must end the client's input session — while the
-/// *recording* side is the kernel's verifier, which only replays reports. A
-/// replay reaches the same state through the close glyph, so this exists for the
-/// compositor to record its own decision on the machine it is already driving.
-pub fn close(&mut self) -> bool {
-        let changed = !self.closed;
-        self.shown = false;
-        self.closed = true;
-        self.dragging = false;
+    /// Returns the topmost shown window containing `(x, y)`, if any.
+    ///
+    /// Hit-testing is by the whole window, title bar included: a press anywhere
+    /// on a background window focuses it before the press is classified, so a
+    /// click on an occluded window cannot reach a widget in the window above.
+    #[must_use]
+    pub const fn top_at(&self, x: u32, y: u32) -> Option<u32> {
+        let mut at = self.z_len;
+        while at > 0 {
+            at -= 1;
+            let id = self.z[at];
+            if let Some(index) = self.find(id) {
+                let window = &self.windows[index];
+                if window.shown && !window.closed && window.rect.contains(x, y) {
+                    return Some(id);
+                }
+            }
+        }
+        None
+    }
+
+    /// Moves `id` to the top of the stacking order.
+    pub fn raise(&mut self, id: u32) {
+        let mut from = 0;
+        let mut found = false;
+        while from < self.z_len {
+            if self.z[from] == id {
+                found = true;
+                break;
+            }
+            from += 1;
+        }
+        if !found || from + 1 == self.z_len {
+            return;
+        }
+        let mut at = from;
+        while at + 1 < self.z_len {
+            self.z[at] = self.z[at + 1];
+            at += 1;
+        }
+        self.z[self.z_len - 1] = id;
+    }
+
+    /// Focuses `id`, returning whether the focus changed.
+    ///
+    /// Refuses an unknown or closed window: a session that has ended cannot be
+    /// handed input again.
+    pub fn focus(&mut self, id: u32) -> bool {
+        if self.find(id).is_none() || self.is_closed_of(id) {
+            return false;
+        }
+        let changed = self.focus != id;
+        self.focus = id;
         changed
     }
 
-    /// Places `rect` as the window, returning whether it moved.
+    /// Ends the focused window's session, returning whether this call did it.
+    ///
+    /// Separate from [`Self::apply`] because the *deciding* side is the
+    /// compositor — it owns the window and must end the client's input session —
+    /// while the *recording* side is the kernel's verifier, which only replays
+    /// reports. A replay reaches the same state through the close glyph, so this
+    /// exists for the compositor to record its own decision on the machine it is
+    /// already driving.
+    pub fn close(&mut self) -> bool {
+        self.close_of(self.focus)
+    }
+
+    /// Ends `id`'s session, returning whether this call was the one to do it.
+    pub fn close_of(&mut self, id: u32) -> bool {
+        let Some(index) = self.find(id) else {
+            return false;
+        };
+        let changed = !self.windows[index].closed;
+        self.windows[index].shown = false;
+        self.windows[index].closed = true;
+        if self.dragging == Some(id) {
+            self.dragging = None;
+        }
+        self.rehome_focus();
+        changed
+    }
+
+    /// Places `rect` as the focused window, returning whether it moved.
     ///
     /// This is how a scripted frame moves the window before input takes over,
     /// so the compositor and the verifier both hold the same rectangle. A
     /// minimized window is still moved by this — the rectangle is remembered
     /// across the hide.
     pub fn place(&mut self, rect: Rect) -> bool {
+        self.place_of(self.focus, rect)
+    }
+
+    /// Places `rect` as `id`, returning whether it moved.
+    pub fn place_of(&mut self, id: u32, rect: Rect) -> bool {
+        let Some(index) = self.find(id) else {
+            return false;
+        };
         let next = clamp_window(rect, self.screen_w, self.screen_h);
-        let moved = self.window != next;
-        self.window = next;
+        let moved = self.windows[index].rect != next;
+        self.windows[index].rect = next;
         moved
+    }
+
+    /// Gives focus to the topmost visible window when the focused one is gone.
+    ///
+    /// "Gone" means minimized or closed: a hidden window must not keep the
+    /// keyboard. When no other window is visible the focus stays where it was,
+    /// so the last window's `rect()` is empty while [`Self::is_closed`] still
+    /// answers about the footprint the compositor has to erase.
+    fn rehome_focus(&mut self) {
+        if self.is_shown_of(self.focus) {
+            return;
+        }
+        let mut at = self.z_len;
+        while at > 0 {
+            at -= 1;
+            let id = self.z[at];
+            if self.is_shown_of(id) {
+                self.focus = id;
+                return;
+            }
+        }
     }
 
     /// Applies one input event and returns what it asked for.
@@ -280,14 +587,17 @@ pub fn close(&mut self) -> bool {
     /// would, so a click cannot mean one thing here and another to a client
     /// listening to the same mouse.
     ///
-    /// A [`crate::ui::Event::Press`] of the left button inside [`title_bar`] grabs
-    /// the window at that point; while later events carry the button still held
-    /// the window follows the pointer with the grab offset preserved, and the
-    /// matching [`crate::ui::Event::Release`] ends the drag. A press on the
-    /// minimize glyph hides the window, a press on the taskbar's task button
-    /// shows it again, and a press on the close glyph ends the session for good.
-    /// Everything else — the body, the bare desktop, a right-button press —
-    /// does nothing.
+    /// A press first selects a window: the task button for a registered window,
+    /// or the topmost window containing the point. Selecting a background window
+    /// focuses and raises it, and the same press is then classified against that
+    /// window — so a grab on an occluded title bar starts a drag rather than
+    /// being swallowed by the focus change. A press inside [`title_bar`] grabs
+    /// the window; while later events carry the button still held the window
+    /// follows the pointer with the grab offset preserved, and the matching
+    /// [`crate::ui::Event::Release`] ends the drag. A press on the minimize glyph
+    /// hides the window, a press on a task button shows it again, and a press on
+    /// the close glyph ends the session for good. A press on the bare desktop or
+    /// with another button does nothing.
     ///
     /// Dragging is refused while the window is hidden, because a hidden window
     /// has no on-screen title bar to press; `rect()` being empty makes the
@@ -296,74 +606,131 @@ pub fn close(&mut self) -> bool {
         match event {
             Event::Press { button, .. } => {
                 if button & crate::cursor::BUTTON_LEFT == 0 {
-                    return Action::None;
+                    return Action::NONE;
                 }
-                // A closed window absorbs everything, so no region below can
-                // resurrect it however long the pointer keeps moving over where
-                // the window used to be.
-                if self.closed {
-                    return Action::None;
-                }
-                // One target wins, checked most specific first. The taskbar is
-                // under everything — `clamp_window` keeps windows clear of the
-                // panel — so its order is for readability, not correctness.
-                let task = crate::desktop::task_button_rect(self.screen_h);
-                if task.contains(at.x, at.y) {
-                    // Only a hidden window needs restoring; clicking a live task
-                    // button is inert rather than a surprise un-minimize.
-                    if !self.shown {
-                        self.shown = true;
-                        return Action::Restored;
+                // The taskbar is under everything — `clamp_window` keeps windows
+                // clear of the panel — so checking it first is for readability,
+                // not correctness. Buttons follow registration order, the same
+                // order the painter lays them out in.
+                if at.y < crate::desktop::panel_height(self.screen_h) {
+                    let mut index = 0;
+                    while index < self.count {
+                        let id = self.windows[index].id;
+                        if crate::desktop::task_button_rect_at(self.screen_h, index as u32)
+                            .contains(at.x, at.y)
+                        {
+                            if self.is_closed_of(id) {
+                                return Action::NONE;
+                            }
+                            let was_shown = self.is_shown_of(id);
+                            let was_focused = self.focus == id;
+                            let Some(window) = self.find(id) else {
+                                return Action::NONE;
+                            };
+                            self.windows[window].shown = true;
+                            self.raise(id);
+                            self.focus = id;
+                            if !was_shown {
+                                return Action::of(id, Kind::Restored);
+                            }
+                            if !was_focused {
+                                return Action::of(id, Kind::Focused);
+                            }
+                            return Action::NONE;
+                        }
+                        index += 1;
                     }
-                    return Action::None;
+                    return Action::NONE;
                 }
-                let strip = decorations(self.rect());
+                let Some(id) = self.top_at(at.x, at.y) else {
+                    return Action::NONE;
+                };
+                // Selecting is separate from classifying: the rest of this
+                // branch must act on the window the user just chose, and the
+                // kernel's copy must agree that the report belongs to it.
+                let was_focused = self.focus == id;
+                let was_top = self.z_len > 0 && self.z[self.z_len - 1] == id;
+                self.focus = id;
+                self.raise(id);
+                let window = self.rect_of(id).unwrap_or(Rect::EMPTY);
+                let strip = decorations(window);
                 if strip.contains(at.x, at.y) {
+                    let Some(index) = self.find(id) else {
+                        return Action::NONE;
+                    };
                     // The left half of the strip is minimize, the right half close.
                     if at.x < strip.x + DECORATION_W / 2 {
-                        self.shown = false;
-                        self.dragging = false;
-                        return Action::Minimized;
+                        self.windows[index].shown = false;
+                        if self.dragging == Some(id) {
+                            self.dragging = None;
+                        }
+                        self.rehome_focus();
+                        return Action::of(id, Kind::Minimized);
                     }
                     // Close keeps the placement but ends the session: the
                     // rectangle is remembered for the erase, `rect` goes empty,
                     // and no later event can bring it back.
-                    self.shown = false;
-                    self.closed = true;
-                    self.dragging = false;
-                    return Action::Closed;
+                    self.close_of(id);
+                    return Action::of(id, Kind::Closed);
                 }
-                self.dragging = hit(self.rect(), at.x, at.y);
-                if self.dragging {
-                    self.grab_x = at.x - self.window.x;
-                    self.grab_y = at.y - self.window.y;
-                    return Action::Grabbed;
+                if hit(window, at.x, at.y) {
+                    self.dragging = Some(id);
+                    self.grab_x = at.x - window.x;
+                    self.grab_y = at.y - window.y;
+                    // A grab that also changed focus is reported as the focus
+                    // change: the compositor has to repaint the stacking, and
+                    // the drag itself has moved nothing yet.
+                    return Action::of(
+                        id,
+                        if was_focused && was_top {
+                            Kind::Grabbed
+                        } else {
+                            Kind::Focused
+                        },
+                    );
                 }
-                return Action::None;
+                // The body belongs to the client. The only window-manager effect
+                // a press there can have is selecting the window.
+                return Action::of(
+                    id,
+                    if was_focused && was_top {
+                        Kind::None
+                    } else {
+                        Kind::Focused
+                    },
+                );
             }
             // A release ends the drag wherever the pointer happens to be; the
             // pointer itself keeps its position.
-            Event::Release { .. } => {
-                if self.dragging {
-                    self.dragging = false;
+            Event::Release { .. } => match self.dragging {
+                Some(id) => {
+                    self.dragging = None;
+                    Action::of(id, Kind::Released)
                 }
-                return Action::Released;
-            }
+                None => Action::NONE,
+            },
             // `Input` only emits `Move` when no button changed state, so
             // reaching here means the button was held throughout: a drag in
             // progress should follow the pointer.
             Event::Move { .. } => {
-                if !self.dragging {
-                    return Action::None;
+                let Some(id) = self.dragging else {
+                    return Action::NONE;
+                };
+                let Some(rect) = self.window_of(id) else {
+                    return Action::NONE;
+                };
+                let x = at.x.saturating_sub(self.grab_x);
+                let y = at.y.saturating_sub(self.grab_y);
+                let moved = self.place_of(id, Rect::new(x, y, rect.w, rect.h));
+                if moved {
+                    Action::of(id, Kind::Moved)
+                } else {
+                    Action::of(id, Kind::None)
                 }
             }
             // A keypress belongs to a client, never to the window manager.
-            Event::Key(_) => return Action::None,
+            Event::Key(_) => Action::NONE,
         }
-        let x = at.x.saturating_sub(self.grab_x);
-        let y = at.y.saturating_sub(self.grab_y);
-        let moved = self.place(Rect::new(x, y, self.window.w, self.window.h));
-        if moved { Action::Moved } else { Action::None }
     }
 }
 
@@ -407,6 +774,11 @@ mod tests {
 
     fn start() -> Wm {
         Wm::new(W, H, crate::desktop::window_rect(crate::desktop::FRAME_MOVED, W, H))
+    }
+
+    /// The action a one-window machine returns for window 0.
+    const fn act(kind: Kind) -> Action {
+        Action::of(0, kind)
     }
 
     /// Drives a [`Wm`] the way the compositor does: `Input` turns each report into
@@ -583,12 +955,12 @@ mod tests {
         let window = d.wm.window();
         // The window body, well below the title bar.
         d.hover(Rect::new(window.x + 10, window.bottom() - 4, 1, 1));
-        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), Action::None);
-        assert_eq!(d.feed(0, 0, 0), Action::Released);
+        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), act(Kind::None));
+        assert_eq!(d.feed(0, 0, 0), act(Kind::None));
         // The bare desktop, left of the window.
         d.hover(Rect::new(window.x - 8, window.y + 4, 1, 1));
-        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), Action::None);
-        assert_eq!(d.feed(0, 0, 0), Action::Released);
+        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), act(Kind::None));
+        assert_eq!(d.feed(0, 0, 0), act(Kind::None));
         assert_eq!(d.wm.window(), window);
         assert!(!d.wm.is_dragging());
     }
@@ -600,8 +972,8 @@ mod tests {
         let mut d = Driver::new();
         let window = d.wm.window();
         d.hover(Rect::new(window.x + 60, window.y + 11, 1, 1));
-        assert_eq!(d.feed(BUTTON_RIGHT, 0, 0), Action::None);
-        assert_eq!(d.feed(BUTTON_RIGHT, 0, 0), Action::None);
+        assert_eq!(d.feed(BUTTON_RIGHT, 0, 0), act(Kind::None));
+        assert_eq!(d.feed(BUTTON_RIGHT, 0, 0), act(Kind::None));
         assert!(!d.wm.is_dragging());
         assert_eq!(d.wm.window(), window);
     }
@@ -612,7 +984,7 @@ mod tests {
         let window = d.wm.window();
         // Grab the title bar 60 across and 11 down from its corner.
         d.hover(Rect::new(window.x + 60, window.y + 11, 1, 1));
-        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), Action::Grabbed);
+        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), act(Kind::Grabbed));
         assert!(d.wm.is_dragging());
         // Move to an absolute position and check the offset was honoured.
         let (at_x, at_y) = (window.x - 40, window.y + 35);
@@ -632,7 +1004,7 @@ mod tests {
         d.hover(Rect::new(window.x + 140, window.y + 71, 1, 1));
         let dragged = d.wm.window();
         assert_ne!(dragged, window);
-        assert_eq!(d.feed(0, 0, 0), Action::Released);
+        assert_eq!(d.feed(0, 0, 0), act(Kind::Released));
         assert!(!d.wm.is_dragging());
         let after = d.wm.window();
         // Further movement with no button held leaves the window alone.
@@ -647,15 +1019,15 @@ mod tests {
         let strip = decorations(window);
         // The left half of the strip is minimize.
         d.hover(Rect::new(strip.x + DECORATION_W / 4, strip.y + 4, 1, 1));
-        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), Action::Minimized);
+        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), act(Kind::Minimized));
         assert!(!d.wm.is_shown());
         // The remembered rectangle is untouched, so a restore is exact.
         assert_eq!(d.wm.window(), window);
         assert_eq!(d.wm.rect(), Rect::EMPTY);
-        assert_eq!(d.feed(0, 0, 0), Action::Released);
+        assert_eq!(d.feed(0, 0, 0), act(Kind::None));
         // A drag is refused: a hidden window has no title bar to press.
         d.hover(Rect::new(window.x + 60, window.y + 11, 1, 1));
-        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), Action::None);
+        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), act(Kind::None));
         assert!(!d.wm.is_dragging());
     }
 
@@ -665,7 +1037,7 @@ mod tests {
         let window = d.wm.window();
         let strip = decorations(window);
         d.hover(Rect::new(strip.right() - 2, strip.y + 4, 1, 1));
-        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), Action::Closed);
+        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), act(Kind::Closed));
         assert!(!d.wm.is_shown());
         assert!(d.wm.is_closed());
         assert!(!d.wm.is_dragging());
@@ -681,18 +1053,18 @@ mod tests {
         let window = d.wm.window();
         let strip = decorations(window);
         d.hover(Rect::new(strip.right() - 2, strip.y + 4, 1, 1));
-        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), Action::Closed);
-        assert_eq!(d.feed(0, 0, 0), Action::Released);
+        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), act(Kind::Closed));
+        assert_eq!(d.feed(0, 0, 0), act(Kind::None));
 
         // The task button restores a *minimized* window, never a closed one.
         let task = crate::desktop::task_button_rect(H);
         d.hover(Rect::new(task.x + task.w / 2, task.y + task.h / 2, 1, 1));
-        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), Action::None);
-        assert_eq!(d.feed(0, 0, 0), Action::Released);
+        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), act(Kind::None));
+        assert_eq!(d.feed(0, 0, 0), act(Kind::None));
         // Neither can it be dragged from where its title bar used to be.
         d.hover(Rect::new(window.x + 60, window.y + 11, 1, 1));
-        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), Action::None);
-        assert_eq!(d.feed(0, 0, 0), Action::Released);
+        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), act(Kind::None));
+        assert_eq!(d.feed(0, 0, 0), act(Kind::None));
         assert!(d.wm.is_closed());
         assert_eq!(d.wm.rect(), Rect::EMPTY);
         assert_eq!(d.wm.window(), window);
@@ -704,13 +1076,13 @@ mod tests {
         let window = d.wm.window();
         let strip = decorations(window);
         d.hover(Rect::new(strip.x + DECORATION_W / 4, strip.y + 4, 1, 1));
-        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), Action::Minimized);
-        assert_eq!(d.feed(0, 0, 0), Action::Released);
+        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), act(Kind::Minimized));
+        assert_eq!(d.feed(0, 0, 0), act(Kind::None));
         assert!(!d.wm.is_shown());
 
         let task = crate::desktop::task_button_rect(H);
         d.hover(Rect::new(task.x + task.w / 2, task.y + task.h / 2, 1, 1));
-        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), Action::Restored);
+        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), act(Kind::Restored));
         assert!(d.wm.is_shown());
         // The window comes back exactly where it was left.
         assert_eq!(d.wm.rect(), window);
@@ -724,8 +1096,8 @@ mod tests {
         let task = crate::desktop::task_button_rect(H);
         for button in [launcher, task] {
             d.hover(Rect::new(button.x + button.w / 2, button.y + button.h / 2, 1, 1));
-            assert_eq!(d.feed(BUTTON_LEFT, 0, 0), Action::None);
-            assert_eq!(d.feed(0, 0, 0), Action::Released);
+            assert_eq!(d.feed(BUTTON_LEFT, 0, 0), act(Kind::None));
+            assert_eq!(d.feed(0, 0, 0), act(Kind::None));
             assert!(d.wm.is_shown());
             assert_eq!(d.wm.window(), window);
         }
@@ -736,7 +1108,7 @@ mod tests {
         let mut d = Driver::new();
         let window = d.wm.window();
         d.hover(Rect::new(window.x + 4, window.y + 4, 1, 1));
-        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), Action::Grabbed);
+        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), act(Kind::Grabbed));
         for at in [(0u32, 0u32), (W - 1, H - 1), (W - 1, 0)] {
             d.hover(Rect::new(at.0, at.1, 1, 1));
             let held = d.wm.window();
@@ -810,8 +1182,8 @@ mod tests {
         let mut d = Driver::new();
         let window = d.wm.window();
         let event = d.input.report(0, 0, 0);
-        assert_eq!(d.wm.apply(d.cursor, crate::ui::Event::Key(b'a')), Action::None);
-        assert_eq!(d.wm.apply(d.cursor, crate::ui::Event::Key(b'\n')), Action::None);
+        assert_eq!(d.wm.apply(d.cursor, crate::ui::Event::Key(b'a')), act(Kind::None));
+        assert_eq!(d.wm.apply(d.cursor, crate::ui::Event::Key(b'\n')), act(Kind::None));
         assert_eq!(d.wm.window(), window);
         assert_eq!(event, crate::ui::Event::Move { dx: 0, dy: 0 });
     }
@@ -827,10 +1199,10 @@ mod tests {
         let mut closed = false;
         for step in MOUSE_SCRIPT {
             match d.feed(step.buttons, step.dx, step.dy) {
-                Action::Moved => moved = true,
-                Action::Minimized => minimized = true,
-                Action::Restored => restored = true,
-                Action::Closed => closed = true,
+                Action { kind: Kind::Moved, .. } => moved = true,
+                Action { kind: Kind::Minimized, .. } => minimized = true,
+                Action { kind: Kind::Restored, .. } => restored = true,
+                Action { kind: Kind::Closed, .. } => closed = true,
                 _ => {}
             }
         }
@@ -861,11 +1233,11 @@ mod tests {
         let mut moved = false;
         for step in MOUSE_SCRIPT {
             match d.feed(step.buttons, step.dx, step.dy) {
-                Action::Moved => {
+                Action { kind: Kind::Moved, .. } => {
                     moved = true;
                     ever_shown_after_drag = d.wm.is_shown();
                 }
-                Action::Restored => ever_shown_after_drag = true,
+                Action { kind: Kind::Restored, .. } => ever_shown_after_drag = true,
                 _ => {}
             }
         }
@@ -882,7 +1254,7 @@ mod tests {
             let mut wm = start();
             let mut input = Input::new();
             let mut cursor = Cursor::new(W, H);
-            let mut trail = [Action::None; 64];
+            let mut trail = [act(Kind::None); 64];
             let mut at = 0;
             for step in MOUSE_SCRIPT {
                 if at == trail.len() {
@@ -896,5 +1268,176 @@ mod tests {
             (wm.rect(), wm.window(), wm.is_shown(), at, trail)
         };
         assert_eq!(replay(), replay());
+    }
+
+    /// A machine holding window 0 and a second window `id` at `rect`, on top.
+    fn two(id: u32, rect: Rect) -> Wm {
+        let mut wm = start();
+        assert!(wm.add(id, rect), "the second window must fit");
+        wm
+    }
+
+    /// A left-button press at `(x, y)` with no movement.
+    fn press(x: u32, y: u32) -> (Cursor, Event) {
+        (
+            Cursor::at(x, y),
+            Event::Press {
+                button: BUTTON_LEFT,
+                dx: 0,
+                dy: 0,
+            },
+        )
+    }
+
+    #[test]
+    fn a_second_window_starts_on_top_and_focused() {
+        let first = start().window();
+        let second = Rect::new(500, 300, 200, 150);
+        let wm = two(1, second);
+        assert_eq!(wm.count(), 2);
+        assert_eq!(wm.focused(), 1);
+        assert_eq!(wm.rect_of(1), Some(second));
+        // The first window keeps its placement; it is simply underneath.
+        assert_eq!(wm.window_of(0), Some(first));
+        assert_eq!((wm.z_at(0), wm.z_at(1)), (Some(0), Some(1)));
+        assert_eq!(wm.z_at(2), None);
+        // Hit-testing sees the top window in an overlap and the lower one
+        // everywhere the top does not cover.
+        assert_eq!(wm.top_at(second.x + 4, second.y + 4), Some(1));
+        assert_eq!(wm.top_at(first.x + 4, first.y + 4), Some(0));
+        // The compatibility accessors describe the focused window.
+        assert_eq!(wm.rect(), second);
+    }
+
+    #[test]
+    fn a_full_table_refuses_a_window_and_a_duplicate_id() {
+        let mut wm = start();
+        assert!(!wm.add(0, Rect::new(10, 100, 64, 64)), "id 0 exists");
+        let mut id = 1;
+        while wm.count() < MAX_WINDOWS {
+            assert!(wm.add(id, Rect::new(10 + id * 8, 100, 64, 64)));
+            id += 1;
+        }
+        assert_eq!(wm.count(), MAX_WINDOWS);
+        assert!(!wm.add(id, Rect::new(10, 100, 64, 64)), "table is full");
+        // A refused window changed nothing.
+        assert_eq!(wm.count(), MAX_WINDOWS);
+        assert_eq!(wm.focused(), MAX_WINDOWS as u32 - 1);
+    }
+
+    #[test]
+    fn pressing_a_background_window_focuses_and_raises_it() {
+        let mut wm = start();
+        let first = wm.window();
+        let second = Rect::new(first.right() + 20, first.y, 120, 120);
+        assert!(wm.add(1, second));
+        assert_eq!(wm.focused(), 1);
+
+        // The body of window 0, well away from window 1.
+        let (x, y) = (first.x + 10, first.y + TITLE_HEIGHT + 10);
+        let (cursor, event) = press(x, y);
+        assert_eq!(wm.apply(cursor, event), Action::of(0, Kind::Focused));
+        assert_eq!(wm.focused(), 0);
+        assert_eq!((wm.z_at(0), wm.z_at(1)), (Some(1), Some(0)));
+        assert_eq!(wm.top_at(x, y), Some(0));
+        // The press is a selection only; it never starts a drag on the body.
+        assert!(!wm.is_dragging());
+    }
+
+    #[test]
+    fn a_press_on_an_overlap_reaches_only_the_top_window() {
+        let mut wm = start();
+        let first = wm.window();
+        let second = Rect::new(first.x + 10, first.y + 10, 200, 150);
+        assert!(wm.add(1, second));
+        let (cursor, event) = press(first.x + 20, first.y + 20);
+        let action = wm.apply(cursor, event);
+        assert_eq!(action.window, 1, "the occluded window must not be hit");
+        // The point is in window 1's title bar, so the press grabs it.
+        assert_eq!(action.kind, Kind::Grabbed);
+        assert_eq!(wm.focused(), 1);
+        assert_eq!(wm.top_at(first.x + 20, first.y + 20), Some(1));
+    }
+
+    #[test]
+    fn the_task_button_restores_the_window_it_names() {
+        let mut wm = two(1, Rect::new(500, 300, 200, 150));
+        let window = wm.window_of(1).expect("second window");
+        let strip = decorations(window);
+        let (cursor, event) = press(strip.x + DECORATION_W / 4, strip.y + 4);
+        assert_eq!(wm.apply(cursor, event), Action::of(1, Kind::Minimized));
+        assert!(!wm.is_shown_of(1));
+        // A minimized window must not keep the keyboard: focus moves down the
+        // stack to the window that is still visible.
+        assert_eq!(wm.focused(), 0);
+
+        // Button 0 belongs to window 0, which already has focus, so it is inert.
+        let first_button = crate::desktop::task_button_rect_at(H, 0);
+        let (cursor, event) = press(first_button.x + 4, first_button.y + 4);
+        assert_eq!(wm.apply(cursor, event), act(Kind::None));
+        assert!(!wm.is_shown_of(1));
+
+        // Button 1 does.
+        let second_button = crate::desktop::task_button_rect_at(H, 1);
+        let (cursor, event) = press(second_button.x + 4, second_button.y + 4);
+        assert_eq!(wm.apply(cursor, event), Action::of(1, Kind::Restored));
+        assert!(wm.is_shown_of(1));
+        assert_eq!(wm.focused(), 1);
+        assert_eq!(wm.rect_of(1), Some(window));
+    }
+
+    #[test]
+    fn closing_the_focused_window_moves_focus_to_the_topmost_visible() {
+        let mut wm = two(1, Rect::new(500, 300, 200, 150));
+        let strip = decorations(wm.window_of(1).expect("second window"));
+        let (cursor, event) = press(strip.right() - 2, strip.y + 4);
+        assert_eq!(wm.apply(cursor, event), Action::of(1, Kind::Closed));
+        assert!(wm.is_closed_of(1));
+        assert_eq!(wm.rect_of(1), Some(Rect::EMPTY));
+        // Window 0 is still alive and now owns the input stream.
+        assert_eq!(wm.focused(), 0);
+        assert!(wm.is_shown_of(0));
+    }
+
+    #[test]
+    fn closing_the_last_window_keeps_focus_so_the_erase_still_works() {
+        let mut wm = start();
+        let window = wm.window();
+        let strip = decorations(window);
+        let (cursor, event) = press(strip.right() - 2, strip.y + 4);
+        assert_eq!(wm.apply(cursor, event), act(Kind::Closed));
+        // Nothing else can take focus, so the machine still answers about the
+        // window the compositor has to erase.
+        assert_eq!(wm.focused(), 0);
+        assert!(wm.is_closed());
+        assert_eq!(wm.window(), window);
+        assert_eq!(wm.rect(), Rect::EMPTY);
+    }
+
+    #[test]
+    fn a_drag_moves_only_the_window_it_grabbed() {
+        let mut wm = start();
+        let first = wm.window();
+        let second = Rect::new(first.right() + 20, first.y, 120, 120);
+        assert!(wm.add(1, second));
+        // Grab window 0 by its title bar: the press focuses it first, then the
+        // same gesture arms the drag.
+        let (x, y) = (first.x + 60, first.y + 11);
+        let (cursor, event) = press(x, y);
+        assert_eq!(wm.apply(cursor, event), Action::of(0, Kind::Focused));
+        assert!(wm.is_dragging());
+
+        let (cursor, event) = (
+            Cursor::at(x + 40, y + 30),
+            Event::Move { dx: 40, dy: 30 },
+        );
+        assert_eq!(wm.apply(cursor, event), Action::of(0, Kind::Moved));
+        assert_eq!(
+            wm.window_of(0),
+            Some(Rect::new(first.x + 40, first.y + 30, first.w, first.h))
+        );
+        // The other window is untouched.
+        assert_eq!(wm.window_of(1), Some(second));
+        assert_eq!(wm.rect_of(1), Some(second));
     }
 }

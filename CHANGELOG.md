@@ -79,7 +79,14 @@ window client and the kernel's verifier. See
 [ADR 0036](docs/adr/0036-a-directory-can-be-listed.md). F8h-0b extends the same
 listing to zcfs through a new exchange request, and fixes the proxy's replay log
 to keep a payload per call. See
-[ADR 0037](docs/adr/0037-a-served-filesystem-can-list.md).
+[ADR 0037](docs/adr/0037-a-served-filesystem-can-list.md). F8h-1a replaces the
+single-window assumption with a bounded table: `Wm` keeps four windows, a
+stacking order, and one focus, and every action names the window it concerns. A
+press selects the topmost window, focuses and raises it, then classifies the
+same press; the kernel runs the identical machine, so focus and the destination
+of `SYS_WINDOW_READ` are derived from the report stream. The boot still launches
+one window, so both frame checksums are unchanged. See
+[ADR 0038](docs/adr/0038-the-window-manager-holds-a-table.md).
 
 ### Fixed
 

@@ -237,6 +237,15 @@ window at its current position and flushes only the damaged rectangle per
 `WM_ACK`, and stops on `WM_DONE`. The kernel closes the session when the shell
 exits, which unblocks the client's read with `WINDOW_NO_EVENT`.
 
+Placement is a bounded table, not a single rectangle: `zc_abi::wm::Wm` keeps up
+to four windows, a bottom-to-top stacking order, and one focus. A press selects
+the topmost window containing the point, focuses and raises it, and then
+classifies the same press as a decoration, a drag, or a client event. The kernel
+runs that machine over the reports it serves, so the focused window — and
+therefore which client receives the report — is derived from the input stream
+rather than requested by the compositor. Per-window surfaces and a second client
+task build on this table.
+
 The window pixels remain proven, not trusted, but the proof splits by what is
 knowable. Outside the window the frame checksum recomputes `pixel_at` exactly.
 Inside the window the client's pixels are unknowable, so the checksum proves

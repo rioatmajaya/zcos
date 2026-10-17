@@ -23,7 +23,7 @@
 
 use zc_abi::{
     Cursor, DamageList, FONT_LEN, FONT_PATH, FRAME_INITIAL, FRAME_MOVED, FramebufferInfo, Font,
-    IPC_WM, IPC_WM_REPLY, Action, PixelFormat, Rect, SurfaceInfo, WM_ACK, WM_DONE, Wm, encode,
+    IPC_WM, IPC_WM_REPLY, Kind, PixelFormat, Rect, SurfaceInfo, WM_ACK, WM_DONE, Wm, encode,
     pixel_at, pixel_at_with_window, window_rect,
 };
 use zc_ui::Pointer;
@@ -255,21 +255,21 @@ pub unsafe extern "C" fn _start() -> ! {
         // independent readings of the same button mask.
         cursor = pointer.cursor();
         let action = wm.apply(cursor, event);
-        minimized |= action == Action::Minimized;
-        restored |= action == Action::Restored;
-        if action == Action::Closed {
+        minimized |= action.kind == Kind::Minimized;
+        restored |= action.kind == Kind::Restored;
+        if action.kind == Kind::Closed {
             // Closing is a decision, not a paint: end the client's input session
             // so the task blocked in `SYS_WINDOW_READ` wakes, paints a final frame,
             // and sends `WM_DONE`. The kernel records the closed state too, so
             // the frame verifier expects a desktop with no window in it.
-            wm.close();
+            wm.close_of(action.window);
             if window_close() == u64::MAX {
                 log("compositor: window close refused\n");
             }
             closed = true;
         }
         window = wm.rect();
-        dragged |= action == Action::Moved;
+        dragged |= action.kind == Kind::Moved;
         // A press that arms a drag moves nothing yet, but the pointer's own old
         // and new rectangles are always damaged. A report that changes the window
         // — a move, or a hide/restore — damages both the old and the new
@@ -333,8 +333,8 @@ pub unsafe extern "C" fn _start() -> ! {
             let window_before = window;
             cursor = pointer.cursor();
             let action = wm.apply(cursor, event);
-            if action == Action::Closed {
-                wm.close();
+            if action.kind == Kind::Closed {
+                wm.close_of(action.window);
                 let _ = window_close();
             }
             window = wm.rect();

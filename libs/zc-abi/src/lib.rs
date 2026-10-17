@@ -90,7 +90,7 @@ pub use ui::{
 pub use vfs::{
     DIRENT_LEN, DIRENT_NAME_MAX, DirEntry, KIND_CHR, KIND_DIR, KIND_FILE, STAT_LEN, Stat,
 };
-pub use wm::{Action, Wm, content, decorations, hit, title_bar, window_pointer_at};
+pub use wm::{Action, Kind, MAX_WINDOWS, Wm, content, decorations, hit, title_bar, window_pointer_at};
 
 /// Current version of the loader-to-kernel boot protocol.
 pub const BOOT_PROTOCOL_VERSION: u32 = 2;
