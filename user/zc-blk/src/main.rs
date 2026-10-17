@@ -29,12 +29,13 @@ use core::ptr::{addr_of, addr_of_mut};
 use core::sync::atomic::{Ordering, compiler_fence};
 
 use zc_abi::{
-    FS_EXCHANGE_DATA, FS_EXCHANGE_NODE, FS_EXCHANGE_OFFSET, FS_EXCHANGE_OP, FS_EXCHANGE_PAYLOAD,
-    FS_EXCHANGE_RESULT, FS_EXCHANGE_VIRT, FS_OP_CREATE, FS_OP_FLUSH, FS_OP_LOOKUP, FS_OP_MOUNT,
-    FS_OP_READ, FS_OP_STAT, FS_OP_STOP, FS_OP_UNMOUNT, FS_OP_WRITE, FS_STATUS_BAD_BUFFER,
-    FS_STATUS_BAD_PATH, FS_STATUS_CORRUPT, FS_STATUS_NOT_A_DIRECTORY, FS_STATUS_NOT_FOUND,
-    FS_STATUS_NOT_SUPPORTED, FS_STATUS_NO_SPACE, FS_STATUS_OK, FS_STATUS_TABLE_FULL, INFO_LEN,
-    INFO_QUEUE0, INFO_VIRT, IPC_DISCOVERY, IPC_FS, IPC_FS_REPLY, QUEUE_VIRT, STAT_LEN,
+    DIRENT_LEN, DirEntry, FS_EXCHANGE_DATA, FS_EXCHANGE_NODE, FS_EXCHANGE_OFFSET, FS_EXCHANGE_OP,
+    FS_EXCHANGE_PAYLOAD, FS_EXCHANGE_RESULT, FS_EXCHANGE_VIRT, FS_OP_CREATE, FS_OP_FLUSH,
+    FS_OP_LIST, FS_OP_LOOKUP, FS_OP_MOUNT, FS_OP_READ, FS_OP_STAT, FS_OP_STOP, FS_OP_UNMOUNT,
+    FS_OP_WRITE, FS_STATUS_BAD_BUFFER, FS_STATUS_BAD_PATH, FS_STATUS_CORRUPT,
+    FS_STATUS_NOT_A_DIRECTORY, FS_STATUS_NOT_FOUND, FS_STATUS_NOT_SUPPORTED, FS_STATUS_NO_SPACE,
+    FS_STATUS_OK, FS_STATUS_TABLE_FULL, INFO_LEN, INFO_QUEUE0, INFO_VIRT, IPC_DISCOVERY, IPC_FS,
+    IPC_FS_REPLY, QUEUE_VIRT, STAT_LEN,
 };
 use zc_storage::block_cache::{CACHE_MAGIC, CACHE_TEST_SECTOR, Cache, cache_pattern_byte};
 use zc_storage::ext2::{self, Ext2Error};
@@ -1012,6 +1013,25 @@ fn serve_op(
                 Err(error) => status_of(error),
             }
         }
+        FS_OP_LIST => match volume.read_dir(node, offset as usize) {
+            Ok(Some((kind, name))) => {
+                let mut entry = DirEntry::new(kind);
+                if entry.set_name(name).is_none() {
+                    return FS_STATUS_BAD_BUFFER;
+                }
+                let mut bytes = [0u8; DIRENT_LEN];
+                if entry.write_into(&mut bytes).is_none() {
+                    return FS_STATUS_BAD_BUFFER;
+                }
+                ex_write_bytes(&bytes);
+                ex_store32(FS_EXCHANGE_PAYLOAD, bytes.len() as u32);
+                FS_STATUS_OK
+            }
+            // An empty payload is the end of the listing, which the proxy
+            // turns back into `Ok(None)`.
+            Ok(None) => FS_STATUS_OK,
+            Err(error) => status_of(error),
+        },
         FS_OP_WRITE => {
             if payload_len == 0 || payload_len > zcfs::CONTENT_MAX || offset > u32::MAX as u64 {
                 return FS_STATUS_BAD_BUFFER;

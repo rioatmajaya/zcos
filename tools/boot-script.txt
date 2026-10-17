@@ -8,6 +8,7 @@ stat hello.txt
 write /data/probe ZCPERSIST1
 stat /data/probe
 persist
+ls /data
 tmp
 stat /tmp/scratch
 chmod /tmp/scratch 0000

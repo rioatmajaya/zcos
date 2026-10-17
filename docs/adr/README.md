@@ -43,6 +43,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0034](0034-a-window-has-its-own-pointer-stream.md) | A window has its own pointer stream | Accepted |
 | [0035](0035-a-scripted-click-is-a-proof.md) | A scripted click is a proof, not a demo | Accepted |
 | [0036](0036-a-directory-can-be-listed.md) | A directory can be listed, and `ls` proves it twice | Accepted |
+| [0037](0037-a-served-filesystem-can-list.md) | A filesystem served over IPC can list | Accepted |
 
 ## Adding a decision
 

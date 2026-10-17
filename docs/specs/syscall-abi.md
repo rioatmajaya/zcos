@@ -84,8 +84,10 @@ directory's own mode before the filesystem is asked. Mount points directly
 below the path are listed first (so `ls /` shows `data/`, `dev/`, and `tmp/`
 without the initramfs knowing they exist), then the filesystem's own entries.
 A filesystem that cannot enumerate returns `u64::MAX` rather than an empty
-listing, so "nothing here" and "cannot list" stay distinct; zcfs is in that
-group today and `ls /data` says `ls: cannot list`.
+listing, so "nothing here" and "cannot list" stay distinct. All four mounts
+enumerate: `ramfs`, `tmpfs`, and `devfs` directly, and zcfs through the
+`FS_OP_LIST` request the block domain answers (see
+[`server-protocol.md`](server-protocol.md#opcodes)).
 
 ### `SYS_WINDOW_CLOSE`
 

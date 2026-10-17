@@ -179,15 +179,15 @@ filesystem has no business touching.
 Directories are listed through `SYS_READDIR` (36), which returns one fixed-size
 `DirEntry` per index so a caller walks from zero with no allocation and no
 second name format. `ramfs`, `tmpfs`, and `devfs` enumerate their own children;
-zcfs does not yet, because a listing needs a new request in the exchange
-protocol, so `ls /data` reports that it cannot list rather than looking empty.
-The mount table answers for its own mount points first — that is why `ls /`
-shows `data/`, `dev/`, and `tmp/` even though the initramfs archive contains
-none of them — and the filesystem answers the remainder. Listing is gated by
-search permission on the directory, checked at the syscall boundary like every
-other VFS access. The shared terminal's `ls` takes an injected lister, so the
-window client reads through the syscall while the kernel's frame verifier reads
-through its own mount table; the scripted `ls` is therefore proven twice
+zcfs does too, through the `FS_OP_LIST` request the block domain answers, so a
+listing survives the same IPC bridge as `stat` and `read`. The mount table
+answers for its own mount points first — that is why `ls /` shows `data/`,
+`dev/`, and `tmp/` even though the initramfs archive contains none of them —
+and the filesystem answers the remainder. Listing is gated by search permission
+on the directory, checked at the syscall boundary like every other VFS access.
+The shared terminal's `ls` takes an injected lister, so the window client reads
+through the syscall while the kernel's frame verifier reads through its own
+mount table; the scripted `ls` is therefore proven twice
 ([ADR 0036](adr/0036-a-directory-can-be-listed.md)).
 
 Permissions are a second gate on top of capabilities. A capability says which

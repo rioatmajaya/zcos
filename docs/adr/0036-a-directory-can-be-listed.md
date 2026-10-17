@@ -62,6 +62,8 @@ listings pixel for pixel.
   needs a new request in the exchange protocol. `ls /data` reports
   `ls: cannot list` rather than pretending the volume is empty. That is the
   next slice, and it belongs with the file manager that will consume it.
+  (Follow-up: [ADR 0037](0037-a-served-filesystem-can-list.md) adds that
+  request, so this limitation no longer applies.)
 - Listing the cpio archive is a walk per entry, so `ls` is O(n²) in the number
   of files. With a dozen entries that is cheaper than a cursor type or an
   allocation, and the syscall's index is what a cursor would carry anyway.

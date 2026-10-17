@@ -172,7 +172,10 @@ index, the mount table lists its own mount points first, and `ls` lives in the
 shared terminal with the lister injected — the window client reads through the
 syscall while the kernel's verifier reads its own mount table, so the scripted
 listing is compared pixel for pixel — see
-[ADR 0036](docs/adr/0036-a-directory-can-be-listed.md).
+[ADR 0036](docs/adr/0036-a-directory-can-be-listed.md). F8h-0b gives the
+disk-backed zcfs mount the same listing through a new exchange request, so
+`ls /data` reads the replayed table — see
+[ADR 0037](docs/adr/0037-a-served-filesystem-can-list.md).
 
 ## Development
 

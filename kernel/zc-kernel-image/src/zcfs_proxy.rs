@@ -44,10 +44,10 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering, compiler_fence};
 use zc_abi::{
     FS_EXCHANGE_DATA, FS_EXCHANGE_DATA_MAX, FS_EXCHANGE_NODE, FS_EXCHANGE_OFFSET, FS_EXCHANGE_OP,
     FS_EXCHANGE_PAYLOAD, FS_EXCHANGE_RESULT, FS_EXCHANGE_SEQ, FS_EXCHANGE_TASK, FS_OP_CREATE,
-    FS_OP_FLUSH, FS_OP_LOOKUP, FS_OP_MOUNT, FS_OP_READ, FS_OP_STAT, FS_OP_UNMOUNT, FS_OP_WRITE,
-    FS_STATUS_BAD_BUFFER, FS_STATUS_BAD_FD, FS_STATUS_BAD_PATH, FS_STATUS_CORRUPT, FS_STATUS_IO,
-    FS_STATUS_NOT_A_DIRECTORY, FS_STATUS_NOT_FOUND, FS_STATUS_NOT_SUPPORTED, FS_STATUS_NO_SPACE,
-    FS_STATUS_OK, FS_STATUS_TABLE_FULL, STAT_LEN, Stat,
+    FS_OP_FLUSH, FS_OP_LIST, FS_OP_LOOKUP, FS_OP_MOUNT, FS_OP_READ, FS_OP_STAT, FS_OP_UNMOUNT,
+    FS_OP_WRITE, FS_STATUS_BAD_BUFFER, FS_STATUS_BAD_FD, FS_STATUS_BAD_PATH, FS_STATUS_CORRUPT,
+    FS_STATUS_IO, FS_STATUS_NOT_A_DIRECTORY, FS_STATUS_NOT_FOUND, FS_STATUS_NOT_SUPPORTED,
+    FS_STATUS_NO_SPACE, FS_STATUS_OK, FS_STATUS_TABLE_FULL, STAT_LEN, Stat,
 };
 use zc_kernel::perms::Identity;
 use zc_kernel::vfs::{FileSystem, NodeId, VfsError};
@@ -59,10 +59,10 @@ const ROOT_NODE: u64 = 1;
 pub const CREATE_MODE: u32 = 0o100_644;
 
 /// Tasks the bridge keeps a replay log for; matches the scheduler's table.
-const MAX_TASKS: usize = 8;
+const MAX_TASKS: usize = zc_kernel::service::TASK_COUNT;
 /// Filesystem calls one syscall may make before the log must give up.
 const LOG_MAX: usize = 8;
-/// Bytes reserved for the one reply payload a syscall can carry.
+/// Bytes reserved for each call's reply payload.
 const LOG_DATA: usize = 512;
 
 /// Sequence of the request in flight, or zero when the bridge is idle.
@@ -89,9 +89,10 @@ static FS_CALLER: AtomicU32 = AtomicU32::new(0);
 /// One task's record of the filesystem calls a syscall has already made.
 ///
 /// A replay walks the same calls in the same order, so serving them from this
-/// log returns identical answers without touching the exchange page. At most
-/// one call per syscall carries a reply payload (a `STAT` or a `READ`), and it
-/// is the final call, so one shared payload buffer is enough.
+/// log returns identical answers without touching the exchange page. Each call
+/// keeps its own payload: a syscall can make more than one call that returns
+/// bytes — `read_dir` stats the directory and then lists it — and replaying
+/// the first from a shared buffer would answer with the second's bytes.
 #[derive(Clone, Copy)]
 struct TaskLog {
     /// Completed calls in the current syscall.
@@ -100,8 +101,6 @@ struct TaskLog {
     cursor: u32,
     /// Nonzero while the task is blocked waiting for its reply.
     blocked: u32,
-    /// Nonzero once the syscall has stored its one reply payload.
-    has_data: u32,
     /// Opcode of each completed call.
     op: [u32; LOG_MAX],
     /// Status code of each completed call.
@@ -110,8 +109,8 @@ struct TaskLog {
     result: [u64; LOG_MAX],
     /// Reply payload length of each completed call.
     len: [u32; LOG_MAX],
-    /// Reply payload of the one call that carries one.
-    data: [u8; LOG_DATA],
+    /// Reply payload of each completed call.
+    data: [[u8; LOG_DATA]; LOG_MAX],
 }
 
 impl TaskLog {
@@ -120,12 +119,11 @@ impl TaskLog {
         count: 0,
         cursor: 0,
         blocked: 0,
-        has_data: 0,
         op: [0; LOG_MAX],
         status: [0; LOG_MAX],
         result: [0; LOG_MAX],
         len: [0; LOG_MAX],
-        data: [0; LOG_DATA],
+        data: [[0; LOG_DATA]; LOG_MAX],
     };
 }
 
@@ -169,7 +167,6 @@ pub fn begin_syscall(task: u32) {
     } else {
         log.count = 0;
         log.cursor = 0;
-        log.has_data = 0;
     }
 }
 
@@ -262,6 +259,23 @@ impl FileSystem for Proxy {
         Ok(reply.len as usize)
     }
 
+    fn read_dir(
+        &self,
+        dir: NodeId,
+        index: usize,
+        out: &mut [u8],
+    ) -> Result<Option<()>, VfsError> {
+        let me = FS_CALLER.load(Ordering::Relaxed);
+        let reply = exchange(me, FS_OP_LIST, dir, index as u64, &[], 0, out)?;
+        decode(reply.status)?;
+        match reply.len as usize {
+            // An empty reply is the domain's end-of-listing marker.
+            0 => Ok(None),
+            zc_abi::DIRENT_LEN => Ok(Some(())),
+            _ => Err(VfsError::Corrupt),
+        }
+    }
+
     fn write(&self, node: NodeId, offset: u64, data: &[u8]) -> Result<usize, VfsError> {
         let me = FS_CALLER.load(Ordering::Relaxed);
         let reply = exchange(
@@ -338,7 +352,7 @@ fn exchange(
                 return Err(VfsError::BadBuffer);
             }
             // SAFETY: `len <= out.len() <= LOG_DATA` by construction.
-            out[..len].copy_from_slice(&log.data[..len]);
+            out[..len].copy_from_slice(&log.data[cursor][..len]);
             log.cursor += 1;
             return Ok(Reply {
                 status: log.status[cursor],
@@ -349,7 +363,6 @@ fn exchange(
         // The syscall is not the one that was logged; start over.
         log.count = 0;
         log.cursor = 0;
-        log.has_data = 0;
     }
 
     // `cursor == count`: this call is the one that must produce a reply.
@@ -379,7 +392,7 @@ fn exchange(
             clear_inflight();
             return Err(VfsError::BadBuffer);
         }
-        if count >= LOG_MAX || (len > 0 && log.has_data != 0) {
+        if count >= LOG_MAX {
             // The syscall outgrew the log. Fail loudly rather than replay a
             // call with the wrong answer.
             clear_inflight();
@@ -387,8 +400,7 @@ fn exchange(
         }
         get_bytes(FS_EXCHANGE_DATA, &mut out[..len]);
         if len > 0 {
-            log.data[..len].copy_from_slice(&out[..len]);
-            log.has_data = 1;
+            log.data[count][..len].copy_from_slice(&out[..len]);
         }
         let reply = Reply {
             status: REPLY_STATUS.load(Ordering::Relaxed),

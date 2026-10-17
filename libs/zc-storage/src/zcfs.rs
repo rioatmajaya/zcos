@@ -483,6 +483,28 @@ impl<const N: usize> Table<N> {
         Ok(count)
     }
 
+    /// Returns the `index`-th child of `parent`, as `(kind, name)`.
+    ///
+    /// Children are visited in table order, which is creation and replay
+    /// order, so a walk from zero is stable for an unchanged volume. The root
+    /// is node zero; its children carry `parent == 0` like any other directory.
+    pub fn read_dir(&self, parent: u64, index: usize) -> Result<Option<(u32, &[u8])>, ZcfsError> {
+        if !self.is_directory(parent) {
+            return Err(ZcfsError::NotADirectory);
+        }
+        let mut seen = 0;
+        for node in self.nodes.iter().filter(|node| node.used) {
+            if node.parent != parent {
+                continue;
+            }
+            if seen == index {
+                return Ok(Some((node.kind, &node.name[..usize::from(node.name_len)])));
+            }
+            seen += 1;
+        }
+        Ok(None)
+    }
+
     /// Returns the node with id `node`.
     fn find(&self, node: u64) -> Option<&Node> {
         self.nodes
@@ -742,6 +764,14 @@ impl<const N: usize> Volume<N> {
     /// Reads up to `out.len()` bytes of `node` at `offset`.
     pub fn read(&self, node: u64, offset: u64, out: &mut [u8]) -> Result<usize, ZcfsError> {
         self.table.read(node, offset, out)
+    }
+
+    /// Returns the `index`-th child of `parent`, as `(kind, name)`.
+    ///
+    /// The order is replay order: creation order across a mount. A caller walks
+    /// indices from zero until `None`, which is the same shape the VFS exposes.
+    pub fn read_dir(&self, parent: u64, index: usize) -> Result<Option<(u32, &[u8])>, ZcfsError> {
+        self.table.read_dir(parent, index)
     }
 
     /// Creates `name` in directory `parent` and appends its `CREATE` record.
@@ -1520,6 +1550,44 @@ mod tests {
             volume.create(&mut io, 999, b"x", MODE_FILE),
             Err(ZcfsError::NotADirectory)
         );
+    }
+
+    #[test]
+    fn read_dir_walks_the_children_in_replay_order() {
+        let (mut io, mut volume) = seeded();
+        let second = volume
+            .create(&mut io, ROOT_NODE, b"second", MODE_FILE | 0o644)
+            .expect("create");
+        let dir = volume
+            .create(&mut io, ROOT_NODE, b"sub", MODE_DIR | 0o755)
+            .expect("dir");
+        volume
+            .create(&mut io, dir, b"inner", MODE_FILE | 0o644)
+            .expect("inner");
+
+        // `/probe` was created first, so it is index zero; the directory is
+        // reported as a directory, and its own child is not in the root list.
+        let (kind, name) = volume.read_dir(ROOT_NODE, 0).expect("entry").expect("some");
+        assert_eq!(name, b"probe");
+        assert_eq!(kind, KIND_FILE);
+        let (kind, name) = volume.read_dir(ROOT_NODE, 1).expect("entry").expect("some");
+        assert_eq!(name, b"second");
+        assert_eq!(kind, KIND_FILE);
+        let (kind, name) = volume.read_dir(ROOT_NODE, 2).expect("entry").expect("some");
+        assert_eq!(name, b"sub");
+        assert_eq!(kind, KIND_DIR);
+        assert_eq!(volume.read_dir(ROOT_NODE, 3), Ok(None));
+
+        let (_, name) = volume.read_dir(dir, 0).expect("entry").expect("some");
+        assert_eq!(name, b"inner");
+        assert_eq!(volume.read_dir(dir, 1), Ok(None));
+
+        // A file is not a directory, and the walk survives a remount because
+        // it reads the replayed table, not the log.
+        assert_eq!(volume.read_dir(second, 0), Err(ZcfsError::NotADirectory));
+        let reloaded = Volume::<8>::mount(0, &mut io).expect("mount");
+        let (_, name) = reloaded.read_dir(ROOT_NODE, 1).expect("entry").expect("some");
+        assert_eq!(name, b"second");
     }
 
     #[test]

@@ -76,7 +76,10 @@ terminal state and fails if nothing was clicked. See
 filesystem enumerable — `SYS_READDIR` returns one fixed-size `DirEntry` per
 index, the mount table lists its own mount points, and `ls` is shared by the
 window client and the kernel's verifier. See
-[ADR 0036](docs/adr/0036-a-directory-can-be-listed.md).
+[ADR 0036](docs/adr/0036-a-directory-can-be-listed.md). F8h-0b extends the same
+listing to zcfs through a new exchange request, and fixes the proxy's replay log
+to keep a payload per call. See
+[ADR 0037](docs/adr/0037-a-served-filesystem-can-list.md).
 
 ### Fixed
 
@@ -176,6 +179,19 @@ window client and the kernel's verifier. See
 
 ### Added
 
+- **A filesystem served over IPC can list** (F8h-0b): `FS_OP_LIST` (10) carries
+  the directory in the node field and the entry index in the offset field; the
+  reply payload is one `DirEntry`, or empty at the end, so the exchange carries
+  the same `Option` the VFS trait uses. zcfs walks its replayed table in
+  creation/replay order, and the block domain serves the record like `STAT`, so
+  `ls /data` lists the files the shell just wrote and remounted. The listing
+  exposed a proxy bug: one `read_dir` syscall stats the directory and then lists
+  it — two data-carrying calls — while the replay log kept one payload per
+  syscall and refused the second. `TaskLog` now stores a payload per call, and
+  `MAX_TASKS` is `service::TASK_COUNT`, so task 8 no longer shares the
+  supervisor's log. Both frame checksums are unchanged because the listing is
+  in the shell, not the window. See
+  [ADR 0037](docs/adr/0037-a-served-filesystem-can-list.md).
 - **A directory can be listed, and `ls` proves it twice** (F8h-0): `SYS_READDIR`
   (36) writes one fixed-size `DirEntry` — kind, name length, and a 256-byte name
   — per index, so a caller walks a directory with no allocation and no second
@@ -184,9 +200,8 @@ window client and the kernel's verifier. See
   on the directory; the mount table answers for its own mount points first (so
   `ls /` shows `data/`, `dev/`, and `tmp/` even though the initramfs archive
   contains none of them) and the filesystem answers the remainder. `ramfs`,
-  `tmpfs`, and `devfs` enumerate; zcfs reports `NotSupported` until its IPC
-  protocol grows a listing request, so `ls /data` says `ls: cannot list` rather
-  than looking empty. `ls` lives in the shared terminal with the lister injected
+  `tmpfs`, and `devfs` enumerate directly; zcfs follows in F8h-0b. `ls` lives
+  in the shared terminal with the lister injected
   like the file reader: the window client walks through the syscall while the
   kernel's verifier walks its own mount table, the script now ends with `ls`, and
   `wm: content ok` compares the two listings pixel for pixel. The verifier fails

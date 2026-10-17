@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 7 grants`, `task 6: devmgr: blk published`, `dma: window coherent ok` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–7, F8e-1–4, F8h-0, live-input check, F8g-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: font vfs ok`; `compositor: font vfs ok`; `font: vfs ok`; `client: window painted`; `client: vfs ok`; `client: pointer ok`; `client: click ok`; `client: ls ok`; `wm: window mapped`; `wm: pointer routed`; `wm: click ok`; `wm: ls ok`; `task 2: data/`; `task 2: kbd`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed` (close run); `compositor: window erased` (close run); `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui/session/vfs host tests pass |
+| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–7, F8e-1–4, F8h-0/0b, live-input check, F8g-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: font vfs ok`; `compositor: font vfs ok`; `font: vfs ok`; `client: window painted`; `client: vfs ok`; `client: pointer ok`; `client: click ok`; `client: ls ok`; `wm: window mapped`; `wm: pointer routed`; `wm: click ok`; `wm: ls ok`; `task 2: data/`; `task 2: kbd`; `task 2: probe`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed` (close run); `compositor: window erased` (close run); `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui/session/vfs host tests pass; `zc-storage` zcfs read_dir tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -774,18 +774,32 @@ full browser. Note them as follow-ups, do not build them here.
         below the path come first (so `ls /` shows `data/`, `dev/`, `tmp/`
         without the initramfs knowing they exist), then the filesystem's own
         entries. `ramfs`, `tmpfs`, and `devfs` enumerate; zcfs reports
-        `NotSupported` until its IPC protocol grows a listing request, so
-        `ls /data` says `ls: cannot list` rather than pretending to be empty.
-        `ls` is in the shared terminal with the lister injected like the file
-        reader, so the window client walks through the syscall while the
-        kernel's verifier walks its own mount table; the script now ends with
-        `ls`, `wm: content ok` compares the two listings pixel for pixel, and
-        the kernel fails with `window script listed nothing` if its walk was
-        empty. The client logs `client: ls ok` and the kernel `wm: ls ok`; the
-        shell's `ls` and `ls /dev` are grepped from the boot transcript. The
-        window-up checksum changes to `0xd616ad79aaefb099`; the close run keeps
+        `NotSupported` at this step (F8h-0b adds it). `ls` is in the shared
+        terminal with the lister injected like the file reader, so the window
+        client walks through the syscall while the kernel's verifier walks its
+        own mount table; the script now ends with `ls`, `wm: content ok`
+        compares the two listings pixel for pixel, and the kernel fails with
+        `window script listed nothing` if its walk was empty. The client logs
+        `client: ls ok` and the kernel `wm: ls ok`; the shell's `ls` and
+        `ls /dev` are grepped from the boot transcript. The window-up checksum
+        changes to `0xd616ad79aaefb099`; the close run keeps
         `0x6d66e82d0f2d6fb8`. See
         [`adr/0036`](adr/0036-a-directory-can-be-listed.md).
+      - [x] F8h-0b: a filesystem served over IPC can list. `FS_OP_LIST` (10)
+        carries the directory in the node field and the index in the offset
+        field; the reply payload is one `DirEntry`, or empty at the end, so the
+        exchange protocol carries the same `Option` the VFS trait uses. zcfs
+        walks its replayed table in creation/replay order, and the block domain
+        serves the record like `STAT`. The listing also exposed a proxy bug:
+        one `read_dir` syscall stats the directory and then lists it, two
+        data-carrying calls, and the replay log kept one payload per syscall
+        and refused the second. `TaskLog` now stores a payload per call, and
+        `MAX_TASKS` is `service::TASK_COUNT` so task 8 no longer shares the
+        supervisor's log. `ls /data` runs after `persist` remounted the volume,
+        so it lists from the replayed table; CI greps `task 2: probe`. Both
+        frame checksums are unchanged because the listing is in the shell, not
+        the window. See
+        [`adr/0037`](adr/0037-a-served-filesystem-can-list.md).
       - [ ] F8h-1: the first app, and the multi-window focus it needs. The
         kernel and compositor still assume one window client (task 8) and one
         task button, so a file manager cannot coexist with the terminal until

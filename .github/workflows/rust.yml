@@ -209,6 +209,9 @@ jobs:
         # and a substring match would let a broken /dev listing pass. The `.`
         # consumes the serial log's trailing carriage return.
         grep -qE "task 2: kbd.$" build/boot.log
+        # zcfs lists too (F8h-0b): the shell's `ls /data` runs after `persist`
+        # remounts the volume, so the entry comes from the replayed table.
+        grep -q "task 2: probe" build/boot.log
         grep -q "task 8: client: ls ok" build/boot.log
         grep -q "wm: ls ok" build/boot.log
         # The pointer is not just drawn, it is driven: the scripted mouse session

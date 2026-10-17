@@ -65,6 +65,12 @@ pub const FS_OP_MOUNT: u32 = 7;
 pub const FS_OP_UNMOUNT: u32 = 8;
 /// Request opcode: flush and stop serving; the domain then exits.
 pub const FS_OP_STOP: u32 = 9;
+/// Request opcode: return one directory entry by index.
+///
+/// The node field names the directory and the offset field carries the entry
+/// index. The reply payload is one [`crate::DirEntry`] record, or empty at the
+/// end of the listing — the same `Option` shape `FileSystem::read_dir` uses.
+pub const FS_OP_LIST: u32 = 10;
 
 /// Reply status: the operation succeeded.
 pub const FS_STATUS_OK: u32 = 0;

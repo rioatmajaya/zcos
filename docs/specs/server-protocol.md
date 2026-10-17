@@ -101,10 +101,17 @@ copying through four-word messages. All fields are little-endian.
 | 2 | `FS_OP_STAT` | 7 | `FS_OP_MOUNT` |
 | 3 | `FS_OP_READ` | 8 | `FS_OP_UNMOUNT` |
 | 4 | `FS_OP_WRITE` | 9 | `FS_OP_STOP` |
-| 5 | `FS_OP_CREATE` | | |
+| 5 | `FS_OP_CREATE` | 10 | `FS_OP_LIST` |
 
 `FS_OP_STOP` is sent by the shell directly on `IPC_FS`; the domain flushes and
 exits **without replying**.
+
+`FS_OP_LIST` carries the directory in `NODE` and the entry index in `OFFSET`.
+The reply payload is one `zc_abi::DirEntry` (264 bytes: kind, name length, and
+a 256-byte name), or empty when the index is past the last child. The kernel
+proxy maps the empty reply to `Ok(None)`, so the exchange carries the same
+`Option` shape `FileSystem::read_dir` uses. Entries come back in the
+filesystem's table order, which for zcfs is creation and replay order.
 
 ### Reply statuses
 
