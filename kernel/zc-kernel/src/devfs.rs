@@ -131,6 +131,26 @@ impl FileSystem for DevFs {
         Self::service(node).ok_or(VfsError::NotFound)?;
         Ok(0)
     }
+
+    fn read_dir(
+        &self,
+        dir: NodeId,
+        index: usize,
+        out: &mut [u8],
+    ) -> Result<Option<()>, VfsError> {
+        if dir != ROOT {
+            return Err(VfsError::NotADirectory);
+        }
+        let Some(service) = SERVICES.get(index) else {
+            return Ok(None);
+        };
+        let mut entry = zc_abi::DirEntry::new(KIND_CHR);
+        entry
+            .set_name(service.name.as_bytes())
+            .ok_or(VfsError::BadBuffer)?;
+        entry.write_into(out).ok_or(VfsError::BadBuffer)?;
+        Ok(Some(()))
+    }
 }
 
 #[cfg(test)]
@@ -221,5 +241,22 @@ mod tests {
         assert_eq!(SERVICES[0].id, BLK_SERVICE);
         // The keyboard domain publishes a node too, so `cat /dev/kbd` opens.
         assert_eq!(fs.lookup(ROOT, b"kbd"), Ok(2));
+    }
+
+    #[test]
+    fn read_dir_lists_the_service_table() {
+        let fs = DevFs::new();
+        let mut out = [0u8; zc_abi::DIRENT_LEN];
+        for (index, service) in SERVICES.iter().enumerate() {
+            assert_eq!(fs.read_dir(ROOT, index, &mut out), Ok(Some(())));
+            let entry = zc_abi::DirEntry::read_from(&out).expect("entry");
+            assert_eq!(entry.name(), service.name.as_bytes());
+            assert_eq!(entry.kind, KIND_CHR);
+        }
+        assert_eq!(fs.read_dir(ROOT, SERVICES.len(), &mut out), Ok(None));
+        assert_eq!(
+            fs.read_dir(1, 0, &mut out),
+            Err(VfsError::NotADirectory)
+        );
     }
 }

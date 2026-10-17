@@ -86,9 +86,10 @@ const LINE_H: u32 = GLYPH_H + 2;
 /// and `SYS_WINDOW_READ`) and replays them itself, so the client and the
 /// verifier derive the same final screen from one script. `cat` reads a real
 /// initramfs file through the VFS — the client through a syscall, the verifier
-/// through its own mount table — so the scripted screen proves the filesystem
-/// path end to end.
-pub const SCRIPT: &[u8] = b"help\ncat hello.txt\n";
+/// through its own mount table — and `ls` walks the same directory through
+/// `SYS_READDIR` on one side and the mount table on the other, so the scripted
+/// screen proves the filesystem path end to end.
+pub const SCRIPT: &[u8] = b"help\ncat hello.txt\nls\n";
 
 /// A command line the user submitted, copied out of the terminal.
 ///
@@ -384,6 +385,29 @@ pub const INITIAL: Term = Term::new();
 /// Longest file `cat` reads through the injected reader, in bytes.
 const CAT_CAP: usize = 128;
 
+/// Most entries `ls` prints before giving up.
+///
+/// The cap exists so a lister that never reports the end cannot hang the
+/// terminal; it is far above any directory this system can hold today.
+const LS_CAP: usize = 64;
+
+/// One step of a directory listing, as returned by the lister `ls` is given.
+///
+/// The terminal does not know how directories are read — the client answers
+/// through a syscall and the kernel's verifier through its mount table — so the
+/// two sides share only this three-way answer. Keeping "end" and "cannot list"
+/// apart matters: an empty directory and a permission failure must not print
+/// the same thing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Listing {
+    /// The next entry.
+    Entry(crate::DirEntry),
+    /// The index is past the last entry.
+    End,
+    /// The directory could not be read.
+    Error,
+}
+
 /// Runs one submitted command line, appending its output and a fresh prompt.
 ///
 /// The command set is small and, apart from `cat`, side-effect free: `help`
@@ -391,25 +415,74 @@ const CAT_CAP: usize = 128;
 /// supplies. The window client passes a syscall-backed reader and the kernel's
 /// frame verifier passes a VFS-backed one, so both derive the same screen from
 /// one script — the proof that the terminal's commands reach the filesystem.
+///
+/// This form cannot list a directory; [`run_command_with`] is the one that can.
+/// It exists so a caller that only needs `cat` does not have to invent a lister
+/// that will never run.
 pub fn run_command(
     term: &mut Term,
     line: &[u8],
+    read_file: impl FnMut(&[u8], &mut [u8]) -> Option<usize>,
+) {
+    run_command_with(term, line, read_file, |_, _| Listing::Error);
+}
+
+/// [`run_command`] with a directory lister, so `ls` works.
+///
+/// The lister is asked for entry `index` of `path` and answers with
+/// [`Listing`]. Both the window client and the kernel's verifier pass one, so
+/// the scripted `ls` is derived twice from two independent filesystem paths
+/// and the window content check proves they agree.
+pub fn run_command_with(
+    term: &mut Term,
+    line: &[u8],
     mut read_file: impl FnMut(&[u8], &mut [u8]) -> Option<usize>,
+    mut list_dir: impl FnMut(&[u8], usize) -> Listing,
 ) {
     let (cmd, rest) = split_first_word(line);
     if cmd.is_empty() {
         // A bare Enter just prints a new prompt.
     } else if cmd == b"help" {
-        term.push_line(b"Commands: help echo cat stat");
+        term.push_line(b"Commands: help echo cat ls stat");
         term.push_line(b"write tmp persist chmod mount umount exit");
     } else if cmd == b"echo" {
         term.push_line(rest);
     } else if cmd == b"cat" {
         cat(term, rest, &mut read_file);
+    } else if cmd == b"ls" {
+        ls(term, rest, &mut list_dir);
     } else {
         term.push_line(b"unknown command");
     }
     term.push_line(PROMPT_TEXT);
+}
+
+/// Appends one line per entry of `path`, marking directories with a slash.
+fn ls(term: &mut Term, path: &[u8], list_dir: &mut impl FnMut(&[u8], usize) -> Listing) {
+    let path: &[u8] = if path.is_empty() { b"/" } else { path };
+    let mut line = [0u8; crate::DIRENT_NAME_MAX + 1];
+    let mut index = 0;
+    while index < LS_CAP {
+        match list_dir(path, index) {
+            Listing::Entry(entry) => {
+                let name = entry.name();
+                line[..name.len()].copy_from_slice(name);
+                let mut len = name.len();
+                if entry.kind == crate::KIND_DIR {
+                    line[len] = b'/';
+                    len += 1;
+                }
+                term.push_line(&line[..len]);
+                index += 1;
+            }
+            Listing::End => return,
+            Listing::Error => {
+                term.push_line(b"ls: cannot list");
+                return;
+            }
+        }
+    }
+    term.push_line(b"ls: too many entries");
 }
 
 /// Reads `path` through `read_file` and appends its newline-separated lines.
@@ -630,7 +703,7 @@ mod tests {
         let term = run(b"help\n");
         assert_eq!(term.rows(), 4);
         assert_eq!(term.line(0), b"zc> help");
-        assert_eq!(term.line(1), b"Commands: help echo cat stat");
+        assert_eq!(term.line(1), b"Commands: help echo cat ls stat");
         assert_eq!(term.line(2), b"write tmp persist chmod mount umount exit");
         assert_eq!(term.line(3), b"zc> ");
     }
@@ -664,6 +737,98 @@ mod tests {
         assert_eq!(term.line(1), b"unknown command");
     }
 
+    /// Builds the `Listing` a lister would return for one named entry.
+    fn listed(kind: u32, name: &[u8]) -> Listing {
+        let mut entry = crate::DirEntry::new(kind);
+        entry.set_name(name).expect("name fits");
+        Listing::Entry(entry)
+    }
+
+    #[test]
+    fn ls_prints_entries_and_marks_directories() {
+        let mut term = Term::new();
+        for &key in b"ls\n" {
+            if let Some(line) = term.push_key(key) {
+                run_command_with(
+                    &mut term,
+                    line.as_bytes(),
+                    |_, _| None,
+                    |path, index| {
+                        assert_eq!(path, b"/");
+                        match index {
+                            0 => listed(crate::KIND_FILE, b"hello.txt"),
+                            1 => listed(crate::KIND_DIR, b"tmp"),
+                            _ => Listing::End,
+                        }
+                    },
+                );
+            }
+        }
+        assert_eq!(term.line(0), b"zc> ls");
+        assert_eq!(term.line(1), b"hello.txt");
+        assert_eq!(term.line(2), b"tmp/");
+        assert_eq!(term.line(3), b"zc> ");
+    }
+
+    #[test]
+    fn ls_passes_its_argument_to_the_lister() {
+        let mut term = Term::new();
+        let mut asked = 0;
+        for &key in b"ls /dev\n" {
+            if let Some(line) = term.push_key(key) {
+                run_command_with(
+                    &mut term,
+                    line.as_bytes(),
+                    |_, _| None,
+                    |path, _| {
+                        assert_eq!(path, b"/dev");
+                        asked += 1;
+                        Listing::End
+                    },
+                );
+            }
+        }
+        assert_eq!(asked, 1);
+        // An empty directory prints nothing, exactly like `ls`.
+        assert_eq!(term.line(1), b"zc> ");
+    }
+
+    #[test]
+    fn ls_reports_a_directory_it_cannot_read() {
+        let mut term = Term::new();
+        for &key in b"ls /data\n" {
+            if let Some(line) = term.push_key(key) {
+                run_command_with(&mut term, line.as_bytes(), |_, _| None, |_, _| {
+                    Listing::Error
+                });
+            }
+        }
+        assert_eq!(term.line(1), b"ls: cannot list");
+    }
+
+    #[test]
+    fn ls_without_a_lister_says_so() {
+        // The plain `run_command` is for callers that cannot list. It must not
+        // pretend the directory is empty.
+        let term = run(b"ls\n");
+        assert_eq!(term.line(1), b"ls: cannot list");
+    }
+
+    #[test]
+    fn ls_stops_at_its_cap() {
+        let mut term = Term::new();
+        for &key in b"ls\n" {
+            if let Some(line) = term.push_key(key) {
+                run_command_with(&mut term, line.as_bytes(), |_, _| None, |_, _| {
+                    listed(crate::KIND_FILE, b"x")
+                });
+            }
+        }
+        // The cap message is pushed before the fresh prompt.
+        assert_eq!(term.line(8), b"ls: too many entries");
+        assert_eq!(term.line(9), b"zc> ");
+    }
+
     #[test]
     fn cat_reads_a_file_through_the_supplied_reader() {
         let mut term = Term::new();
@@ -695,7 +860,11 @@ mod tests {
         });
         assert_eq!(term.line(3), b"zc> cat hello.txt");
         assert_eq!(term.line(4), b"hello from the ZC OS initramfs");
-        assert_eq!(term.line(5), b"zc> ");
+        // The script continues with `ls`; this feeder has no lister, so the
+        // wrapper reports that instead of pretending the directory is empty.
+        assert_eq!(term.line(5), b"zc> ls");
+        assert_eq!(term.line(6), b"ls: cannot list");
+        assert_eq!(term.line(7), b"zc> ");
     }
 
     #[test]

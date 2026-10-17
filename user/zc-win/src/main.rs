@@ -13,24 +13,30 @@
 //! The screen is dynamic, but not trusted: while the script runs, the kernel
 //! replays the same script through the same shared state machine to recompute
 //! the window pixels, so a client that paints the wrong thing fails the frame
-//! checksum. Commands run through [`zc_abi::terminal::run_command`]; this
-//! client supplies a syscall-backed reader, so `cat` reads a real file through
+//! checksum. Commands run through [`zc_abi::terminal::run_command_with`]; this
+//! client supplies a syscall-backed reader and lister, so `cat` and `ls` reach
 //! the F7 VFS.
 
 #![no_std]
 #![no_main]
 #![allow(unsafe_code)]
 
-use zc_abi::terminal::{Term, run_command};
+use zc_abi::terminal::{Listing, Term, run_command_with};
 use zc_abi::{
-    BUTTON_LEFT, Event, FONT_LEN, FONT_PATH, Font, IPC_WM, IPC_WM_REPLY, PixelFormat, SurfaceInfo,
-    WM_ACK, WM_DONE,
+    BUTTON_LEFT, DIRENT_LEN, DirEntry, Event, FONT_LEN, FONT_PATH, Font, IPC_WM, IPC_WM_REPLY,
+    PixelFormat, READDIR_END, READDIR_ENTRY, SurfaceInfo, WM_ACK, WM_DONE,
 };
 use zc_ui::{Window, WindowEvent};
-use zc_user::{close, log, open, read, recv_from, send_to, surface_map, task_exit};
+use zc_user::{close, log, open, read, readdir, recv_from, send_to, surface_map, task_exit};
 
 /// Whether the client has logged its first successful VFS read.
 static mut VFS_LOGGED: bool = false;
+
+/// Whether the client has logged its first successful directory entry.
+///
+/// One marker per boot, like the read marker: it says `ls` reached the VFS and
+/// got a real entry, not that the terminal merely printed a prompt.
+static mut LS_LOGGED: bool = false;
 
 /// Whether the client has logged its first successful button click.
 static mut CLICK_LOGGED: bool = false;
@@ -128,7 +134,7 @@ pub unsafe extern "C" fn _start() -> ! {
             match event {
                 WindowEvent::Key(key) => {
                     if let Some(line) = terminal.push_key(key) {
-                        run_command(&mut terminal, line.as_bytes(), read_file);
+                        run_command_with(&mut terminal, line.as_bytes(), read_file, list_dir);
                     }
                     paint(
                         &terminal,
@@ -211,7 +217,7 @@ fn log_click_once() {
 /// Reads `path` through the VFS syscalls, for the terminal's `cat`.
 ///
 /// The kernel's frame verifier injects its own VFS-backed reader into the same
-/// `run_command`, so a read that disagrees with the kernel's fails the window
+/// command runner, so a read that disagrees with the kernel's fails the window
 /// content check.
 fn read_file(path: &[u8], out: &mut [u8]) -> Option<usize> {
     let path = core::str::from_utf8(path).ok()?;
@@ -232,6 +238,34 @@ fn read_file(path: &[u8], out: &mut [u8]) -> Option<usize> {
         }
     }
     Some(got as usize)
+}
+
+/// Reads one directory entry through the VFS syscalls, for the terminal's `ls`.
+///
+/// The kernel's verifier walks its own mount table for the same script, so a
+/// listing that disagrees fails the window content check. A failed syscall and
+/// a malformed record both become [`Listing::Error`], which prints one line
+/// rather than silently looking like an empty directory.
+fn list_dir(path: &[u8], index: usize) -> Listing {
+    let path = core::str::from_utf8(path).unwrap_or("/");
+    let mut out = [0u8; DIRENT_LEN];
+    match readdir(path, index as u64, &mut out) {
+        READDIR_ENTRY => match DirEntry::read_from(&out) {
+            Some(entry) => {
+                // SAFETY: owned here; logs once, on the first listed entry.
+                unsafe {
+                    if !core::ptr::addr_of!(LS_LOGGED).read() {
+                        core::ptr::addr_of_mut!(LS_LOGGED).write(true);
+                        log("client: ls ok\n");
+                    }
+                }
+                Listing::Entry(entry)
+            }
+            None => Listing::Error,
+        },
+        READDIR_END => Listing::End,
+        _ => Listing::Error,
+    }
 }
 
 /// Fills the window surface with the terminal's rendered screen.

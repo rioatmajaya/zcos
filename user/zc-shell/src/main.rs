@@ -1,9 +1,9 @@
 //! Shell task: an interactive command line over the serial port.
 //!
 //! Reads keystrokes with blocking serial reads, edits a single line with
-//! backspace support, and runs `help`, `echo`, `cat`, `stat`, `write`, `tmp`,
-//! `persist`, `chmod`, `mount`, `umount`, and `exit`. Output goes through the
-//! log syscall, so the transcript appears in the kernel serial log.
+//! backspace support, and runs `help`, `echo`, `cat`, `ls`, `stat`, `write`,
+//! `tmp`, `persist`, `chmod`, `mount`, `umount`, and `exit`. Output goes through
+//! the log syscall, so the transcript appears in the kernel serial log.
 //!
 //! `persist` is the durability proof: it writes the zcfs volume through the
 //! VFS, unmounts and remounts it, and reads its own bytes back. The remount
@@ -21,8 +21,9 @@
 #![allow(unsafe_code)]
 
 use zc_user::{
-    FS_ID_ZCFS, FS_OP_STOP, IPC_FS, KIND_CHR, KIND_DIR, Stat, chmod, close, create, log, mount,
-    open, poweroff, read, send_to, serial_read, stat, task_exit, umount, write,
+    DIRENT_LEN, DirEntry, FS_ID_ZCFS, FS_OP_STOP, IPC_FS, KIND_CHR, KIND_DIR, READDIR_END,
+    READDIR_ENTRY, Stat, chmod, close, create, log, mount, open, poweroff, read, readdir, send_to,
+    serial_read, stat, task_exit, umount, write,
 };
 
 /// Contents `persist` writes and expects to read back.
@@ -213,7 +214,7 @@ fn run(line: &[u8]) -> bool {
     }
     match argv[0] {
         b"help" => {
-            log("Commands: help echo cat stat write tmp persist chmod mount umount poweroff exit\n");
+            log("Commands: help echo cat ls stat write tmp persist chmod mount umount poweroff exit\n");
         }
         b"echo" => {
             for index in 1..count {
@@ -249,6 +250,43 @@ fn run(line: &[u8]) -> bool {
             }
             close(fd);
             log("\n");
+        }
+        b"ls" => {
+            let path = if count < 2 {
+                "/"
+            } else {
+                core::str::from_utf8(argv[1]).unwrap_or("/")
+            };
+            let mut out = [0u8; DIRENT_LEN];
+            let mut index = 0u64;
+            loop {
+                match readdir(path, index, &mut out) {
+                    READDIR_ENTRY => {
+                        let Some(entry) = DirEntry::read_from(&out) else {
+                            log("ls: bad entry\n");
+                            break;
+                        };
+                        out_bytes(entry.name());
+                        if entry.kind == KIND_DIR {
+                            out_bytes(b"/");
+                        }
+                        out_bytes(b"\n");
+                        out_flush();
+                        index += 1;
+                        // Bounded like the window's `ls`: a kernel that never
+                        // reports the end must not hang the shell.
+                        if index >= 64 {
+                            log("ls: too many entries\n");
+                            break;
+                        }
+                    }
+                    READDIR_END => break,
+                    _ => {
+                        log("ls: cannot list\n");
+                        break;
+                    }
+                }
+            }
         }
         b"stat" => {
             if count < 2 {

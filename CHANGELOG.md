@@ -72,7 +72,11 @@ inside its own window without touching the compositor's pointer. See
 first widget on that stream — a clickable `Clicks: N` button — and makes the
 scripted click a proof: the kernel replays the pointer script into the same
 terminal state and fails if nothing was clicked. See
-[ADR 0035](docs/adr/0035-a-scripted-click-is-a-proof.md).
+[ADR 0035](docs/adr/0035-a-scripted-click-is-a-proof.md). F8h-0 makes the
+filesystem enumerable — `SYS_READDIR` returns one fixed-size `DirEntry` per
+index, the mount table lists its own mount points, and `ls` is shared by the
+window client and the kernel's verifier. See
+[ADR 0036](docs/adr/0036-a-directory-can-be-listed.md).
 
 ### Fixed
 
@@ -172,6 +176,26 @@ terminal state and fails if nothing was clicked. See
 
 ### Added
 
+- **A directory can be listed, and `ls` proves it twice** (F8h-0): `SYS_READDIR`
+  (36) writes one fixed-size `DirEntry` — kind, name length, and a 256-byte name
+  — per index, so a caller walks a directory with no allocation and no second
+  name format. Names are never truncated, because two entries that truncate to
+  the same bytes would be indistinguishable. Listing requires search permission
+  on the directory; the mount table answers for its own mount points first (so
+  `ls /` shows `data/`, `dev/`, and `tmp/` even though the initramfs archive
+  contains none of them) and the filesystem answers the remainder. `ramfs`,
+  `tmpfs`, and `devfs` enumerate; zcfs reports `NotSupported` until its IPC
+  protocol grows a listing request, so `ls /data` says `ls: cannot list` rather
+  than looking empty. `ls` lives in the shared terminal with the lister injected
+  like the file reader: the window client walks through the syscall while the
+  kernel's verifier walks its own mount table, the script now ends with `ls`, and
+  `wm: content ok` compares the two listings pixel for pixel. The verifier fails
+  with `window script listed nothing` if its walk was empty, so two
+  `ls: cannot list` screens cannot agree their way to a pass. The client logs
+  `client: ls ok` and the kernel `wm: ls ok`; the shell's `ls` and `ls /dev` are
+  grepped from the boot transcript. The window-up checksum changes to
+  `0xd616ad79aaefb099`; the close run keeps `0x6d66e82d0f2d6fb8`. See
+  [ADR 0036](docs/adr/0036-a-directory-can-be-listed.md).
 - **A scripted click is proven, not demonstrated** (F8e-4): the window now has a
   real widget — a `Clicks: N` button in the free strip below the terminal's ten
   text rows. Its rectangle and state live in `zc_abi::terminal`, so the client
@@ -184,7 +208,8 @@ terminal state and fails if nothing was clicked. See
   a routing regression cannot silently expect `Clicks: 0`. The client logs
   `client: click ok`, the kernel logs `wm: click ok`, and the content check
   compares the clicked label pixel for pixel. The window-up checksum changes to
-  `0x669550faab101ec6` because the button is painted in every window frame; the
+  `0x669550faab101ec6` because the button is painted in every window frame (the
+  later F8h-0 listing moves it to `0xd616ad79aaefb099`); the
   close run keeps `0x6d66e82d0f2d6fb8` because it erases the window. See
   [ADR 0035](docs/adr/0035-a-scripted-click-is-a-proof.md).
 - **A window has its own pointer stream, so widgets can be clicked** (F8e-3):

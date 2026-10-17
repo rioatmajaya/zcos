@@ -166,7 +166,13 @@ see [ADR 0034](docs/adr/0034-a-window-has-its-own-pointer-stream.md). F8e-4 puts
 the first widget on that stream: a clickable `Clicks: N` button, with the
 scripted click replayed by the kernel's content verifier, which fails if the
 script clicked nothing — see
-[ADR 0035](docs/adr/0035-a-scripted-click-is-a-proof.md).
+[ADR 0035](docs/adr/0035-a-scripted-click-is-a-proof.md). F8h-0 makes the
+filesystem enumerable: `SYS_READDIR` (36) returns one fixed-size `DirEntry` per
+index, the mount table lists its own mount points first, and `ls` lives in the
+shared terminal with the lister injected — the window client reads through the
+syscall while the kernel's verifier reads its own mount table, so the scripted
+listing is compared pixel for pixel — see
+[ADR 0036](docs/adr/0036-a-directory-can-be-listed.md).
 
 ## Development
 
@@ -198,8 +204,9 @@ the wrong kernel in the one you boot.
 looks like it is acting on its own: the window drags itself to the left edge,
 minimizes, and is restored from the taskbar. It ends with the window **on screen**
 and every task still running, so afterwards you can move the pointer, type into the
-window, and use the serial shell on the QEMU terminal (`help`, `cat`, `stat`,
-`write`, `tmp`, `chmod`, `poweroff`, `exit` — listed in `tools/boot-script.txt`).
+window, and use the serial shell on the QEMU terminal (`help`, `cat`, `ls`,
+`stat`, `write`, `tmp`, `chmod`, `poweroff`, `exit` — listed in
+`tools/boot-script.txt`).
 
 A normal build never arms the task watchdog, so the machine stays up
 indefinitely; only the `--test` builds arm it, because a wedged task must fail CI

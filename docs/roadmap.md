@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 7 grants`, `task 6: devmgr: blk published`, `dma: window coherent ok` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–7, F8e-1–4, live-input check, F8g-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: font vfs ok`; `compositor: font vfs ok`; `font: vfs ok`; `client: window painted`; `client: vfs ok`; `client: pointer ok`; `client: click ok`; `wm: window mapped`; `wm: pointer routed`; `wm: click ok`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed` (close run); `compositor: window erased` (close run); `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui/session host tests pass |
+| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–7, F8e-1–4, F8h-0, live-input check, F8g-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: font vfs ok`; `compositor: font vfs ok`; `font: vfs ok`; `client: window painted`; `client: vfs ok`; `client: pointer ok`; `client: click ok`; `client: ls ok`; `wm: window mapped`; `wm: pointer routed`; `wm: click ok`; `wm: ls ok`; `task 2: data/`; `task 2: kbd`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed` (close run); `compositor: window erased` (close run); `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui/session/vfs host tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -720,7 +720,8 @@ full browser. Note them as follow-ups, do not build them here.
         verifier fails if the script clicked nothing, so a routing regression
         cannot silently expect `Clicks: 0`. The client logs `client: click ok`
         and the kernel `wm: click ok`; the window-up checksum changes to
-        `0x669550faab101ec6` because the button is painted, while the close run
+        `0x669550faab101ec6` because the button is painted (F8h-0's scripted
+        listing later moves it to `0xd616ad79aaefb099`), while the close run
         keeps `0x6d66e82d0f2d6fb8` because it erases the window. See
         [`adr/0035`](adr/0035-a-scripted-click-is-a-proof.md).
       - [ ] *(follow-up)* the rest of the widget set and a layout pass. One
@@ -764,6 +765,31 @@ full browser. Note them as follow-ups, do not build them here.
 - [ ] F8g-2+: more assets through the same pipeline (icons, themes), and a real
       font format — PSF/Truetype shaping was deferred to F8e/F8g back in F8c.
 - [ ] F8h: minimum daily apps — file manager, settings, clock/calendar.
+      - [x] F8h-0: a directory can be listed. `SYS_READDIR` (36) writes one
+        fixed-size `DirEntry` per index, so a caller walks a directory without
+        an allocation or a second path format. The record is 264 bytes — kind,
+        name length, and a 256-byte name — encoded like `Stat`, and names are
+        never truncated, so two entries cannot collapse into one. Listing
+        requires search permission on the directory; mount points directly
+        below the path come first (so `ls /` shows `data/`, `dev/`, `tmp/`
+        without the initramfs knowing they exist), then the filesystem's own
+        entries. `ramfs`, `tmpfs`, and `devfs` enumerate; zcfs reports
+        `NotSupported` until its IPC protocol grows a listing request, so
+        `ls /data` says `ls: cannot list` rather than pretending to be empty.
+        `ls` is in the shared terminal with the lister injected like the file
+        reader, so the window client walks through the syscall while the
+        kernel's verifier walks its own mount table; the script now ends with
+        `ls`, `wm: content ok` compares the two listings pixel for pixel, and
+        the kernel fails with `window script listed nothing` if its walk was
+        empty. The client logs `client: ls ok` and the kernel `wm: ls ok`; the
+        shell's `ls` and `ls /dev` are grepped from the boot transcript. The
+        window-up checksum changes to `0xd616ad79aaefb099`; the close run keeps
+        `0x6d66e82d0f2d6fb8`. See
+        [`adr/0036`](adr/0036-a-directory-can-be-listed.md).
+      - [ ] F8h-1: the first app, and the multi-window focus it needs. The
+        kernel and compositor still assume one window client (task 8) and one
+        task button, so a file manager cannot coexist with the terminal until
+        that assumption is replaced.
 - [ ] F8i: audio stack (virtio-snd first, then HD Audio) after the desktop is
       stable.
 - [ ] F8j: USB stack (xHCI) for keyboard, mouse, and mass storage.
@@ -886,7 +912,18 @@ full browser. Note them as follow-ups, do not build them here.
   nothing. `zc-abi` host tests assert the scripted click lands inside
   `terminal::button_rect`, that a placement gesture never reaches the body, and
   that the rendered label changes after the click. The window-up checksum is
-  `0x669550faab101ec6`; the close run keeps `0x6d66e82d0f2d6fb8`.
+  `0xd616ad79aaefb099`; the close run keeps `0x6d66e82d0f2d6fb8`.
+- A directory can be listed (F8h-0): the shell's `ls` and `ls /dev` print the
+  initramfs entries plus `data/`, `dev/`, and `tmp/` (mount points the archive
+  does not contain), the client logs `task 8: client: ls ok`, and the kernel
+  logs `wm: ls ok` after its own walk through `MountTable::read_dir`. The
+  scripted `ls` makes `wm: content ok` compare two independently produced
+  listings pixel for pixel, and the verifier fails with
+  `window script listed nothing` if its walk was empty — otherwise two
+  `ls: cannot list` screens would agree. `zc-abi` host tests cover the
+  `DirEntry` wire format, `ramfs`/`tmpfs`/`devfs` enumeration, mount-point
+  ordering, and the search-permission check. See
+  [`adr/0036`](adr/0036-a-directory-can-be-listed.md).
 - Clean shutdown: `power: halt clean`.
 - Audio plays a known tone and the driver reports no XRUN under a stress
   buffer: `snd: playback ok`.

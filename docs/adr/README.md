@@ -42,6 +42,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0033](0033-device-interrupts-get-their-own-stack.md) | Device interrupts get their own stack | Accepted |
 | [0034](0034-a-window-has-its-own-pointer-stream.md) | A window has its own pointer stream | Accepted |
 | [0035](0035-a-scripted-click-is-a-proof.md) | A scripted click is a proof, not a demo | Accepted |
+| [0036](0036-a-directory-can-be-listed.md) | A directory can be listed, and `ls` proves it twice | Accepted |
 
 ## Adding a decision
 

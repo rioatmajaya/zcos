@@ -9,7 +9,7 @@
 
 use crate::cpio;
 use crate::vfs::{FileSystem, NodeId, VfsError};
-use zc_abi::{KIND_DIR, KIND_FILE, Stat};
+use zc_abi::{DirEntry, KIND_DIR, KIND_FILE, Stat};
 
 /// Node id of the root directory.
 pub const ROOT: NodeId = 0;
@@ -124,6 +124,41 @@ impl FileSystem for RamFs<'_> {
         out[..count].copy_from_slice(&data[start..start + count]);
         Ok(count)
     }
+
+    fn read_dir(
+        &self,
+        dir: NodeId,
+        index: usize,
+        out: &mut [u8],
+    ) -> Result<Option<()>, VfsError> {
+        // The archive is flat: the root is the only directory it can list.
+        if dir != ROOT {
+            return Err(VfsError::NotADirectory);
+        }
+        let archive = self.archive;
+        let mut found = None;
+        let mut at = 0;
+        cpio::walk(archive, |entry| {
+            if at == index {
+                found = Some(entry.name());
+                return false;
+            }
+            at += 1;
+            true
+        })
+        .map_err(|_| VfsError::Corrupt)?;
+        let Some(name) = found else {
+            return Ok(None);
+        };
+        // Every entry in the archive is a regular file; the loader does not
+        // pack directories, and a flat archive has no other kind to report.
+        let mut record = DirEntry::new(KIND_FILE);
+        record
+            .set_name(name.as_bytes())
+            .ok_or(VfsError::BadBuffer)?;
+        record.write_into(out).ok_or(VfsError::BadBuffer)?;
+        Ok(Some(()))
+    }
 }
 
 #[cfg(test)]
@@ -211,5 +246,32 @@ mod tests {
         assert_eq!(&buffer[..2], b"i\n");
         assert_eq!(fs.read(node, 99, &mut buffer), Ok(0));
         assert_eq!(fs.read(ROOT, 0, &mut buffer), Err(VfsError::NotADirectory));
+    }
+
+    #[test]
+    fn read_dir_walks_the_archive_in_order() {
+        let (raw, len) = archive();
+        let fs = RamFs::mount(&raw[..len]).expect("mount");
+        let mut out = [0u8; zc_abi::DIRENT_LEN];
+
+        assert_eq!(fs.read_dir(ROOT, 0, &mut out), Ok(Some(())));
+        let first = DirEntry::read_from(&out).expect("entry");
+        assert_eq!(first.name(), b"zc.manifest");
+        assert_eq!(first.kind, KIND_FILE);
+
+        assert_eq!(fs.read_dir(ROOT, 1, &mut out), Ok(Some(())));
+        let second = DirEntry::read_from(&out).expect("entry");
+        assert_eq!(second.name(), b"hello.txt");
+
+        // The trailer is not an entry, and past-the-end is not an error.
+        assert_eq!(fs.read_dir(ROOT, 2, &mut out), Ok(None));
+        // A file is not a directory, and the buffer must hold a full record.
+        let node = fs.lookup(ROOT, b"hello.txt").expect("hello");
+        assert_eq!(
+            fs.read_dir(node, 0, &mut out),
+            Err(VfsError::NotADirectory)
+        );
+        let mut short = [0u8; zc_abi::DIRENT_LEN - 1];
+        assert_eq!(fs.read_dir(ROOT, 0, &mut short), Err(VfsError::BadBuffer));
     }
 }

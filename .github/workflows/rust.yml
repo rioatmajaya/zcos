@@ -200,6 +200,17 @@ jobs:
         # the client's label rather than recomputing it.
         grep -q "task 8: client: click ok" build/boot.log
         grep -q "wm: click ok" build/boot.log
+        # A directory can be listed (F8h-0, ADR 0036). The shell's `ls` walks the
+        # root and /dev through SYS_READDIR; the window's scripted `ls` is the
+        # same command over the client's syscall and the kernel's mount table,
+        # and both ends must log an entry, not just agree on a failure.
+        grep -q "task 2: data/" build/boot.log
+        # `kbd` alone, not `kbd.elf`: the root listing also contains the ELF,
+        # and a substring match would let a broken /dev listing pass. The `.`
+        # consumes the serial log's trailing carriage return.
+        grep -qE "task 2: kbd.$" build/boot.log
+        grep -q "task 8: client: ls ok" build/boot.log
+        grep -q "wm: ls ok" build/boot.log
         # The pointer is not just drawn, it is driven: the scripted mouse session
         # presses the left button on the window's title bar, drags the window off
         # its scripted frame position, releases, clicks the minimize glyph, and
@@ -269,6 +280,10 @@ jobs:
         # before the window is erased.
         grep -q "task 8: client: click ok" build/boot-close.log
         grep -q "wm: click ok" build/boot-close.log
+        # The listing is in the shared prefix too, so the close run proves the
+        # window's `ls` reached the VFS before the window is erased.
+        grep -q "task 8: client: ls ok" build/boot-close.log
+        grep -q "wm: ls ok" build/boot-close.log
         # Same font pipeline as the window-up run: the close run drags,
         # minimizes, and restores before closing, so all three sides render.
         grep -q "task 8: client: font vfs ok" build/boot-close.log

@@ -19,7 +19,7 @@
 //! a later read or write is checked without another filesystem call.
 
 use crate::perms::{self, Access, Identity};
-use zc_abi::Stat;
+use zc_abi::{DirEntry, KIND_DIR, Stat};
 
 /// Longest path accepted, in bytes.
 pub const MAX_PATH: usize = 256;
@@ -97,6 +97,25 @@ pub trait FileSystem {
     ///
     /// Reading at or past the end returns `Ok(0)`, not an error.
     fn read(&self, node: NodeId, offset: u64, out: &mut [u8]) -> Result<usize, VfsError>;
+
+    /// Writes the `index`-th entry of directory `dir` into `out`.
+    ///
+    /// The record is a [`DirEntry`] encoded by [`DirEntry::write_into`], so the
+    /// caller's buffer must be at least [`zc_abi::DIRENT_LEN`] bytes. Returns
+    /// `Ok(None)` when `index` is past the last entry; the index is stable for
+    /// an unchanged filesystem, which is what lets a caller walk from zero.
+    ///
+    /// The default is a filesystem that cannot enumerate its children, such as
+    /// a read-only archive served over IPC. It fails rather than reporting an
+    /// empty directory, so a caller can tell "nothing here" from "cannot list".
+    fn read_dir(
+        &self,
+        _dir: NodeId,
+        _index: usize,
+        _out: &mut [u8],
+    ) -> Result<Option<()>, VfsError> {
+        Err(VfsError::NotSupported)
+    }
 
     /// Writes up to `data.len()` bytes at `offset`, returning the count.
     ///
@@ -248,6 +267,82 @@ impl MountTable {
         perms::check(stat.uid, stat.gid, stat.mode, owner, Access::Write)?;
         perms::check(stat.uid, stat.gid, stat.mode, owner, Access::Search)?;
         mount.fs.create(dir, name, mode, owner)
+    }
+
+    /// Reads the `index`-th entry of the directory `path` names.
+    ///
+    /// Mount points directly below `path` come first, then the filesystem's own
+    /// entries, so `ls /` shows `data`, `dev`, and `tmp` even though the
+    /// initramfs archive knows nothing about them. A mount-point name shadows a
+    /// same-named filesystem entry: resolving the path reaches the mount
+    /// either way, so listing it twice would be the only real error.
+    ///
+    /// Listing requires search permission on the directory itself, checked
+    /// before the filesystem is asked, exactly like `create`'s parent check.
+    /// Returns `Ok(None)` at the end of the listing.
+    pub fn read_dir(
+        &self,
+        path: &[u8],
+        index: usize,
+        out: &mut [u8],
+        owner: Identity,
+    ) -> Result<Option<()>, VfsError> {
+        let normalized = normalize_path(path)?;
+        let resolved = self.resolve(path)?;
+        let stat = resolved.fs.stat(resolved.node)?;
+        if stat.kind != KIND_DIR {
+            return Err(VfsError::NotADirectory);
+        }
+        perms::check(stat.uid, stat.gid, stat.mode, owner, Access::Search)?;
+
+        // A mount point is a directory entry the mount table owns, so it is
+        // answered here rather than by the filesystem underneath.
+        let mut mounts = 0;
+        while self.child_mount_name(normalized, mounts).is_some() {
+            mounts += 1;
+        }
+        if index < mounts {
+            let name = self
+                .child_mount_name(normalized, index)
+                .ok_or(VfsError::Corrupt)?;
+            let mut entry = DirEntry::new(KIND_DIR);
+            entry.set_name(name).ok_or(VfsError::BadBuffer)?;
+            entry.write_into(out).ok_or(VfsError::BadBuffer)?;
+            return Ok(Some(()));
+        }
+        resolved.fs.read_dir(resolved.node, index - mounts, out)
+    }
+
+    /// Returns the name of the `ordinal`-th mount point directly below
+    /// `parent`, where `parent` is a normalised path and the root is empty.
+    ///
+    /// Table order decides the listing order, so it is the order the mounts
+    /// were installed — deterministic for a boot and independent of the
+    /// filesystems.
+    fn child_mount_name(&self, parent: &[u8], ordinal: usize) -> Option<&'static [u8]> {
+        let mut seen = 0;
+        for mount in self.mounts.iter().flatten() {
+            let Ok(point) = normalize_path(mount.point) else {
+                continue;
+            };
+            // The root mount is the parent itself, never one of its children.
+            let Some(at) = point.iter().rposition(|&byte| byte == b'/') else {
+                if !point.is_empty() && parent.is_empty() {
+                    if seen == ordinal {
+                        return Some(point);
+                    }
+                    seen += 1;
+                }
+                continue;
+            };
+            if &point[..at] == parent {
+                if seen == ordinal {
+                    return Some(&point[at + 1..]);
+                }
+                seen += 1;
+            }
+        }
+        None
     }
 
     /// Replaces the permission bits of the node `path` names.
@@ -999,5 +1094,113 @@ mod tests {
         let stat = root.fs.stat(root.node).expect("stat");
         assert_eq!(stat.kind, KIND_DIR);
         assert_eq!(stat.size, 0);
+    }
+
+    /// A filesystem that lists two names, so the mount table's own entries can
+    /// be told apart from the filesystem's.
+    struct ListingFs;
+
+    static LISTING_FS: ListingFs = ListingFs;
+
+    impl FileSystem for ListingFs {
+        fn name(&self) -> &str {
+            "listing"
+        }
+
+        fn root(&self) -> NodeId {
+            0
+        }
+
+        fn lookup(&self, _dir: NodeId, _name: &[u8]) -> Result<NodeId, VfsError> {
+            Err(VfsError::NotFound)
+        }
+
+        fn stat(&self, node: NodeId) -> Result<Stat, VfsError> {
+            if node != 0 {
+                return Err(VfsError::NotFound);
+            }
+            Ok(Stat {
+                kind: KIND_DIR,
+                // Owner-only search: a stranger must be refused before the
+                // filesystem is asked, which is what the test below checks.
+                mode: 0o700,
+                size: 0,
+                node,
+                uid: 0,
+                gid: 0,
+            })
+        }
+
+        fn read(&self, _node: NodeId, _offset: u64, _out: &mut [u8]) -> Result<usize, VfsError> {
+            Err(VfsError::NotADirectory)
+        }
+
+        fn read_dir(
+            &self,
+            _dir: NodeId,
+            index: usize,
+            out: &mut [u8],
+        ) -> Result<Option<()>, VfsError> {
+            let name: &[u8] = match index {
+                0 => b"one",
+                1 => b"two",
+                _ => return Ok(None),
+            };
+            let mut entry = DirEntry::new(KIND_FILE);
+            entry.set_name(name).ok_or(VfsError::BadBuffer)?;
+            entry.write_into(out).ok_or(VfsError::BadBuffer)?;
+            Ok(Some(()))
+        }
+    }
+
+    #[test]
+    fn read_dir_lists_mount_points_before_filesystem_entries() {
+        let mut table = MountTable::new();
+        table.mount(b"/", &LISTING_FS).expect("root mount");
+        table.mount(b"/data", &DATA_FS).expect("data mount");
+        let dev: &'static crate::devfs::DevFs =
+            std::boxed::Box::leak(std::boxed::Box::new(crate::devfs::DevFs::new()));
+        table.mount(b"/dev", dev).expect("dev mount");
+
+        let mut out = [0u8; zc_abi::DIRENT_LEN];
+        // The mount table's own entries come first, in mount order; the
+        // filesystem's follow, and the root mount itself is not an entry.
+        let expected: [&[u8]; 4] = [b"data", b"dev", b"one", b"two"];
+        for (index, name) in expected.iter().enumerate() {
+            assert_eq!(
+                table.read_dir(b"/", index, &mut out, Identity::ROOT),
+                Ok(Some(())),
+                "entry {index}"
+            );
+            assert_eq!(
+                DirEntry::read_from(&out).expect("entry").name(),
+                *name,
+                "entry {index}"
+            );
+        }
+        assert_eq!(table.read_dir(b"/", 4, &mut out, Identity::ROOT), Ok(None));
+    }
+
+    #[test]
+    fn read_dir_checks_the_directory_permissions() {
+        let mut table = MountTable::new();
+        table.mount(b"/", &LISTING_FS).expect("root mount");
+        let mut out = [0u8; zc_abi::DIRENT_LEN];
+        // The root is 0755 owned by root: a stranger may not search it.
+        assert_eq!(
+            table.read_dir(b"/", 0, &mut out, Identity::new(7, 9)),
+            Err(VfsError::PermissionDenied)
+        );
+        // A file is not a directory, and a mount that cannot list says so
+        // rather than pretending to be empty.
+        table.mount(b"/data", &DATA_FS).expect("data mount");
+        assert_eq!(
+            table.read_dir(b"/data/a", 0, &mut out, Identity::ROOT),
+            Err(VfsError::NotADirectory)
+        );
+        assert_eq!(
+            table.read_dir(b"/data", 0, &mut out, Identity::ROOT),
+            Err(VfsError::NotSupported)
+        );
     }
 }

@@ -23,7 +23,7 @@ use core::cell::RefCell;
 
 use crate::perms::{self, Identity};
 use crate::vfs::{FileSystem, NodeId, VfsError};
-use zc_abi::{KIND_DIR, KIND_FILE, Stat};
+use zc_abi::{DirEntry, KIND_DIR, KIND_FILE, Stat};
 
 /// Node id of the root directory.
 pub const ROOT: NodeId = 0;
@@ -288,6 +288,37 @@ impl<const N: usize> FileSystem for TmpFs<N> {
         entry.mode = mode;
         Ok(())
     }
+
+    fn read_dir(
+        &self,
+        dir: NodeId,
+        index: usize,
+        out: &mut [u8],
+    ) -> Result<Option<()>, VfsError> {
+        let inner = self.inner.borrow();
+        // The root is the only directory this volume publishes; `create`
+        // refuses anything else, so there is no nested listing to walk.
+        if dir != ROOT {
+            return Err(VfsError::NotADirectory);
+        }
+        let mut seen = 0;
+        for slot in 1..inner.used {
+            let node = &inner.nodes[slot];
+            if node.parent != dir {
+                continue;
+            }
+            if seen == index {
+                let mut entry = DirEntry::new(node.kind);
+                entry
+                    .set_name(&node.name[..node.name_len as usize])
+                    .ok_or(VfsError::BadBuffer)?;
+                entry.write_into(out).ok_or(VfsError::BadBuffer)?;
+                return Ok(Some(()));
+            }
+            seen += 1;
+        }
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
@@ -470,5 +501,30 @@ mod tests {
         // An unprivileged task must be able to create in `/tmp`; the root's
         // mode is the only thing that lets it.
         assert_eq!(fs.stat(ROOT).expect("root").mode, 0o777);
+    }
+
+    #[test]
+    fn read_dir_lists_created_names_in_slot_order() {
+        let fs = fs();
+        let mut out = [0u8; zc_abi::DIRENT_LEN];
+        assert_eq!(fs.read_dir(ROOT, 0, &mut out), Ok(None));
+
+        fs.create(ROOT, b"scratch", 0o644, Identity::ROOT)
+            .expect("create");
+        fs.create(ROOT, b"second", 0o644, Identity::ROOT)
+            .expect("create");
+        assert_eq!(fs.read_dir(ROOT, 0, &mut out), Ok(Some(())));
+        assert_eq!(DirEntry::read_from(&out).expect("entry").name(), b"scratch");
+        assert_eq!(fs.read_dir(ROOT, 1, &mut out), Ok(Some(())));
+        let second = DirEntry::read_from(&out).expect("entry");
+        assert_eq!(second.name(), b"second");
+        assert_eq!(second.kind, KIND_FILE);
+        assert_eq!(fs.read_dir(ROOT, 2, &mut out), Ok(None));
+
+        let node = fs.create(ROOT, b"x", 0o644, Identity::ROOT).expect("create");
+        assert_eq!(
+            fs.read_dir(node, 0, &mut out),
+            Err(VfsError::NotADirectory)
+        );
     }
 }

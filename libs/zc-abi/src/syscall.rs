@@ -151,6 +151,25 @@ pub const SYS_POWEROFF: u64 = 34;
 /// consuming this stream cannot steal a report from the drag. Only the window
 /// client the compositor delegated a surface to may call it.
 pub const SYS_WINDOW_READ: u64 = 35;
+/// Reads one entry of the directory `path` names, by index.
+///
+/// Arguments: `path` pointer, `path` length, the entry index, and a writable
+/// buffer of exactly [`crate::DIRENT_LEN`] bytes. Returns
+/// [`READDIR_ENTRY`] when an entry was written, [`READDIR_END`] when `index` is
+/// past the last entry, and `u64::MAX` on error. Listing requires search
+/// permission on the directory; the index is stable for an unchanged
+/// filesystem, so a caller walks from zero until it sees the end.
+///
+/// Entries are the filesystem's own first, then the mount points directly
+/// below the directory, so `ls /` shows `data`, `dev`, and `tmp` without any
+/// filesystem having to know they exist.
+pub const SYS_READDIR: u64 = 36;
+
+/// Returned by `SYS_READDIR` when an entry was written into the buffer.
+pub const READDIR_ENTRY: u64 = 0;
+
+/// Returned by `SYS_READDIR` when the index is past the last entry.
+pub const READDIR_END: u64 = 1;
 
 /// Error codes returned by failed syscalls.
 ///
@@ -242,6 +261,9 @@ mod tests {
         assert_eq!(SYS_WINDOW_CLOSE, 33);
         assert_eq!(SYS_POWEROFF, 34);
         assert_eq!(SYS_WINDOW_READ, 35);
+        assert_eq!(SYS_READDIR, 36);
+        assert_eq!(READDIR_ENTRY, 0);
+        assert_eq!(READDIR_END, 1);
     }
 
     #[test]

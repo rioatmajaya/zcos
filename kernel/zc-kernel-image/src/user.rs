@@ -974,6 +974,43 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 }
             }
         }
+        Ok(Action::ReadDir) => {
+            let path = match validate_user_slice(tasks, regs.rdi, regs.rsi) {
+                Some(path) => path,
+                None => {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+            };
+            // The record has a fixed size, so the buffer length is implied.
+            let out = match validate_user_slice_mut(tasks, regs.r10, zc_abi::DIRENT_LEN as u64) {
+                Some(out) => out,
+                None => {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+            };
+            // SAFETY: as in `Open`.
+            let mounts = unsafe { &*core::ptr::addr_of!(MOUNTS) };
+            match mounts.read_dir(path, regs.rdx as usize, out, tasks.current_owner()) {
+                Ok(Some(())) => {
+                    regs.set_result(zc_abi::READDIR_ENTRY);
+                    0
+                }
+                Ok(None) => {
+                    regs.set_result(zc_abi::READDIR_END);
+                    0
+                }
+                Err(VfsError::WouldBlock) => {
+                    tasks.unblock_all();
+                    block_with_retry(tasks, regs, frame, 0)
+                }
+                Err(_) => {
+                    regs.set_result(u64::MAX);
+                    0
+                }
+            }
+        }
         Ok(Action::Read) => {
             let me = tasks.current();
             let fd = regs.rdi as u32;
@@ -2280,7 +2317,7 @@ fn verify_dma_window() {
 /// boot's scripted content is proven too (`wm: content ok`). A client that
 /// dropped a key or painted the wrong pixels fails here.
 fn snapshot_window_surface(surface: &zc_kernel::surface::Surface) {
-    use zc_abi::terminal::{SCRIPT, Term, run_command};
+    use zc_abi::terminal::{SCRIPT, Term, run_command_with};
     use zc_abi::{HASH_OFFSET, PixelFormat, hash_step};
 
     // SAFETY: published once during setup before any task ran.
@@ -2309,11 +2346,13 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface) {
     let font = verifier_font();
     // SAFETY: owned here; reset before the replay.
     unsafe { addr_of_mut!(WINDOW_VFS_READS).write(0) };
+    // SAFETY: as above.
+    unsafe { addr_of_mut!(WINDOW_LS_ENTRIES).write(0) };
     let mut terminal = Term::new();
     let mut key = 0;
     while key < SCRIPT.len() {
         if let Some(line) = terminal.push_key(SCRIPT[key]) {
-            run_command(&mut terminal, line.as_bytes(), kernel_read_file);
+            run_command_with(&mut terminal, line.as_bytes(), kernel_read_file, kernel_list_dir);
         }
         key += 1;
     }
@@ -2322,6 +2361,14 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface) {
         crate::fail("window script read no file");
     }
     crate::serial::write_str("wm: vfs content ok\n");
+    // The script's `ls` must have produced a real entry. Without this the
+    // client and the verifier could both print "cannot list" and still agree,
+    // turning the listing proof into a proof that two failures match.
+    // SAFETY: `kernel_list_dir` owns the counter and ran above.
+    if unsafe { addr_of!(WINDOW_LS_ENTRIES).read() } == 0 {
+        crate::fail("window script listed nothing");
+    }
+    crate::serial::write_str("wm: ls ok\n");
     // The pointer script's window-local reports, replayed through the same
     // routing the client's stream came from. The button click changes the
     // terminal's label, so this must run before the pixels are compared — and
@@ -2377,6 +2424,9 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface) {
 /// Successful reads the frame verifier's scripted session performed.
 static mut WINDOW_VFS_READS: u32 = 0;
 
+/// Directory entries the frame verifier's scripted `ls` walked.
+static mut WINDOW_LS_ENTRIES: u32 = 0;
+
 /// Reads `path` from the kernel's own mount table, for the frame verifier.
 ///
 /// Read-only, so it is safe on the surface-destroy path. A filesystem served
@@ -2393,6 +2443,36 @@ fn kernel_read_file(path: &[u8], out: &mut [u8]) -> Option<usize> {
         addr_of_mut!(WINDOW_VFS_READS).write(count + 1);
     }
     Some(read)
+}
+
+/// Reads one directory entry through the kernel's own mount table, for `ls`.
+///
+/// This is the verifier's side of the listing the client asked for through
+/// `SYS_READDIR`: both reach [`MountTable::read_dir`], one across the syscall
+/// boundary and one directly, so the same names come back in the same order.
+/// The verifier runs as root, which is the identity the kernel has always used
+/// for its proof reads.
+fn kernel_list_dir(path: &[u8], index: usize) -> zc_abi::terminal::Listing {
+    use zc_abi::terminal::Listing;
+
+    // SAFETY: mounted during setup before any task ran; read-only here.
+    let mounts = unsafe { &*core::ptr::addr_of!(MOUNTS) };
+    let mut out = [0u8; zc_abi::DIRENT_LEN];
+    match mounts.read_dir(path, index, &mut out, perms::Identity::ROOT) {
+        Ok(Some(())) => match zc_abi::DirEntry::read_from(&out) {
+            Some(entry) => {
+                // SAFETY: owned here; the snapshot runs with interrupts masked.
+                unsafe {
+                    let count = addr_of!(WINDOW_LS_ENTRIES).read();
+                    addr_of_mut!(WINDOW_LS_ENTRIES).write(count + 1);
+                }
+                Listing::Entry(entry)
+            }
+            None => Listing::Error,
+        },
+        Ok(None) => Listing::End,
+        Err(_) => Listing::Error,
+    }
 }
 
 /// Verifies the final desktop frame: exact where it is deterministic,

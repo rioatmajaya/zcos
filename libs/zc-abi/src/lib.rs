@@ -72,6 +72,9 @@ pub use syscall::{
     SYS_PORT_CLAIM,
     SYS_POWEROFF,
     SYS_READ,
+    SYS_READDIR,
+    READDIR_END,
+    READDIR_ENTRY,
     SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START,
     SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY,
     SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TERM_READ, SYS_UMOUNT, SYS_WINDOW_CLOSE,
@@ -84,7 +87,9 @@ pub use ui::{
     Event, Input, WINDOW_MAX_COORD, WINDOW_NO_EVENT, WINDOW_POINTER_TAG, WindowEvent,
     WindowPointer, decode_window_event, hit_all, hit_topmost, pack_window_pointer,
 };
-pub use vfs::{KIND_CHR, KIND_DIR, KIND_FILE, STAT_LEN, Stat};
+pub use vfs::{
+    DIRENT_LEN, DIRENT_NAME_MAX, DirEntry, KIND_CHR, KIND_DIR, KIND_FILE, STAT_LEN, Stat,
+};
 pub use wm::{Action, Wm, content, decorations, hit, title_bar, window_pointer_at};
 
 /// Current version of the loader-to-kernel boot protocol.

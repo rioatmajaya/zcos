@@ -23,8 +23,8 @@ filesystem exchange page (see [`server-protocol.md`](server-protocol.md)).
 
 ## Syscall table
 
-Numbers are stable and never reused. `SYS_WINDOW_READ` (35) is the highest
-assigned number; 36 and above are rejected.
+Numbers are stable and never reused. `SYS_READDIR` (36) is the highest
+assigned number; 37 and above are rejected.
 
 Two numbers are **declared but not yet implemented**: `SYS_YIELD` (0) and
 `SYS_MAP_FRAME` (4) are recognized by the dispatch table but have no handler, so
@@ -69,6 +69,23 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 33 | `SYS_WINDOW_CLOSE` | — | 0 | `u64::MAX` |
 | 34 | `SYS_POWEROFF` | — | never returns on success | `u64::MAX` |
 | 35 | `SYS_WINDOW_READ` | — | packed `WindowEvent`, or `WINDOW_NO_EVENT` at end of session | `u64::MAX` |
+| 36 | `SYS_READDIR` | path ptr, length, entry index, `DirEntry` out ptr (`r10`) | 0 (`READDIR_ENTRY`) or 1 (`READDIR_END`) | `u64::MAX` |
+
+### Directory listings
+
+`SYS_READDIR` (36) writes one `zc_abi::DirEntry` — 264 bytes: kind, name length,
+and a 256-byte name — into a buffer of exactly `DIRENT_LEN`. The caller walks
+`index` from zero and stops on `READDIR_END` (`1`); `READDIR_ENTRY` (`0`) means
+the buffer holds a record. The index is stable for an unchanged filesystem, and
+names are never truncated, so two entries cannot become indistinguishable.
+
+Listing requires search permission on the directory, checked against the
+directory's own mode before the filesystem is asked. Mount points directly
+below the path are listed first (so `ls /` shows `data/`, `dev/`, and `tmp/`
+without the initramfs knowing they exist), then the filesystem's own entries.
+A filesystem that cannot enumerate returns `u64::MAX` rather than an empty
+listing, so "nothing here" and "cannot list" stay distinct; zcfs is in that
+group today and `ls /data` says `ls: cannot list`.
 
 ### `SYS_WINDOW_CLOSE`
 

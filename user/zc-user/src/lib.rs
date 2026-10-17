@@ -11,10 +11,12 @@
 use core::arch::asm;
 
 pub use zc_abi::{
-    FS_ID_ZCFS, FS_OP_STOP, IPC_FS, IPC_SUPERVISE, IPC_WM, IPC_WM_REPLY, KIND_CHR, KIND_DIR,
-    KIND_FILE, SERVICE_KIND_EXIT, SERVICE_KIND_FAULT, SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOSE,
+    DIRENT_LEN, DirEntry, FS_ID_ZCFS, FS_OP_STOP, IPC_FS, IPC_SUPERVISE, IPC_WM, IPC_WM_REPLY,
+    KIND_CHR, KIND_DIR, KIND_FILE, READDIR_END, READDIR_ENTRY, SERVICE_KIND_EXIT,
+    SERVICE_KIND_FAULT, SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOSE,
     SYS_CREATE, SYS_FB_INFO, SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME,
-    SYS_MMIO_MAP, SYS_MOUNT, SYS_MOUSE_READ, SYS_OPEN, SYS_PORT_CLAIM, SYS_POWEROFF, SYS_READ, SYS_RECV,
+    SYS_MMIO_MAP, SYS_MOUNT, SYS_MOUSE_READ, SYS_OPEN, SYS_PORT_CLAIM, SYS_POWEROFF, SYS_READ,
+    SYS_READDIR, SYS_RECV,
     SYS_RECV_FROM, SYS_SEND,
     SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START, SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT,
     SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TERM_READ,
@@ -195,6 +197,22 @@ pub fn stat(path: &str, stat: &mut Stat) -> bool {
         path.len() as u64,
         core::ptr::from_mut(stat) as u64,
     ) == 0
+}
+
+/// Reads directory entry `index` of `path` into `out`.
+///
+/// Returns [`zc_abi::READDIR_ENTRY`] when the buffer holds a [`zc_abi::DirEntry`],
+/// [`zc_abi::READDIR_END`] at the end of the listing, or `u64::MAX` on error.
+/// The buffer must be exactly [`zc_abi::DIRENT_LEN`] bytes.
+#[inline(always)]
+pub fn readdir(path: &str, index: u64, out: &mut [u8]) -> u64 {
+    syscall4(
+        SYS_READDIR,
+        path.as_ptr() as u64,
+        path.len() as u64,
+        index,
+        out.as_mut_ptr() as u64,
+    )
 }
 
 /// Reads one serial byte, blocking until a key arrives.

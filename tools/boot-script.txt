@@ -1,4 +1,6 @@
 help
+ls
+ls /dev
 echo hello os
 cat hello.txt
 cat zc.manifest
