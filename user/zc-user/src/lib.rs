@@ -18,7 +18,8 @@ pub use zc_abi::{
     SYS_RECV_FROM, SYS_SEND,
     SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START, SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT,
     SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TERM_READ,
-    SYS_UMOUNT, SYS_WINDOW_CLOSE, SYS_WRITE, SYS_YIELD, MmioInfo, Stat, SurfaceInfo, SyscallError,
+    SYS_UMOUNT, SYS_WINDOW_CLOSE, SYS_WINDOW_READ, SYS_WRITE, SYS_YIELD, MmioInfo, Stat,
+    SurfaceInfo, SyscallError,
     WM_ACK,
     supervise_kind, supervise_service,
 };
@@ -222,6 +223,19 @@ pub fn term_read() -> u64 {
 #[inline(always)]
 pub fn mouse_read() -> u64 {
     syscall0(SYS_MOUSE_READ)
+}
+
+/// Reads the next input event for this task's window, blocking until one
+/// arrives.
+///
+/// Returns a packed [`zc_abi::ui::WindowEvent`] (decode with
+/// [`zc_abi::ui::decode_window_event`]) or [`zc_abi::ui::WINDOW_NO_EVENT`] when
+/// the window's session is over. The stream is the keyboard bytes routed to the
+/// window plus the pointer reports that landed inside its content area, in the
+/// window's own coordinates; the global pointer stays with the compositor.
+#[inline(always)]
+pub fn window_read() -> u64 {
+    syscall0(SYS_WINDOW_READ)
 }
 
 /// Ends the window input session, so the window client blocked in

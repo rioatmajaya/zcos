@@ -158,7 +158,11 @@ copy as a shared fallback — see
 [ADR 0027](docs/adr/0027-one-input-layer.md). The gestures are built on one shared
 `zc-abi::ui` input layer, so the compositor and the kernel's frame verifier derive
 press and release edges from the same state machine rather than from two readings
-of the same device — the foundation F8e's client library is being built on.
+of the same device. F8e-3 gives a window its own pointer stream: the kernel
+derives the reports that landed inside the window's content area, in the window's
+own coordinates, and `SYS_WINDOW_READ` serves them beside the keyboard, so a
+client can hit-test a widget without reading the compositor's global pointer —
+see [ADR 0034](docs/adr/0034-a-window-has-its-own-pointer-stream.md).
 
 ## Development
 
@@ -210,12 +214,15 @@ the disk is still consistent afterwards, so "it turned off" and "it turned off
 *cleanly*" are separate claims. See
 [ADR 0032](docs/adr/0032-clean-shutdown-is-a-syscall.md).
 
-One thing that does **not** work, so you are not left hunting for it: a button
-drawn *inside* a window cannot be clicked. `SYS_MOUSE_READ` holds a single pending
-report for the whole system and the compositor owns it, because it is what places
-the window and draws the pointer. A window client has no legal way to read it, and
-the compositor does not forward presses yet. See
-[ADR 0030](docs/adr/0030-the-pointer-has-one-owner.md).
+One thing that does **not** work yet, so you are not left hunting for it: a
+button drawn *inside* a window has nothing to click. The input path is in place —
+the kernel forwards window-local pointer reports to the client, and
+`user/zc-ui::Window` hands them over with their position and derived edge — but
+the widget set and layout pass are still the next task (F8e follow-up). The
+compositor keeps the global pointer for placement and the sprite; a client reads
+its own derived stream through `SYS_WINDOW_READ`, so it cannot steal a drag. See
+[ADR 0030](docs/adr/0030-the-pointer-has-one-owner.md) and
+[ADR 0034](docs/adr/0034-a-window-has-its-own-pointer-stream.md).
 
 CI runs the boot twice, because the two frame proofs need different final frames:
 `--test` leaves a window up (proving the compositor placed the client's pixels,

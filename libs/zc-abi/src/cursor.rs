@@ -363,6 +363,10 @@ mod tests {
         assert!(wm.is_shown());
         assert!(!wm.rect().is_empty());
         assert!(wm.rect().contains(at.x, at.y));
+        // It ends inside the *content* area, not on the title bar, so the boot
+        // proof really exercises the per-window pointer stream a client reads
+        // rather than stopping at a placement gesture.
+        assert!(crate::wm::content(wm.rect()).contains(at.x, at.y));
     }
 
     #[test]

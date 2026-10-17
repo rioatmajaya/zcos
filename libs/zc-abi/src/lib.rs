@@ -72,12 +72,15 @@ pub use syscall::{
     SYS_READ,
     SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START,
     SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY,
-    SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TERM_READ, SYS_UMOUNT, SYS_WINDOW_CLOSE, SYS_WRITE,
-    SYS_YIELD, SyscallError,
+    SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TERM_READ, SYS_UMOUNT, SYS_WINDOW_CLOSE,
+    SYS_WINDOW_READ, SYS_WRITE, SYS_YIELD, SyscallError,
 };
-pub use ui::{Event, Input, hit_all, hit_topmost};
+pub use ui::{
+    Event, Input, WINDOW_MAX_COORD, WINDOW_NO_EVENT, WINDOW_POINTER_TAG, WindowEvent,
+    WindowPointer, decode_window_event, hit_all, hit_topmost, pack_window_pointer,
+};
 pub use vfs::{KIND_CHR, KIND_DIR, KIND_FILE, STAT_LEN, Stat};
-pub use wm::{Action, Wm, decorations, hit, title_bar};
+pub use wm::{Action, Wm, content, decorations, hit, title_bar};
 
 /// Current version of the loader-to-kernel boot protocol.
 pub const BOOT_PROTOCOL_VERSION: u32 = 2;

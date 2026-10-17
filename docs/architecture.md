@@ -215,13 +215,13 @@ hardware GPU acceleration is a later driver-domain feature.
 The window is an input-driven session. The input domain owns the 8042; the
 kernel drains its shared ring and routes the bytes (`zc_kernel::input::route`):
 mouse frames update the cursor, and keyboard bytes go to a per-window queue
-rather than the COM1 ring the shell reads. `SYS_TERM_READ` serves that queue
-after the scripted session and blocks while the window is open. The client
-reads one keystroke at a time, repaints its `zc-abi::terminal::Term`, and sends
-`WM_ACK`; the compositor re-composites the window at its current position and
-flushes only the damaged rectangle per `WM_ACK`, and stops on `WM_DONE`. The
-kernel closes the session when the shell exits, which unblocks the client's
-read with `u64::MAX`.
+rather than the COM1 ring the shell reads. `SYS_WINDOW_READ` serves that queue
+beside the window's own pointer reports, after the scripted session and while
+the window is open. The client reads one event at a time, repaints its
+`zc-abi::terminal::Term`, and sends `WM_ACK`; the compositor re-composites the
+window at its current position and flushes only the damaged rectangle per
+`WM_ACK`, and stops on `WM_DONE`. The kernel closes the session when the shell
+exits, which unblocks the client's read with `WINDOW_NO_EVENT`.
 
 The window pixels remain proven, not trusted, but the proof splits by what is
 knowable. Outside the window the frame checksum recomputes `pixel_at` exactly.
@@ -248,6 +248,16 @@ it. The compositor draws the sprite topmost and repaints only the union of its
 old and new rectangles, so it moves with damage tracking, and the frame verifier
 recomputes every sprite pixel (`fb: cursor ok`). See
 [ADR 0023](adr/0023-pointer-and-mouse-read.md).
+
+The pointer has one owner, but a window still needs clicks. The kernel derives a
+window-local stream from the reports it already applies: those inside the
+focused window's content area (`wm::content`, below the title bar), translated
+into surface coordinates, queued per window and served by `SYS_WINDOW_READ`
+beside the keyboard. A client therefore hit-tests a widget without reading the
+global pointer, and a title-bar drag is never delivered as a widget click.
+Focus is the kernel's decision — a window receives reports while its rectangle
+is on screen — so two windows cannot both claim a press. See
+[ADR 0034](adr/0034-a-window-has-its-own-pointer-stream.md).
 
 ## Compatibility
 

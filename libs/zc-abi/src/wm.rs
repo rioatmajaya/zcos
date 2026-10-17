@@ -73,6 +73,21 @@ pub const fn hit(window: Rect, x: u32, y: u32) -> bool {
     title_bar(window).contains(x, y)
 }
 
+/// The part of a window below its title bar: the area its client owns.
+///
+/// The title bar and its decorations belong to the window manager, so a press
+/// there is a placement gesture rather than a client event. This is the region
+/// the kernel forwards pointer reports for, and the one a widget hit-test must
+/// stay inside: a widget drawn in the body can never steal a drag, and a drag
+/// can never look like a click on a widget.
+#[must_use]
+pub const fn content(window: Rect) -> Rect {
+    if window.h <= TITLE_HEIGHT {
+        return Rect::EMPTY;
+    }
+    Rect::new(window.x, window.y + TITLE_HEIGHT, window.w, window.h - TITLE_HEIGHT)
+}
+
 /// What a press on a window or the taskbar asks the window manager to do.
 ///
 /// Returned rather than applied, so a caller that only needs to know *whether*
@@ -498,6 +513,26 @@ mod tests {
         assert!(decorations(narrow).is_empty());
         assert_eq!(title_bar(narrow), Rect::new(0, 100, 64, TITLE_HEIGHT));
         assert!(hit(narrow, 30, 110));
+    }
+
+    #[test]
+    fn content_starts_below_the_title_bar_and_keeps_the_width() {
+        let window = start().window();
+        let body = content(window);
+        assert_eq!(body.x, window.x);
+        assert_eq!(body.y, window.y + TITLE_HEIGHT);
+        assert_eq!(body.w, window.w);
+        assert_eq!(body.bottom(), window.bottom());
+        // A title-bar point is never a client event, and a body point always is.
+        assert!(!body.contains(window.x + 4, window.y + 4));
+        assert!(body.contains(window.x + 4, window.y + TITLE_HEIGHT + 4));
+        // The region is disjoint from the drag target, so the two can never
+        // claim the same press.
+        assert!(!title_bar(window).contains(body.x + 1, body.y + 1));
+        // A window too short to have a body yields nothing rather than
+        // underflowing into a rectangle above its own title bar.
+        assert!(content(Rect::new(0, 0, 64, TITLE_HEIGHT)).is_empty());
+        assert!(content(Rect::EMPTY).is_empty());
     }
 
     #[test]

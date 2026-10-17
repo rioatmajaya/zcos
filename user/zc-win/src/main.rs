@@ -3,12 +3,12 @@
 //! The compositor owns the display and the surface factory. It creates a
 //! window surface and delegates a read/write capability to this task, then
 //! assigns the object id over [`IPC_WM`]. This client maps the surface and
-//! runs an event loop: it reads one keystroke at a time from `SYS_TERM_READ`,
-//! repaints the terminal, and sends [`WM_ACK`] so the compositor can
-//! re-composite the window. The kernel serves the scripted session first, then
-//! the physical keyboard the input domain routed to this window, and returns
-//! `u64::MAX` once the session closes — the client then paints its final frame
-//! and sends [`WM_DONE`] so the compositor stops.
+//! runs an event loop: it reads one event at a time from `SYS_WINDOW_READ`,
+//! repaints the terminal on a keystroke, and sends [`WM_ACK`] so the compositor
+//! can re-composite the window. The kernel serves the scripted session first,
+//! then the physical keyboard and the pointer reports that landed inside this
+//! window, and returns `u64::MAX` once the session closes — the client then
+//! paints its final frame and sends [`WM_DONE`] so the compositor stops.
 //!
 //! The screen is dynamic, but not trusted: while the script runs, the kernel
 //! replays the same script through the same shared state machine to recompute
@@ -23,11 +23,18 @@
 
 use zc_abi::terminal::{Term, run_command};
 use zc_abi::{FONT_LEN, FONT_PATH, Font, IPC_WM, IPC_WM_REPLY, PixelFormat, SurfaceInfo, WM_ACK, WM_DONE};
-use zc_ui::Keys;
+use zc_ui::{Window, WindowEvent};
 use zc_user::{close, log, open, read, recv_from, send_to, surface_map, task_exit};
 
 /// Whether the client has logged its first successful VFS read.
 static mut VFS_LOGGED: bool = false;
+
+/// Whether the client has logged its first window-local pointer event.
+///
+/// One marker per boot: it proves the kernel's derived stream reached this
+/// task, without a log line per report. The widget that will act on these
+/// events is the next step; the delivery is what this one proves.
+static mut POINTER_LOGGED: bool = false;
 
 /// The font file's bytes, filled once at startup before the first paint.
 ///
@@ -99,30 +106,40 @@ pub unsafe extern "C" fn _start() -> ! {
             surface.height,
         );
         let _ = send_to(IPC_WM_REPLY as u64, WM_ACK);
-        // The keyboard stream only. The pointer is deliberately *not* read here:
-        // `SYS_MOUSE_READ` is a single global drained by whoever asks first, and
-        // the compositor owns the pointer because it places the window and draws
-        // the sprite. A client that drained it would steal reports and freeze the
-        // drag. Widgets need the compositor to forward clicks, which is an ABI
-        // change — see ADR 0030.
-        let mut keys = Keys::new();
+        // One stream for both devices. `SYS_WINDOW_READ` serves the scripted
+        // keystrokes, the live keyboard, and the pointer reports that landed
+        // inside this window, in this window's own coordinates. The global
+        // pointer is deliberately *not* read here: `SYS_MOUSE_READ` is a single
+        // global drained by whoever asks first, and the compositor owns it
+        // because it places the window and draws the sprite. The per-window
+        // stream is the kernel's copy, so consuming it cannot freeze the drag
+        // (ADR 0034).
+        let mut window = Window::new();
         loop {
-            let Some(key) = keys.next() else {
+            let Some(event) = window.next() else {
                 break;
             };
-            if let Some(line) = terminal.push_key(key) {
-                run_command(&mut terminal, line.as_bytes(), read_file);
+            match event {
+                WindowEvent::Key(key) => {
+                    if let Some(line) = terminal.push_key(key) {
+                        run_command(&mut terminal, line.as_bytes(), read_file);
+                    }
+                    paint(
+                        &terminal,
+                        font,
+                        pixels,
+                        surface.stride,
+                        format,
+                        surface.width,
+                        surface.height,
+                    );
+                    let _ = send_to(IPC_WM_REPLY as u64, WM_ACK);
+                }
+                // The event already carries the window-local position and the
+                // derived edge, so the widget that consumes it needs no device
+                // knowledge. Nothing draws one yet; the marker proves delivery.
+                WindowEvent::Pointer { .. } => log_pointer_once(),
             }
-            paint(
-                &terminal,
-                font,
-                pixels,
-                surface.stride,
-                format,
-                surface.width,
-                surface.height,
-            );
-            let _ = send_to(IPC_WM_REPLY as u64, WM_ACK);
         }
         log("client: window painted\n");
     } else {
@@ -133,6 +150,21 @@ pub unsafe extern "C" fn _start() -> ! {
     // window blank, and the kernel's frame checksum catches that.
     let _ = send_to(IPC_WM_REPLY as u64, WM_DONE);
     task_exit()
+}
+
+/// Logs, once, that a window-local pointer event reached this client.
+///
+/// The kernel logs `wm: pointer routed` when it derives the first event; this is
+/// the other end of the same path, so CI can prove the stream crossed the
+/// syscall rather than only being produced.
+fn log_pointer_once() {
+    // SAFETY: owned here; written once, before the next event is read.
+    unsafe {
+        if !core::ptr::addr_of!(POINTER_LOGGED).read() {
+            core::ptr::addr_of_mut!(POINTER_LOGGED).write(true);
+            log("client: pointer ok\n");
+        }
+    }
 }
 
 /// Reads `path` through the VFS syscalls, for the terminal's `cat`.

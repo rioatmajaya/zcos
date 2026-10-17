@@ -19,6 +19,14 @@
 //! a keypress and there is no key-up event to report. That asymmetry is a
 //! property of the device path, not an omission here.
 //!
+//! [`WindowEvent`] is the other half of that story. A window client cannot read
+//! the global pointer — the compositor owns it — so the kernel derives a
+//! *window-local* stream instead: the reports that landed inside that window's
+//! content area, already translated into surface coordinates. That stream is a
+//! copy, not a theft, so a client consuming it can never starve the drag. The
+//! packing lives here so both the kernel that writes the words and the client
+//! that reads them share one host-tested codec.
+//!
 //! Everything is `const`-callable and allocation-free, so it is host-tested like
 //! the rest of the desktop layout.
 
@@ -202,6 +210,99 @@ impl Default for Input {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The value `SYS_WINDOW_READ` returns when the window's session is over.
+///
+/// Chosen as all ones, which no packed event can produce: a pointer event sets
+/// bit 63 but never bit 62, so its top byte is at most `0xBF`, and a key is a
+/// byte below 256.
+pub const WINDOW_NO_EVENT: u64 = u64::MAX;
+
+/// Tag bit marking a word as a window-local pointer event rather than a key.
+pub const WINDOW_POINTER_TAG: u64 = 1 << 63;
+
+/// The largest window-local coordinate a packed event can carry.
+///
+/// Fifteen bits, so the tag byte can never become all ones and collide with
+/// [`WINDOW_NO_EVENT`]. A window larger than this is not a desktop ZC OS targets.
+pub const WINDOW_MAX_COORD: u16 = 0x7FFF;
+
+/// One pointer report in the focused window's own coordinates.
+///
+/// `x` and `y` are relative to the window's top-left corner — the same
+/// coordinates the client paints in — so a widget hit-test needs no knowledge
+/// of where the window currently sits. `buttons` is the device's current mask,
+/// not an edge; [`Input::report`] derives the edge, exactly as it does for the
+/// compositor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WindowPointer {
+    /// Horizontal position inside the window surface.
+    pub x: u16,
+    /// Vertical position inside the window surface.
+    pub y: u16,
+    /// Button bits held during this report.
+    pub buttons: u8,
+    /// Horizontal delta carried by the same report.
+    pub dx: i8,
+    /// Vertical delta carried by the same report.
+    pub dy: i8,
+}
+
+/// One input event delivered to a window client.
+///
+/// The window client sees a *derived* stream: the keyboard bytes routed to it,
+/// plus the pointer reports that landed inside its own content area. It never
+/// sees the global pointer, which stays with the compositor — so reading this
+/// stream cannot steal a report from the drag.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WindowEvent {
+    /// A keyboard byte, exactly as [`Event::Key`] carries it.
+    Key(u8),
+    /// A pointer report inside the window, in window-local coordinates.
+    Pointer(WindowPointer),
+}
+
+/// Packs a window-local pointer report into the word `SYS_WINDOW_READ` returns.
+///
+/// Coordinates are clamped to [`WINDOW_MAX_COORD`], so a caller can never
+/// produce a word that decodes as [`WINDOW_NO_EVENT`]. Button bits outside
+/// [`BUTTON_MASK`] are dropped, matching what [`Input`] would ignore anyway.
+#[must_use]
+pub const fn pack_window_pointer(x: u16, y: u16, buttons: u8, dx: i8, dy: i8) -> u64 {
+    let x = if x > WINDOW_MAX_COORD { WINDOW_MAX_COORD } else { x } as u64;
+    let y = if y > WINDOW_MAX_COORD { WINDOW_MAX_COORD } else { y } as u64;
+    WINDOW_POINTER_TAG
+        | (x << 47)
+        | (y << 32)
+        | (((buttons & BUTTON_MASK) as u64) << 24)
+        | ((dx as u8 as u64) << 16)
+        | ((dy as u8 as u64) << 8)
+}
+
+/// Decodes a word from `SYS_WINDOW_READ`.
+///
+/// Returns `None` for [`WINDOW_NO_EVENT`] and for any word that is neither a
+/// key byte nor a tagged pointer event, so an unknown encoding fails closed
+/// instead of being interpreted as a keystroke.
+#[must_use]
+pub const fn decode_window_event(word: u64) -> Option<WindowEvent> {
+    if word == WINDOW_NO_EVENT {
+        return None;
+    }
+    if word & WINDOW_POINTER_TAG != 0 {
+        return Some(WindowEvent::Pointer(WindowPointer {
+            x: ((word >> 47) & 0x7FFF) as u16,
+            y: ((word >> 32) & 0x7FFF) as u16,
+            buttons: ((word >> 24) & 0xFF) as u8,
+            dx: ((word >> 16) & 0xFF) as u8 as i8,
+            dy: ((word >> 8) & 0xFF) as u8 as i8,
+        }));
+    }
+    if word < 256 {
+        return Some(WindowEvent::Key(word as u8));
+    }
+    None
 }
 
 /// Returns the topmost widget under `(x, y)`, or `None` for a miss.
@@ -422,5 +523,74 @@ mod tests {
         let mut hits = [usize::MAX; 2];
         assert_eq!(hit_all(&widgets, 0, 0, &mut hits), 1);
         assert_eq!(hits[0], 1);
+    }
+
+    #[test]
+    fn a_window_pointer_round_trips_through_one_word() {
+        for &(x, y, buttons, dx, dy) in &[
+            (0u16, 0u16, 0u8, 0i8, 0i8),
+            (300, 128, BUTTON_LEFT, 5, -3),
+            (WINDOW_MAX_COORD, WINDOW_MAX_COORD, BUTTON_MASK, -128, 127),
+        ] {
+            let word = pack_window_pointer(x, y, buttons, dx, dy);
+            assert_eq!(
+                decode_window_event(word),
+                Some(WindowEvent::Pointer(WindowPointer {
+                    x,
+                    y,
+                    buttons,
+                    dx,
+                    dy
+                }))
+            );
+            assert_ne!(word, WINDOW_NO_EVENT);
+        }
+    }
+
+    #[test]
+    fn a_packed_pointer_never_looks_like_the_end_of_the_session() {
+        // Even the widest event the encoder can produce must leave the sentinel
+        // distinguishable: bit 62 stays clear, so the top byte is not 0xFF.
+        let widest = pack_window_pointer(WINDOW_MAX_COORD, WINDOW_MAX_COORD, BUTTON_MASK, -1, -1);
+        assert_ne!(widest, WINDOW_NO_EVENT);
+        assert!(widest < WINDOW_NO_EVENT);
+        assert_eq!(decode_window_event(WINDOW_NO_EVENT), None);
+    }
+
+    #[test]
+    fn coordinates_are_clamped_so_the_word_stays_decodable() {
+        let word = pack_window_pointer(u16::MAX, u16::MAX, 0, 0, 0);
+        assert_eq!(
+            decode_window_event(word),
+            Some(WindowEvent::Pointer(WindowPointer {
+                x: WINDOW_MAX_COORD,
+                y: WINDOW_MAX_COORD,
+                buttons: 0,
+                dx: 0,
+                dy: 0
+            }))
+        );
+    }
+
+    #[test]
+    fn key_bytes_and_pointer_words_share_one_stream_without_ambiguity() {
+        for byte in [0u8, b'a', b'\n', 255] {
+            assert_eq!(decode_window_event(u64::from(byte)), Some(WindowEvent::Key(byte)));
+        }
+        // A word with neither tag nor a byte value is not a keystroke.
+        assert_eq!(decode_window_event(256), None);
+        assert_eq!(decode_window_event(1 << 40), None);
+        // Button bits outside the device mask are dropped, not remembered.
+        let word = pack_window_pointer(1, 2, 0xFF, 0, 0);
+        assert_eq!(
+            decode_window_event(word),
+            Some(WindowEvent::Pointer(WindowPointer {
+                x: 1,
+                y: 2,
+                buttons: BUTTON_MASK,
+                dx: 0,
+                dy: 0
+            }))
+        );
     }
 }

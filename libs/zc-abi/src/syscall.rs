@@ -139,6 +139,18 @@ pub const SYS_WINDOW_CLOSE: u64 = 33;
 /// firmware's `_S5_` package named. Without usable firmware power info it logs
 /// `power: no acpi` and halts instead of guessing at a control port.
 pub const SYS_POWEROFF: u64 = 34;
+/// Reads the next input event for the calling task's window, blocking until one
+/// arrives: returns a packed [`crate::ui::WindowEvent`] (decode with
+/// [`crate::ui::decode_window_event`]), or [`crate::ui::WINDOW_NO_EVENT`] when
+/// the window's session is over.
+///
+/// The stream is a *derived* one: the keyboard bytes routed to this window plus
+/// the pointer reports that landed inside its content area, translated into
+/// window-local coordinates by the kernel. The global pointer still has one
+/// owner — the compositor, which reads it through `SYS_MOUSE_READ` — so a client
+/// consuming this stream cannot steal a report from the drag. Only the window
+/// client the compositor delegated a surface to may call it.
+pub const SYS_WINDOW_READ: u64 = 35;
 
 /// Error codes returned by failed syscalls.
 ///
@@ -229,6 +241,7 @@ mod tests {
         assert_eq!(SYS_MOUSE_READ, 32);
         assert_eq!(SYS_WINDOW_CLOSE, 33);
         assert_eq!(SYS_POWEROFF, 34);
+        assert_eq!(SYS_WINDOW_READ, 35);
     }
 
     #[test]

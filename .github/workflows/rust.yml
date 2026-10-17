@@ -188,6 +188,12 @@ jobs:
         grep -q "task 3: compositor: cursor moved" build/boot.log
         grep -q "task 3: compositor: cursor ok" build/boot.log
         grep -q "fb: cursor ok" build/boot.log
+        # A window has its own pointer stream (F8e-3, ADR 0034): the kernel
+        # derives a window-local copy of the reports inside the content area and
+        # the client reads it through SYS_WINDOW_READ. Both ends must log, or the
+        # stream was produced but never crossed the syscall.
+        grep -q "wm: pointer routed" build/boot.log
+        grep -q "task 8: client: pointer ok" build/boot.log
         # The pointer is not just drawn, it is driven: the scripted mouse session
         # presses the left button on the window's title bar, drags the window off
         # its scripted frame position, releases, clicks the minimize glyph, and
@@ -249,6 +255,10 @@ jobs:
         # every pixel, including the vacated footprint, recomputes exactly.
         grep -q "fb: no window, placement skipped" build/boot-close.log
         grep -q "wm: content ok" build/boot-close.log
+        # The window's own pointer stream survives the close: queued events are
+        # delivered before the end-of-session sentinel.
+        grep -q "wm: pointer routed" build/boot-close.log
+        grep -q "task 8: client: pointer ok" build/boot-close.log
         # Same font pipeline as the window-up run: the close run drags,
         # minimizes, and restores before closing, so all three sides render.
         grep -q "task 8: client: font vfs ok" build/boot-close.log

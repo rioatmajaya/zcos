@@ -64,7 +64,11 @@ same path as `SYS_UMOUNT` and then writes ACPI S5 taken from firmware tables —
 FADT for the PM1 control block, DSDT `_S5_` for the two `SLP_TYP` values —
 never a hardcoded QEMU constant. A machine can now be stopped cleanly instead
 of having its emulator killed. See
-[ADR 0032](docs/adr/0032-clean-shutdown-is-a-syscall.md).
+[ADR 0032](docs/adr/0032-clean-shutdown-is-a-syscall.md). F8e-3 closes the
+widget blocker from ADR 0030: the kernel derives a window-local pointer stream
+and `SYS_WINDOW_READ` serves it beside the keyboard, so a client can hit-test
+inside its own window without touching the compositor's pointer. See
+[ADR 0034](docs/adr/0034-a-window-has-its-own-pointer-stream.md).
 
 ### Fixed
 
@@ -164,6 +168,22 @@ of having its emulator killed. See
 
 ### Added
 
+- **A window has its own pointer stream, so widgets can be clicked** (F8e-3):
+  the blocker recorded in ADR 0030 is gone. The kernel already sees every
+  pointer report and applies it to its own cursor and window machine, so it now
+  also derives a *window-local* copy for the focused window: the reports that
+  land inside `wm::content` (below the title bar), translated into surface
+  coordinates. `SYS_WINDOW_READ` (35) blocks on that stream together with the
+  keyboard and returns a packed `ui::WindowEvent` — a key byte or a tagged
+  pointer event — or `WINDOW_NO_EVENT` when the session ends. The compositor
+  still owns the global pointer through `SYS_MOUSE_READ`, so a client consuming
+  its own stream cannot steal a report from the drag; `user/zc-ui::Window`
+  wraps the new syscall and hands the client a typed event with the derived
+  edge. The kernel logs `wm: pointer routed` when it derives the first event and
+  the client logs `client: pointer ok` when it receives one; both frame
+  checksums are unchanged (`0x3a43f97916fcc691`, `0x6d66e82d0f2d6fb8`), which is
+  the evidence this adds a stream and paints nothing. See
+  [ADR 0034](docs/adr/0034-a-window-has-its-own-pointer-stream.md).
 - **CI explains its own boot failures.** Both QEMU runs redirect into log files
   that no later step read, so `Boot test the close proof` once failed with exit
   1 and zero evidence — a missing image, a staleness-guard refusal, a dead

@@ -49,10 +49,113 @@ pub fn route(raw: &[u8], keyboard: &mut [u8], mouse: &mut [[u8; 3]]) -> (usize, 
     (keys, frames)
 }
 
+/// A fixed-capacity FIFO of packed window events.
+///
+/// The kernel derives a window-local event for every pointer report that lands
+/// inside the focused window's content area; this is where those words wait for
+/// the client. It is a separate sink from the keyboard byte ring because the two
+/// streams are different types and must stay ordered only within themselves.
+///
+/// A full queue drops the *newest* word, matching [`crate::irq::ByteRing`]: a
+/// stalled client loses recent movement rather than the press that started it,
+/// and an edge is never silently replaced by a later one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WindowQueue<const CAP: usize> {
+    words: [u64; CAP],
+    head: usize,
+    len: usize,
+}
+
+impl<const CAP: usize> WindowQueue<CAP> {
+    /// Creates an empty queue.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            words: [0; CAP],
+            head: 0,
+            len: 0,
+        }
+    }
+
+    /// Appends one event, returning whether it fit.
+    pub fn push(&mut self, word: u64) -> bool {
+        if CAP == 0 || self.len >= CAP {
+            return false;
+        }
+        let slot = (self.head + self.len) % CAP;
+        self.words[slot] = word;
+        self.len += 1;
+        true
+    }
+
+    /// Removes the oldest event, or `None` when the queue is empty.
+    pub fn pop(&mut self) -> Option<u64> {
+        if self.len == 0 {
+            return None;
+        }
+        let word = self.words[self.head];
+        self.head = (self.head + 1) % CAP.max(1);
+        self.len -= 1;
+        Some(word)
+    }
+
+    /// Returns how many events are buffered.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Returns whether the queue holds no event.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl<const CAP: usize> Default for WindowQueue<CAP> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::irq::ByteRing;
+
+    #[test]
+    fn window_events_wait_in_order() {
+        let mut queue = WindowQueue::<4>::new();
+        assert!(queue.is_empty());
+        assert!(queue.push(10));
+        assert!(queue.push(20));
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue.pop(), Some(10));
+        assert_eq!(queue.pop(), Some(20));
+        assert_eq!(queue.pop(), None);
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn a_full_window_queue_keeps_the_oldest_events() {
+        // The oldest event is the one that carries the press edge; dropping it
+        // would turn a click into a report the client never saw start.
+        let mut queue = WindowQueue::<2>::new();
+        assert!(queue.push(1));
+        assert!(queue.push(2));
+        assert!(!queue.push(3), "a full queue must report the drop");
+        assert_eq!(queue.pop(), Some(1));
+        assert_eq!(queue.pop(), Some(2));
+        assert_eq!(queue.pop(), None);
+    }
+
+    #[test]
+    fn a_zero_capacity_window_queue_is_legal_and_holds_nothing() {
+        let mut queue = WindowQueue::<0>::new();
+        assert!(!queue.push(1));
+        assert_eq!(queue.pop(), None);
+        assert!(queue.is_empty());
+    }
 
     #[test]
     fn keyboard_bytes_pass_through_in_order() {

@@ -294,9 +294,10 @@ static mut INPUT_RING_PHYS: u64 = 0;
 
 /// Per-task cursor into the scripted terminal session.
 ///
-/// `SYS_TERM_READ` hands the terminal client the next keystroke of
-/// [`zc_abi::terminal::SCRIPT`]; the kernel replays the same script when it
-/// verifies the window, so client and verifier agree on the final screen.
+/// `SYS_TERM_READ` and `SYS_WINDOW_READ` hand the terminal client the next
+/// keystroke of [`zc_abi::terminal::SCRIPT`]; the kernel replays the same script
+/// when it verifies the window, so client and verifier agree on the final
+/// screen.
 static mut TERM_CURSORS: [u64; TASK_COUNT] = [0; TASK_COUNT];
 
 /// Ticks after task start that trigger the timeout path instead of waiting.
@@ -733,7 +734,7 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             // nothing.
             post_supervise(me as usize, SERVICE_KIND_EXIT);
             // The shell anchors the window input session: when it exits there
-            // is no more input to route, so a client blocked in `SYS_TERM_READ`
+            // is no more input to route, so a client blocked in a window read
             // must observe the end instead of waiting forever. `exit_current`
             // then unblocks every task, so the client's retry sees it closed.
             if me as usize == service::SHELL_TASK {
@@ -1872,23 +1873,9 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             0
         }
         Ok(Action::TermRead) => {
-            use zc_abi::terminal::SCRIPT;
             let me = tasks.current();
-            // SAFETY: owned here; interrupts are masked through this arm.
-            let cursors = unsafe { &mut *addr_of_mut!(TERM_CURSORS) };
-            let cursor = &mut cursors[me];
-            if (*cursor as usize) < SCRIPT.len() {
-                // The scripted session runs first, so the proof boot derives
-                // the same final screen the client paints.
-                let byte = SCRIPT[*cursor as usize];
-                *cursor += 1;
-                regs.set_result(u64::from(byte));
-                0
-            } else if let Some(byte) = pop_window_input() {
-                // After the script the terminal reads the physical keyboard
-                // the drain routed here; a byte is popped only when returned,
-                // so a retry never drops one.
-                regs.set_result(u64::from(byte));
+            if let Some(word) = next_window_event(me, false) {
+                regs.set_result(word);
                 0
             } else if window_input_open() {
                 // No byte yet: sleep until the drain routes one (or the shell
@@ -1898,6 +1885,28 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             } else {
                 // The session is over; the client paints its final frame and
                 // leaves.
+                regs.set_result(u64::MAX);
+                0
+            }
+        }
+        Ok(Action::WindowRead) => {
+            // The stream belongs to the window's client: it is derived from the
+            // focused window, and another task draining it would take events
+            // the client never sees. The compositor reads the global pointer
+            // through `SYS_MOUSE_READ` instead.
+            if tasks.current() != service::WINDOW_CLIENT_TASK {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            let me = tasks.current();
+            if let Some(word) = next_window_event(me, true) {
+                regs.set_result(word);
+                0
+            } else if window_input_open() {
+                // Neither a key nor a pointer report is waiting: sleep until
+                // the drain or the pointer router produces one.
+                block_with_retry(tasks, regs, frame, 0)
+            } else {
                 regs.set_result(u64::MAX);
                 0
             }
@@ -3752,6 +3761,23 @@ static mut WINDOW_INPUT: zc_kernel::irq::ByteRing<WINDOW_INPUT_CAP> =
 /// waiting for input that can never come.
 static mut WINDOW_INPUT_OPEN: bool = true;
 
+/// Pointer reports that landed inside the focused window, in window-local
+/// coordinates.
+///
+/// The kernel derives these from the same reports it applies to its own
+/// [`CURSOR`] and [`WM`], and the client reads them through `SYS_WINDOW_READ`.
+/// This is a *copy*, not a second reader of the device: the compositor still
+/// owns the global pointer through `SYS_MOUSE_READ`, so a client consuming this
+/// queue cannot steal a report from the drag (ADR 0030, ADR 0034).
+static mut WINDOW_POINTER: zc_kernel::input::WindowQueue<64> =
+    zc_kernel::input::WindowQueue::new();
+
+/// Whether the first window-local pointer event has been logged.
+///
+/// One marker per boot, so CI can tell the routing path ran without a log line
+/// per report.
+static mut WINDOW_POINTER_LOGGED: bool = false;
+
 /// Surface slot the compositor delegated to the window client, if any.
 ///
 /// Recorded when a surface object is delegated to `WINDOW_CLIENT_TASK`, so the
@@ -3853,6 +3879,89 @@ fn window_input_open() -> bool {
 fn close_window_input() {
     // SAFETY: owned here; the exit path runs with interrupts masked.
     unsafe { addr_of_mut!(WINDOW_INPUT_OPEN).write(false) };
+}
+
+/// Returns the next input word for a window, if one is waiting.
+///
+/// One order for both readers: the scripted keystrokes first (so the boot
+/// proof's content is deterministic), then the live keyboard, then — only for
+/// `SYS_WINDOW_READ` — the window-local pointer reports. Keys take precedence
+/// over pointer reports because they are the stream the terminal's content
+/// depends on; the two devices are independent, so no ordering between them is
+/// promised.
+fn next_window_event(me: usize, pointer: bool) -> Option<u64> {
+    use zc_abi::terminal::SCRIPT;
+    // SAFETY: owned here; called with interrupts masked.
+    let cursors = unsafe { &mut *addr_of_mut!(TERM_CURSORS) };
+    let cursor = &mut cursors[me];
+    if (*cursor as usize) < SCRIPT.len() {
+        // The scripted session runs first, so the proof boot derives the same
+        // final screen the client paints.
+        let byte = SCRIPT[*cursor as usize];
+        *cursor += 1;
+        return Some(u64::from(byte));
+    }
+    // After the script the terminal reads the physical keyboard the drain
+    // routed here; a byte is popped only when returned, so a retry never drops
+    // one.
+    if let Some(byte) = pop_window_input() {
+        return Some(u64::from(byte));
+    }
+    if pointer {
+        return pop_window_pointer();
+    }
+    None
+}
+
+/// Queues one window-local pointer event, logging the first one routed.
+fn push_window_pointer(word: u64) {
+    // SAFETY: owned here; the pointer syscall runs with interrupts masked.
+    let queued = unsafe { (*addr_of_mut!(WINDOW_POINTER)).push(word) };
+    if queued && !unsafe { addr_of!(WINDOW_POINTER_LOGGED).read() } {
+        // SAFETY: written once; the marker proves the routing path ran at all.
+        unsafe { addr_of_mut!(WINDOW_POINTER_LOGGED).write(true) };
+        crate::serial::write_str("wm: pointer routed\n");
+    }
+}
+
+/// Removes the oldest window-local pointer event, if any.
+fn pop_window_pointer() -> Option<u64> {
+    // SAFETY: owned here; the pointer router is the only writer.
+    unsafe { (*addr_of_mut!(WINDOW_POINTER)).pop() }
+}
+
+/// Copies one report into the focused window's queue when it belongs there.
+///
+/// The kernel decides focus: the window is focused while it is actually on
+/// screen, and a report belongs to it when the pointer is inside its content
+/// area — the part below the title bar, which is the window's own. A press on
+/// the title bar or a decoration is a placement gesture and stays with the
+/// window manager; a minimized or closed window's rectangle is empty, so it
+/// receives nothing.
+///
+/// This is deliberately not gated on the input session being open: the session
+/// flag ends the *keyboard* stream, but the scripted pointer gestures keep
+/// running after the shell exits, and the client is still alive draining its
+/// queue. Gating here would drop exactly the reports the boot proof relies on.
+fn route_window_pointer(buttons: u8, dx: i8, dy: i8) {
+    // SAFETY: owned here; the pointer syscall runs with interrupts masked.
+    unsafe {
+        let wm = &*addr_of!(WM);
+        let window = wm.rect();
+        let body = zc_abi::wm::content(window);
+        let cursor = *addr_of!(CURSOR);
+        if !body.contains(cursor.x, cursor.y) {
+            return;
+        }
+        let word = zc_abi::ui::pack_window_pointer(
+            (cursor.x - window.x) as u16,
+            (cursor.y - window.y) as u16,
+            buttons,
+            dx,
+            dy,
+        );
+        push_window_pointer(word);
+    }
 }
 
 /// Copies bytes the input domain produced into the window and mouse sinks.
@@ -4004,6 +4113,11 @@ fn apply_report(buttons: u8, dx: i8, dy: i8) {
         let after = *addr_of!(CURSOR);
         let _ = wm.apply(after, event);
     }
+    // The window's own copy of this report, derived after the placement machine
+    // has acted: a drag that moves the window and a report that lands inside it
+    // are the same report, so the local coordinate is against the rectangle the
+    // compositor is about to paint, not the one it left.
+    route_window_pointer(buttons, dx, dy);
 }
 
 /// Returns the pointer position the compositor should have painted.

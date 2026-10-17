@@ -23,8 +23,8 @@ filesystem exchange page (see [`server-protocol.md`](server-protocol.md)).
 
 ## Syscall table
 
-Numbers are stable and never reused. `SYS_WINDOW_CLOSE` (33) is the highest
-assigned number; 34 and above are rejected.
+Numbers are stable and never reused. `SYS_WINDOW_READ` (35) is the highest
+assigned number; 36 and above are rejected.
 
 Two numbers are **declared but not yet implemented**: `SYS_YIELD` (0) and
 `SYS_MAP_FRAME` (4) are recognized by the dispatch table but have no handler, so
@@ -67,6 +67,8 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 31 | `SYS_MMIO_MAP` | object id, `MmioInfo` out ptr, length | mapped virtual address | `u64::MAX` |
 | 32 | `SYS_MOUSE_READ` | — | packed report, or `MOUSE_NO_REPORT` when none | — |
 | 33 | `SYS_WINDOW_CLOSE` | — | 0 | `u64::MAX` |
+| 34 | `SYS_POWEROFF` | — | never returns on success | `u64::MAX` |
+| 35 | `SYS_WINDOW_READ` | — | packed `WindowEvent`, or `WINDOW_NO_EVENT` at end of session | `u64::MAX` |
 
 ### `SYS_WINDOW_CLOSE`
 
@@ -103,6 +105,34 @@ Button bits are `BUTTON_LEFT` = 1, `BUTTON_RIGHT` = 2, `BUTTON_MIDDLE` = 4,
 matching the PS/2 flags byte the driver assembles. The scripted session
 (`cursor::MOUSE_SCRIPT`) carries them too, as `MouseStep { buttons, dx, dy }`,
 so the boot proof drives the same interaction paths as live input.
+
+### Window input
+
+`SYS_WINDOW_READ` (35) is the window client's stream: it blocks until a word is
+available and returns either a keyboard byte (0..=255) or a tagged pointer event,
+or `WINDOW_NO_EVENT` (`u64::MAX`) once the window's session is over. Only the
+delegated window client may call it; every other task gets `u64::MAX`.
+
+A pointer event packs as:
+
+```
+bit 63      tag, always 1 for a pointer event
+bits 47..61 window-local x (15 bits, clamped to 0x7FFF)
+bits 32..46 window-local y
+bits 24..31 button mask (only BUTTON_LEFT/RIGHT/MIDDLE)
+bits 16..23 dx, two's complement
+bits  8..15 dy, two's complement
+```
+
+`ui::pack_window_pointer` and `ui::decode_window_event`
+(`libs/zc-abi/src/ui.rs`) are the canonical codec. Bit 62 is always clear, so no
+real event can equal the all-ones sentinel. Coordinates are relative to the
+window's top-left corner — the same coordinates the client paints in — and only
+reports inside `wm::content` (below the title bar) are delivered, so a title-bar
+drag never looks like a widget click. The global pointer stays with the
+compositor through `SYS_MOUSE_READ`; this stream is the kernel's copy, derived
+from the reports it already applies to its own cursor and window machine. See
+[ADR 0034](../adr/0034-a-window-has-its-own-pointer-stream.md).
 
 ### Pointer-derived window placement
 

@@ -60,11 +60,12 @@ const LINE_H: u32 = GLYPH_H + 2;
 
 /// The keystrokes the boot proof feeds the terminal, in order.
 ///
-/// The kernel serves these through `SYS_TERM_READ` and replays them itself, so
-/// the client and the verifier derive the same final screen from one script.
-/// `cat` reads a real initramfs file through the VFS — the client through a
-/// syscall, the verifier through its own mount table — so the scripted screen
-/// proves the filesystem path end to end.
+/// The kernel serves these through the window input syscalls (`SYS_TERM_READ`
+/// and `SYS_WINDOW_READ`) and replays them itself, so the client and the
+/// verifier derive the same final screen from one script. `cat` reads a real
+/// initramfs file through the VFS — the client through a syscall, the verifier
+/// through its own mount table — so the scripted screen proves the filesystem
+/// path end to end.
 pub const SCRIPT: &[u8] = b"help\ncat hello.txt\n";
 
 /// A command line the user submitted, copied out of the terminal.

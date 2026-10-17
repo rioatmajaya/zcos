@@ -259,7 +259,7 @@ pub unsafe extern "C" fn _start() -> ! {
         restored |= action == Action::Restored;
         if action == Action::Closed {
             // Closing is a decision, not a paint: end the client's input session
-            // so the task blocked in `SYS_TERM_READ` wakes, paints a final frame,
+            // so the task blocked in `SYS_WINDOW_READ` wakes, paints a final frame,
             // and sends `WM_DONE`. The kernel records the closed state too, so
             // the frame verifier expects a desktop with no window in it.
             wm.close();

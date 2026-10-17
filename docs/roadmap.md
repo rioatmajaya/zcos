@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 7 grants`, `task 6: devmgr: blk published`, `dma: window coherent ok` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–7, F8e-1–2, live-input check, F8g-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: font vfs ok`; `compositor: font vfs ok`; `font: vfs ok`; `client: window painted`; `client: vfs ok`; `wm: window mapped`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed` (close run); `compositor: window erased` (close run); `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui host tests pass |
+| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–7, F8e-1–3, live-input check, F8g-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: font vfs ok`; `compositor: font vfs ok`; `font: vfs ok`; `client: window painted`; `client: vfs ok`; `client: pointer ok`; `wm: window mapped`; `wm: pointer routed`; `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed` (close run); `compositor: window erased` (close run); `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui host tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -694,14 +694,27 @@ full browser. Note them as follow-ups, do not build them here.
         event. Both boot checksums are unchanged (`0x3a43f97916fcc691`,
         `0x6d66e82d0f2d6fb8`), which is the evidence this is a refactor.
         See [`adr/0030`](adr/0030-the-pointer-has-one-owner.md).
-      - [ ] *(follow-up)* widgets and layout on top of it. **Blocked on the
-        pointer having one owner**: a button drawn inside a window cannot be
-        clicked, because the client may not read the pointer and the compositor
-        does not forward presses. Needs a kernel-side per-window pointer queue, or
-        the compositor forwarding presses — and focus has to be a kernel decision
-        before it can be a window-manager one, since two windows can both claim a
-        press. Recorded in [`adr/0030`](adr/0030-the-pointer-has-one-owner.md)
-        rather than worked around.
+      - [x] F8e-3: a window has its own pointer stream. The blocker recorded in
+        ADR 0030 is resolved on the kernel side: the kernel derives a
+        window-local stream from the reports it already applies to its own
+        cursor and window machine — the pointer reports that landed inside the
+        focused window's content area, translated to surface coordinates — and
+        `SYS_WINDOW_READ` (35) serves it together with the keyboard. The
+        compositor keeps the global pointer, so a client consuming its own
+        stream cannot steal a report from the drag; focus is the kernel's
+        decision (`Wm::rect` non-empty), and `wm::content` excludes the title
+        bar so a placement gesture can never look like a widget click.
+        `user/zc-ui::Window` blocks on the stream and hands the client a typed
+        `WindowEvent`; the client logs `client: pointer ok` and the kernel logs
+        `wm: pointer routed`, while both frame checksums stay unchanged. See
+        [`adr/0034`](adr/0034-a-window-has-its-own-pointer-stream.md).
+      - [ ] *(follow-up)* widgets and layout on top of it. The stream is in
+        place: a widget can hit-test with `WindowEvent::Pointer`'s local
+        coordinates and the shared `ui::hit_topmost`. What is left is the
+        widget set itself (button, label, list) and a layout pass, plus an exact
+        boot proof for one of them — the scripted session already ends with the
+        pointer inside the content area, so a click can be added to the script
+        and replayed by the kernel verifier like the keystrokes are.
       - [ ] *(follow-up)* prove live input, not just the scripted frame.
         **Done** as `tools/check-live-input.sh`: it boots the real image, checks
         the idle desktop is byte-stable, types `cat hello.txt` + Enter through
@@ -848,6 +861,13 @@ full browser. Note them as follow-ups, do not build them here.
   `cat hello.txt` + Enter through QEMU's monitor, and asserts the frame changed
   with the session still healthy — the boot checks only prove the scripted
   frame. Mutation-checked: a client that ignores keystrokes fails it.
+- A window has its own pointer stream (F8e-3): the kernel logs
+  `wm: pointer routed` when it derives the first event, the client logs
+  `task 8: client: pointer ok` when it receives one, and both boot variants keep
+  their frame checksums unchanged. The stream carries window-local coordinates
+  and only reports inside `wm::content`, so a title-bar drag is never delivered
+  as a widget click; `zc-abi` host tests cover the codec, the content region,
+  and the scripted session ending inside it.
 - Clean shutdown: `power: halt clean`.
 - Audio plays a known tone and the driver reports no XRUN under a stress
   buffer: `snd: playback ok`.

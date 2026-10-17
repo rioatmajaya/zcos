@@ -40,6 +40,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0031](0031-font-loads-from-the-vfs.md) | The font loads from the VFS, on every side | Accepted |
 | [0032](0032-clean-shutdown-is-a-syscall.md) | Clean shutdown is a syscall, not a yank | Accepted |
 | [0033](0033-device-interrupts-get-their-own-stack.md) | Device interrupts get their own stack | Accepted |
+| [0034](0034-a-window-has-its-own-pointer-stream.md) | A window has its own pointer stream | Accepted |
 
 ## Adding a decision
 

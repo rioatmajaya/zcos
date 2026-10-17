@@ -18,7 +18,9 @@
 //! * **The pointer is a single global.** [`Pointer::poll`] drains
 //!   `SYS_MOUSE_READ`, which holds *one* pending report shared by the whole
 //!   system — the kernel sums whatever frames have accumulated since the last read
-//!   and hands the result to whoever asks **first**. There is no per-window copy.
+//!   and hands the result to whoever asks **first**. The per-window copy a client
+//!   reads is derived by the kernel from the same reports; it is not a second
+//!   reader of the device.
 //!
 //! That asymmetry is the whole design problem, and it has a sharp edge: **a client
 //! must never call [`Pointer::poll`].** `SYS_MOUSE_READ` is not a broadcast. A
@@ -26,7 +28,8 @@
 //! away from the compositor, which owns the pointer and is the only thing that can
 //! place the window and draw the sprite. The result is a pointer that stops
 //! responding and a window that silently stops responding to drags — with nothing
-//! in any log to say why.
+//! in any log to say why. [`Window`] is the client-side alternative: it asks the
+//! kernel for that task's own derived stream and never touches the global one.
 //!
 //! This is not hypothetical. An earlier revision of this file gave every client one
 //! `EventLoop` that drained the pointer before blocking on a key. The window client
@@ -35,14 +38,18 @@
 //! `compositor: window dragged`, and a desktop checksum mismatch with every other
 //! marker green. The checksum caught it; a review had not.
 //!
-//! # What a widget cannot do yet
+//! # What a widget can do now
 //!
-//! Because the pointer has one owner, a button drawn *inside* a window cannot
-//! learn that it was clicked: the client has no legal way to read the pointer, and
-//! the compositor does not forward events to it. Widgets need either a
-//! kernel-side per-window pointer queue or the compositor forwarding presses over
-//! the window channel. Both are ABI changes, deliberately not faked here — see
-//! [ADR 0030](../../docs/adr/0030-the-pointer-has-one-owner.md).
+//! A widget drawn *inside* a window needs the pointer in the window's own
+//! coordinates. The client still may not read the global pointer, but it no
+//! longer has to: the kernel derives a per-window stream — the reports that
+//! landed inside that window's content area, translated to surface coordinates
+//! — and [`Window::next`] blocks on it. The compositor keeps the global pointer
+//! for placement and the sprite, so a client consuming its own stream cannot
+//! starve the drag. The kernel decides focus (the window is focused while it is
+//! on screen); a client cannot claim a press that landed on the title bar,
+//! because the title bar is not in the content area. See
+//! [ADR 0034](../../../docs/adr/0034-a-window-has-its-own-pointer-stream.md).
 //!
 //! # One report, one event
 //!
@@ -64,14 +71,17 @@
 #![no_std]
 
 use zc_abi::cursor::{Cursor, unpack_report};
-use zc_abi::ui::{Event, Input};
-use zc_user::{mouse_read, term_read};
+use zc_abi::ui::{Event, Input, WINDOW_NO_EVENT, decode_window_event};
+use zc_user::{mouse_read, term_read, window_read};
 
-/// The keyboard stream for a window client.
+/// The keyboard-only stream for a window client.
 ///
 /// Blocking, and safe to share: `SYS_TERM_READ` pops from a byte ring every reader
 /// of the *same* window would compete for, so exactly one client may own it at a
 /// time. That is the normal arrangement — one window, one client.
+///
+/// A client that also needs pointer events uses [`Window`], which serves the same
+/// keyboard bytes beside the window-local pointer reports.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Keys;
 
@@ -103,6 +113,79 @@ impl Keys {
     /// no delta and no button state, so there is nothing else to fold.
     pub fn next_event(&mut self) -> Option<Event> {
         self.next().map(Input::key)
+    }
+}
+
+/// One input event from a window's own stream.
+///
+/// Unlike [`Event`], a pointer event carries the position it happened at in the
+/// window's own coordinates, which is what a widget hit-test needs. The edge
+/// itself is still the shared [`Event`], derived by the same [`Input`] the
+/// compositor and the kernel use.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WindowEvent {
+    /// A keyboard byte, exactly as [`Keys::next`] returns it.
+    Key(u8),
+    /// A pointer report that landed inside this window's content area.
+    Pointer {
+        /// Horizontal position inside the window surface.
+        x: u16,
+        /// Vertical position inside the window surface.
+        y: u16,
+        /// The derived edge, with this report's own delta.
+        event: Event,
+    },
+}
+
+/// The mixed key and pointer stream for the window this task owns.
+///
+/// This is the client-side counterpart of [`Pointer`]: it blocks on
+/// `SYS_WINDOW_READ`, which the kernel serves with the scripted keystrokes, the
+/// live keyboard bytes routed to the window, and the pointer reports that landed
+/// inside the window's content area. It never reads the global pointer, so it
+/// cannot take a report away from the compositor.
+///
+/// Keep one for the life of the session: the button state the edges are derived
+/// from lives here, so dropping it would make the next report look like a fresh
+/// start and re-fire presses the user never made.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Window {
+    input: Input,
+}
+
+impl Window {
+    /// A window stream with no report seen yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { input: Input::new() }
+    }
+
+    /// Blocks for the next event, or returns `None` when the session is over.
+    ///
+    /// `None` means `SYS_WINDOW_READ` returned
+    /// [`zc_abi::ui::WINDOW_NO_EVENT`] — the shell exited or the window manager
+    /// closed the window — which is the signal to paint a final frame and leave.
+    /// A word the shared codec cannot decode is treated the same way: ending the
+    /// session is safer than inventing an event from bytes nobody promised.
+    pub fn next(&mut self) -> Option<WindowEvent> {
+        let word = window_read();
+        if word == WINDOW_NO_EVENT {
+            return None;
+        }
+        match decode_window_event(word)? {
+            zc_abi::ui::WindowEvent::Key(byte) => Some(WindowEvent::Key(byte)),
+            zc_abi::ui::WindowEvent::Pointer(report) => {
+                // The kernel delivers the device's current button mask, not an
+                // edge; `Input` derives the edge once, exactly as it does for
+                // the compositor and the kernel's own verifier.
+                let event = self.input.report(report.buttons, report.dx, report.dy);
+                Some(WindowEvent::Pointer {
+                    x: report.x,
+                    y: report.y,
+                    event,
+                })
+            }
+        }
     }
 }
 
