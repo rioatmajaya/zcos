@@ -104,15 +104,16 @@ pub unsafe extern "C" fn _start() -> ! {
         task_exit()
     }
     let window = window as u32;
-    if window == 1 {
-        // The second window client proves it booted and learned its id, then
-        // exits cleanly. The compositor does not assign a surface at boot, and
-        // the scripted boot requires every spawned task to reach a terminal
-        // state; blocking on this window's assignment channel with no sender
-        // would leave a lone blocked task and trip the scheduler's ipc
-        // deadlock. The visible second window (a file manager) is F8h-1c. CI
-        // greps this line to confirm the second client is live and wired to the
-        // right id.
+    if window == 1 && !cfg!(feature = "fm-proof") {
+        // The shipped boot launches only window 0. This task still proves it
+        // booted and learned its id, then exits cleanly: the compositor does not
+        // assign it a surface, and the scripted boot requires every spawned task
+        // to reach a terminal state — a client blocked on this window's
+        // assignment channel with no sender would be the lone blocked task and
+        // trip the scheduler's ipc deadlock. The `--fm` build turns on `fm-proof`
+        // and serves window 1 as a real terminal; a later slice replaces it with
+        // the file manager. CI greps this line to confirm the second client is
+        // live and wired to the right id.
         log("client: window 1 idle (F8h-1c)\n");
         task_exit();
     }

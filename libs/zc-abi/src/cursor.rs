@@ -157,6 +157,81 @@ pub const MOUSE_SCRIPT: &[MouseStep] = &[
     step(0, 0, 0),
 ];
 
+/// The launcher suffix the `--fm` build serves after the shared prefix.
+///
+/// It starts where [`MOUSE_SCRIPT_LEN_WINDOW_UP`] ends — the pointer inside the
+/// window at `(300, 150)` — walks to the taskbar's launcher button, and presses
+/// it. The press is what makes the shared [`crate::wm::Wm`] machine derive
+/// `Kind::Launched` on both sides, so the second window is *derived from the
+/// report stream* rather than enabled by a compile-time switch in the
+/// compositor. A separate array (not a prefix of [`MOUSE_SCRIPT`]) because the
+/// close and launch suffixes are mutually exclusive endings of the same prefix.
+pub const MOUSE_LAUNCH_SCRIPT: &[MouseStep] = &[
+    // (300, 150) -> (24, 16): three clamped moves onto the launcher centre.
+    step(0, -127, -127),
+    step(0, -127, -7),
+    step(0, -22, 0),
+    // Press the launcher, then release, so the gesture is one clean click.
+    step(BUTTON_LEFT, 0, 0),
+    step(0, 0, 0),
+];
+
+/// Which scripted session a build serves.
+///
+/// The three are mutually exclusive endings of the one shared prefix, so a
+/// gesture is described once and the variants cannot drift.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScriptVariant {
+    /// The shared prefix only: drag, minimize, restore, click. Leaves window 0
+    /// on screen. This is the default boot.
+    WindowUp,
+    /// The prefix plus the close-glyph sequence: ends window 0's session.
+    Close,
+    /// The prefix plus a launcher press: derives `Kind::Launched`, which opens
+    /// window 1. This is the `--fm` boot.
+    Launch,
+}
+
+/// Returns how many steps of a variant's stream are served.
+///
+/// `Launch` is the shared prefix plus [`MOUSE_LAUNCH_SCRIPT`]; the other two are
+/// prefixes of [`MOUSE_SCRIPT`]. Selecting by length rather than by slice keeps
+/// every variant tied to the one array it extends.
+#[must_use]
+pub const fn script_len_for(variant: ScriptVariant) -> usize {
+    match variant {
+        ScriptVariant::WindowUp => MOUSE_SCRIPT_LEN_WINDOW_UP,
+        ScriptVariant::Close => MOUSE_SCRIPT.len(),
+        ScriptVariant::Launch => MOUSE_SCRIPT_LEN_WINDOW_UP + MOUSE_LAUNCH_SCRIPT.len(),
+    }
+}
+
+/// Returns step `index` of `variant`'s report stream, or `None` past its end.
+#[must_use]
+pub const fn script_step(variant: ScriptVariant, index: usize) -> Option<MouseStep> {
+    if index < MOUSE_SCRIPT_LEN_WINDOW_UP {
+        return Some(MOUSE_SCRIPT[index]);
+    }
+    match variant {
+        ScriptVariant::WindowUp => None,
+        ScriptVariant::Close => {
+            if index < MOUSE_SCRIPT.len() {
+                Some(MOUSE_SCRIPT[index])
+            } else {
+                None
+            }
+        }
+        ScriptVariant::Launch => {
+            let index = index - MOUSE_SCRIPT_LEN_WINDOW_UP;
+            if index < MOUSE_LAUNCH_SCRIPT.len() {
+                Some(MOUSE_LAUNCH_SCRIPT[index])
+            } else {
+                None
+            }
+        }
+    }
+}
+
 /// Index of the first step that belongs to the close proof.
 ///
 /// Everything before it ends with the window restored, the button clicked, and
@@ -165,15 +240,36 @@ pub const MOUSE_SCRIPT: &[MouseStep] = &[
 /// step anywhere in the shared prefix moves the boundary with it.
 pub const MOUSE_SCRIPT_LEN_WINDOW_UP: usize = 28;
 
-/// Returns how many steps of [`MOUSE_SCRIPT`] a variant serves.
+/// Returns the scripted session a build serves from its two proof features.
 ///
-/// `close` selects it: `false` serves only the shared prefix, leaving the window
-/// on screen; `true` serves the whole script and ends the window's session.
-/// Selecting by length rather than by slice keeps both variants prefixes of the
-/// one array, so a gesture is described exactly once and the two can never drift.
+/// `close` and `fm` are mutually exclusive endings of the shared prefix; the
+/// default (neither) is [`ScriptVariant::WindowUp`], which never launches a
+/// second window and never closes window 0, so the shipped frame is unchanged.
+#[must_use]
+pub const fn script_variant(close: bool, fm: bool) -> ScriptVariant {
+    if close {
+        ScriptVariant::Close
+    } else if fm {
+        ScriptVariant::Launch
+    } else {
+        ScriptVariant::WindowUp
+    }
+}
+
+/// Returns how many steps of [`MOUSE_SCRIPT`] the two-way `close` selector
+/// serves.
+///
+/// Kept for the default/close callers: `false` is [`ScriptVariant::WindowUp`],
+/// `true` is [`ScriptVariant::Close`]. The three-way [`script_len_for`] is the
+/// single source of truth; this is a thin wrapper so the existing two-variant
+/// callers and tests stay unchanged.
 #[must_use]
 pub const fn script_len(close: bool) -> usize {
-    if close { MOUSE_SCRIPT.len() } else { MOUSE_SCRIPT_LEN_WINDOW_UP }
+    if close {
+        script_len_for(ScriptVariant::Close)
+    } else {
+        script_len_for(ScriptVariant::WindowUp)
+    }
 }
 
 /// The value `SYS_MOUSE_READ` returns when no report is waiting.
@@ -383,6 +479,47 @@ mod tests {
         // proof really exercises the per-window pointer stream a client reads
         // rather than stopping at a placement gesture.
         assert!(crate::wm::content(wm.rect()).contains(at.x, at.y));
+    }
+
+    #[test]
+    fn the_launch_variant_ends_on_the_launcher_button() {
+        let (w, h) = (1280u32, 800u32);
+        // The launch variant is the shared prefix plus a walk to the launcher
+        // and one press; it must land inside the rectangle the panel paints, or
+        // the derived `Kind::Launched` would never fire.
+        let launcher = crate::desktop::launcher_button_rect(h);
+        let mut cursor = Cursor::new(w, h);
+        let mut wm = crate::wm::Wm::new(w, h, crate::desktop::window_rect(
+            crate::desktop::FRAME_MOVED, w, h,
+        ));
+        let mut input = crate::ui::Input::new();
+        let mut launched = false;
+        for index in 0..script_len_for(ScriptVariant::Launch) {
+            let Some(entry) = script_step(ScriptVariant::Launch, index) else {
+                break;
+            };
+            let event = input.report(entry.buttons, entry.dx, entry.dy);
+            cursor.apply(entry.dx, entry.dy, w, h);
+            let action = wm.apply(cursor, event);
+            if action.kind == crate::wm::Kind::Launched {
+                launched = true;
+            }
+        }
+        assert!(launched, "the launch script never pressed the launcher");
+        assert!(
+            launcher.contains(cursor.x, cursor.y),
+            "the launch click left the launcher rectangle"
+        );
+        // The launch variant shares the exact prefix the default boot serves,
+        // so the first 28 steps are byte-identical and only the suffix differs.
+        assert_eq!(script_len_for(ScriptVariant::Launch), MOUSE_SCRIPT_LEN_WINDOW_UP + MOUSE_LAUNCH_SCRIPT.len());
+        for index in 0..MOUSE_SCRIPT_LEN_WINDOW_UP {
+            assert_eq!(
+                script_step(ScriptVariant::Launch, index),
+                script_step(ScriptVariant::Close, index),
+                "the shared prefix differs between launch and close"
+            );
+        }
     }
 
     #[test]

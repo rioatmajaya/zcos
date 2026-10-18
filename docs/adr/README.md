@@ -46,6 +46,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0037](0037-a-served-filesystem-can-list.md) | A filesystem served over IPC can list | Accepted |
 | [0038](0038-the-window-manager-holds-a-table.md) | The window manager holds a table, not a window | Accepted |
 | [0039](0039-a-second-window-client-and-per-window-state.md) | A second window client, and per-window kernel state | Accepted |
+| [0040](0040-a-second-window-is-visible.md) | A second window is visible | Accepted |
 
 ## Adding a decision
 

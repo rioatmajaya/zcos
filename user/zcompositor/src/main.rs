@@ -24,7 +24,8 @@
 use zc_abi::{
     Cursor, DamageList, FONT_LEN, FONT_PATH, FRAME_INITIAL, FRAME_MOVED, FramebufferInfo, Font,
     IPC_WM, IPC_WM_REPLY, Kind, PixelFormat, Rect, SurfaceInfo, WM_ACK, WM_DONE, Wm, encode,
-    pixel_at, pixel_at_with_window, window_rect,
+    pixel_at, pixel_at_with_window_count, window_rect, window_rect_for, wm_assign, wm_reply_kind,
+    wm_reply_window,
 };
 use zc_ui::Pointer;
 use zc_user::{
@@ -34,6 +35,49 @@ use zc_user::{
 
 /// Damage rectangles the compositor tracks before collapsing to a full repaint.
 const DAMAGE_SLOTS: usize = 16;
+
+/// How many windows the compositor can hold, one slot per window id.
+///
+/// Mirrors `zc_abi::wm::MAX_WINDOWS`; kept as a local `const` so the surface
+/// arrays are sized without reaching into the window manager's module.
+const MAX_WINDOWS: usize = zc_abi::wm::MAX_WINDOWS;
+
+/// Task index of the window client the compositor delegates window 0 to.
+///
+/// Userspace cannot see `zc_kernel::service`; this mirrors
+/// `service::WINDOW_CLIENT_TASK`. A later window's client is one task past it,
+/// because the window id is the task slot's offset from this one.
+const WINDOW_CLIENT_TASK: u64 = 8;
+
+/// A window surface the compositor owns and delegates to a client.
+///
+/// One slot per window id. A window that has not been launched yet keeps
+/// `object == NO_SURFACE` and a null `pixels`; a launched one holds the mapped
+/// geometry and backing pointer, so `composite` can blit it by id.
+struct Layer {
+    /// Surface object id, or [`NO_SURFACE`] when this window has no surface.
+    object: u32,
+    /// Mapped geometry of `object`; meaningless when `object == NO_SURFACE`.
+    info: SurfaceInfo,
+    /// Backing pixels of `info`, or null when there is no surface.
+    pixels: *const u32,
+}
+
+/// A slot with no delegated surface yet.
+const NO_SURFACE: u32 = u32::MAX;
+
+impl Layer {
+    const EMPTY: Self = Self {
+        object: NO_SURFACE,
+        info: SurfaceInfo::UNAVAILABLE,
+        pixels: core::ptr::null(),
+    };
+
+    /// Returns whether this slot holds a mapped surface.
+    const fn is_live(&self) -> bool {
+        self.object != NO_SURFACE
+    }
+}
 
 /// The font file's bytes, filled once at startup before the first frame.
 ///
@@ -74,12 +118,6 @@ fn load_font() -> Font<'static> {
     log("compositor: font embedded fallback\n");
     Font::embedded()
 }
-
-/// Task index of the window client the compositor delegates the window to.
-///
-/// Userspace cannot see `zc_kernel::service`; this mirrors
-/// `service::WINDOW_CLIENT_TASK`.
-const WINDOW_CLIENT_TASK: u64 = 8;
 
 /// Task entry point; the kernel provides a fresh user stack.
 #[unsafe(no_mangle)]
@@ -133,35 +171,20 @@ pub unsafe extern "C" fn _start() -> ! {
     // scripted second frame places it.
     let mut wm = Wm::new(width, height, window_rect(FRAME_INITIAL, width, height));
 
-    // The window is a separate surface the compositor hands to a client: it
-    // creates the surface, delegates a read/write capability, and assigns the
-    // object id over the window channel. The client paints into it and
-    // acknowledges, so the compositor composites the client's own pixels. Map
-    // it up front so the pixels are held before the first frame arrives.
-    let window_object = surface_create(moved.w, moved.h, format as u32);
-    if window_object == u64::MAX {
-        log("compositor: window create failed\n");
-        let _ = send_to(IPC_WM as u64, 0);
-        task_exit()
-    }
-    let window_object = window_object as u32;
-    if cap_delegate(window_object, WINDOW_CLIENT_TASK, 0x3) != 0 {
-        log("compositor: window delegate failed\n");
-        let _ = send_to(IPC_WM as u64, 0);
-        task_exit()
-    }
-    let mut window_surface = SurfaceInfo::UNAVAILABLE;
-    let window_mapped = surface_map(window_object, Some(&mut window_surface));
-    if window_mapped == u64::MAX || !window_surface.is_available() {
-        log("compositor: window map failed\n");
-        let _ = send_to(IPC_WM as u64, 0);
-        task_exit()
-    }
-    let window_pixels = window_mapped as *const u32;
+    // One slot per window id. Window 0 is launched now; a later window is
+    // launched only when a `Kind::Launched` action fires, so the default boot
+    // (whose script never presses the launcher) keeps exactly one surface.
+    let mut layers = [Layer::EMPTY; MAX_WINDOWS];
 
-    // Hand the client its object id, then wait for its first painted frame.
-    let _ = send_to(IPC_WM as u64, u64::from(window_object));
-    if recv_from(IPC_WM_REPLY as u64) != WM_ACK {
+    // Launch window 0: create its surface, delegate a read/write capability, map
+    // it, hand the object id over its assignment channel, and wait for the first
+    // painted frame. Both proof frames share the window rectangle's dimensions,
+    // so `moved.w/h` is the surface size.
+    if !launch_window(&mut layers, 0, WINDOW_CLIENT_TASK, moved.w, moved.h, format) {
+        log("compositor: window create failed\n");
+        task_exit()
+    }
+    if !await_ack(0) {
         log("compositor: client did not acknowledge\n");
         task_exit()
     }
@@ -182,48 +205,25 @@ pub unsafe extern "C" fn _start() -> ! {
     // Frame 0: paint the whole desktop into the back buffer, overlay the
     // client's window, draw the pointer, and present it.
     composite(
-        back,
-        &fb,
-        format,
-        font,
-        width,
-        height,
-        surface.stride,
-        window_pixels,
-        window_surface.stride,
-        wm.window(),
-        cursor,
-        full,
+        back, &fb, format, font, width, height, surface.stride, &wm, &layers, cursor, full,
     );
     log("compositor: frame 0 painted\n");
     log("wm: window mapped\n");
 
-    // Frame 1: move the window. Only the old and new window rectangles need
+    // Frame 1: move window 0. Only the old and new window rectangles need
     // repainting, and only those rectangles are flushed to the display.
     let mut damage = DamageList::<DAMAGE_SLOTS>::new();
     damage.add(window_rect(FRAME_INITIAL, width, height));
     wm.place(moved);
-    let window = wm.window();
-    damage.add(window);
-    // Composite each damaged rectangle: repaint the desktop, overlay the
-    // client's window where it covers the rectangle, redraw the pointer, and
-    // flush only that rectangle to the display.
+    damage.add(wm.window());
+    // Composite each damaged rectangle: repaint the desktop, overlay every
+    // window where it covers the rectangle, redraw the pointer, and flush only
+    // that rectangle to the display.
     let mut index = 0;
     while index < damage.len() {
         let rect = damage.rects()[index];
         composite(
-            back,
-            &fb,
-            format,
-            font,
-            width,
-            height,
-            surface.stride,
-            window_pixels,
-            window_surface.stride,
-            window,
-            cursor,
-            rect,
+            back, &fb, format, font, width, height, surface.stride, &wm, &layers, cursor, rect,
         );
         index += 1;
     }
@@ -237,19 +237,23 @@ pub unsafe extern "C" fn _start() -> ! {
     // Cursor session: poll the scripted mouse reports, move the pointer, and
     // feed the same reports to the window manager so a click on the title bar
     // drags the window. Damage is the union of the pointer's old and new
-    // rectangles *and* the window's old and new rectangles, so a drag repaints
+    // rectangles *and* every window's old and new rectangles, so a drag repaints
     // what it vacates as well as what it covers — a stale window left behind is
     // exactly what the kernel's recomputed desktop catches. The kernel serves the
     // same reports to its own cursor and window machine, so both positions stay
     // proofs rather than claims.
-    let mut window = wm.rect();
     let mut dragged = false;
     let mut minimized = false;
     let mut restored = false;
     let mut closed = false;
+    // How many clients still owe us a `WM_DONE`. Window 0 is live; a launch adds
+    // one, and the compositor stops only once all of them have finished, so a
+    // second window's surface is destroyed (and its snapshot taken) before the
+    // final frame.
+    let mut live: u32 = 1;
     while let Some(event) = pointer.poll() {
         let cursor_before = cursor.rect();
-        let window_before = window;
+        let windows_before = windows_union(&wm);
         // Derive the event once, exactly as the kernel does over the same
         // reports, so both sides react to one event stream rather than to two
         // independent readings of the same button mask.
@@ -268,31 +272,31 @@ pub unsafe extern "C" fn _start() -> ! {
             }
             closed = true;
         }
-        window = wm.rect();
+        if action.kind == Kind::Launched {
+            // Starting an app is the compositor's decision, mirrored by the
+            // kernel, which adds the same window at the same shared rectangle on
+            // its own copy of this report. The launch names no window; the id
+            // being added is one past the last, and the client that owns it is
+            // one task past window 0's.
+            if launch_next(&mut wm, &mut layers, width, height, format) {
+                live += 1;
+                log("compositor: window 1 launched\n");
+            }
+        }
         dragged |= action.kind == Kind::Moved;
         // A press that arms a drag moves nothing yet, but the pointer's own old
-        // and new rectangles are always damaged. A report that changes the window
+        // and new rectangles are always damaged. A report that changes a window
         // — a move, or a hide/restore — damages both the old and the new
         // rectangle, so the area it vacates is repainted rather than left
         // holding stale pixels. A minimized window's `rect` is empty, so its
         // union covers exactly the region the window just left.
         let mut rect = cursor_before.union(cursor.rect());
-        if window_before != window {
-            rect = rect.union(window_before).union(window);
+        let windows_after = windows_union(&wm);
+        if windows_before != windows_after {
+            rect = rect.union(windows_before).union(windows_after);
         }
         composite(
-            back,
-            &fb,
-            format,
-            font,
-            width,
-            height,
-            surface.stride,
-            window_pixels,
-            window_surface.stride,
-            window,
-            cursor,
-            rect,
+            back, &fb, format, font, width, height, surface.stride, &wm, &layers, cursor, rect,
         );
     }
     log("compositor: cursor moved\n");
@@ -314,76 +318,56 @@ pub unsafe extern "C" fn _start() -> ! {
     }
     log("compositor: cursor ok\n");
 
-    // Event loop: the client repaints on every keystroke and acknowledges, so
+    // Event loop: a client repaints on every keystroke and acknowledges, so
     // re-composite its window at its current position and flush only that
     // rectangle. The pointer is foreground, so before each frame the compositor
     // drains any mouse report the kernel routed and moves the sprite with damage
     // tracking; a `WM_MOUSE` nudge (or any client frame) carries the wakeup.
-    // `WM_DONE` means the client's session is over, whichever way it ended: the
-    // shell exited, or the close glyph ended it. Either way the window leaves the
-    // screen, so erase it before stopping.
-    loop {
+    // `WM_DONE` means that client's session is over, whichever way it ended: the
+    // shell exited, or the close glyph ended it. Only when every launched client
+    // has finished does the compositor erase closed windows and stop.
+    while live > 0 {
         let message = recv_from(IPC_WM_REPLY as u64);
         // Poll the pointer first: the kernel applies the same reports it serves
         // to its own cursor and window machine, so both the position and the
         // placement are proven, not trusted. Live input moves the pointer — and
-        // drags the window — between client frames.
+        // drags a window — between client frames.
         while let Some(event) = pointer.poll() {
             let cursor_before = cursor.rect();
-            let window_before = window;
+            let windows_before = windows_union(&wm);
             cursor = pointer.cursor();
             let action = wm.apply(cursor, event);
             if action.kind == Kind::Closed {
                 wm.close_of(action.window);
                 let _ = window_close(action.window);
             }
-            window = wm.rect();
             let mut rect = cursor_before.union(cursor.rect());
-            if window_before != window {
-                rect = rect.union(window_before).union(window);
+            let windows_after = windows_union(&wm);
+            if windows_before != windows_after {
+                rect = rect.union(windows_before).union(windows_after);
             }
             composite(
-                back,
-                &fb,
-                format,
-                font,
-                width,
-                height,
-                surface.stride,
-                window_pixels,
-                window_surface.stride,
-                window,
-                cursor,
-                rect,
+                back, &fb, format, font, width, height, surface.stride, &wm, &layers, cursor, rect,
             );
         }
-        if message == WM_DONE {
-            break;
+        let kind = wm_reply_kind(message);
+        let from = wm_reply_window(message);
+        if kind == WM_DONE {
+            live -= 1;
+            continue;
         }
-        // The client repainted; overlay the window at its current position and
-        // flush. A `WM_MOUSE` nudge carries no window change of its own, and a
-        // closed window's `rect` is empty so this paints and flushes nothing.
+        // The named client repainted; overlay its window at its current position
+        // and flush. A `WM_MOUSE` nudge carries no window change of its own.
+        let rect = wm.rect_of(from).unwrap_or(Rect::EMPTY);
         composite(
-            back,
-            &fb,
-            format,
-            font,
-            width,
-            height,
-            surface.stride,
-            window_pixels,
-            window_surface.stride,
-            window,
-            cursor,
-            window,
+            back, &fb, format, font, width, height, surface.stride, &wm, &layers, cursor, rect,
         );
-        if message == WM_ACK {
+        if kind == WM_ACK {
             log("compositor: frame updated\n");
         }
     }
 
-    // A *closed* window leaves the screen: repaint the desktop across its
-    // remembered footprint and flush it. Passing the remembered placement as the
+    // Every *closed* window leaves the screen: repaint the desktop across its
     // remembered footprint and flush it. Passing the remembered placement as the
     // clip bounds and an empty placement to the painter is what makes this an
     // erase — the painter sees bare desktop, and the blit rejects itself because
@@ -391,43 +375,141 @@ pub unsafe extern "C" fn _start() -> ! {
     // its own machine also holds a closed window, so `fb: desktop checksum ok`
     // proves the erase covered the right pixels.
     //
-    // A session that ended any other way — the shell exiting, the client
-    // choosing to stop — leaves the window's pixels standing, and the kernel's
-    // placement proof is what checks them. Erasing there would destroy the very
-    // pixels the proof compares against.
-    if wm.is_closed() {
-        let erased = wm.window();
-        composite(
-            back,
-            &fb,
-            format,
-            font,
-            width,
-            height,
-            surface.stride,
-            window_pixels,
-            window_surface.stride,
-            Rect::EMPTY,
-            cursor,
-            erased,
-        );
+    // A session that ended any other way — the shell exiting, a client choosing
+    // to stop — leaves the window's pixels standing, and the kernel's placement
+    // proof is what checks them. Erasing there would destroy the very pixels the
+    // proof compares against.
+    let mut erased_any = false;
+    let mut id = 0;
+    while id < wm.count() {
+        let Some(window_id) = wm.id_at(id) else {
+            break;
+        };
+        if wm.is_closed_of(window_id) {
+            let erased = wm.window_of(window_id).unwrap_or(Rect::EMPTY);
+            composite(
+                back, &fb, format, font, width, height, surface.stride, &wm, &layers, cursor,
+                erased,
+            );
+            erased_any = true;
+        }
+        id += 1;
+    }
+    if erased_any {
         log("compositor: window erased\n");
     }
 
-    // Both surfaces are no longer needed once the display holds the final
-    // frame; returning their frames proves destroy works and leaves nothing.
-    let _ = surface_destroy(window_object);
+    // Every surface is no longer needed once the display holds the final frame;
+    // returning their frames proves destroy works and leaves nothing.
+    let mut slot = 0;
+    while slot < MAX_WINDOWS {
+        if layers[slot].is_live() {
+            let _ = surface_destroy(layers[slot].object);
+        }
+        slot += 1;
+    }
     let _ = surface_destroy(object);
     log("compositor: ready\n");
     task_exit()
 }
 
-/// Paints `rect` of the desktop into the back buffer for a window at `window`.
+/// Launches the next window: creates and maps its surface, delegates it to the
+/// owning client task, and hands over the object id on that window's channel.
 ///
-/// The window rectangle is passed rather than a frame number because a drag can
-/// move the window anywhere; `zc_abi::desktop::pixel_at_with_window` recomputes
-/// the same pixels the kernel's verifier does for that exact rectangle, so the
-/// two cannot drift.
+/// The window id is one past the last registered one, so the first launch is
+/// window 1 owned by [`SECOND_WINDOW_TASK`]. The caller then waits for the ack.
+/// `false` on any failure leaves the client blocked for a surface that will not
+/// come, so the caller treats it as fatal.
+fn launch_next(wm: &mut Wm, layers: &mut [Layer; MAX_WINDOWS], width: u32, height: u32, format: PixelFormat) -> bool {
+    let id = wm.count() as u32;
+    if id as usize >= MAX_WINDOWS {
+        return false;
+    }
+    let rect = window_rect_for(id, FRAME_INITIAL, width, height);
+    if !wm.add(id, rect) {
+        return false;
+    }
+    let task = WINDOW_CLIENT_TASK + u64::from(id);
+    launch_window(layers, id, task, rect.w, rect.h, format)
+}
+
+/// Creates, delegates, and maps `id`'s surface and hands over its object id.
+///
+/// Does not wait for the ack; the caller does, so it can distinguish the boot
+/// handshake (window 0) from a later launch.
+fn launch_window(
+    layers: &mut [Layer; MAX_WINDOWS],
+    id: u32,
+    task: u64,
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+) -> bool {
+    let created = surface_create(width, height, format as u32);
+    if created == u64::MAX {
+        return false;
+    }
+    let object = created as u32;
+    if cap_delegate(object, task, 0x3) != 0 {
+        return false;
+    }
+    let mut info = SurfaceInfo::UNAVAILABLE;
+    let mapped = surface_map(object, Some(&mut info));
+    if mapped == u64::MAX || !info.is_available() {
+        return false;
+    }
+    layers[id as usize] = Layer {
+        object,
+        info,
+        pixels: mapped as *const u32,
+    };
+    let _ = send_to(wm_assign(id) as u64, u64::from(object));
+    true
+}
+
+/// Waits for window `id`'s first `WM_ACK`, ignoring any pointer nudge.
+fn await_ack(id: u32) -> bool {
+    // A `WM_MOUSE` nudge can arrive before the ack; drop nudges and the first
+    // frame of any other window, and keep waiting for this one's.
+    loop {
+        let word = recv_from(IPC_WM_REPLY as u64);
+        if wm_reply_kind(word) == WM_ACK && wm_reply_window(word) == id {
+            return true;
+        }
+    }
+}
+
+/// Returns the union of every registered window's on-screen rectangle.
+///
+/// Used to damage the area a window occupies before and after a report, so a
+/// move, a minimize, or a launch repaints what it vacates as well as what it
+/// covers. A hidden or closed window's `rect` is empty and contributes nothing.
+fn windows_union(wm: &Wm) -> Rect {
+    let mut acc = Rect::EMPTY;
+    let mut index = 0;
+    while index < wm.count() {
+        let Some(id) = wm.id_at(index) else {
+            break;
+        };
+        if let Some(rect) = wm.rect_of(id) {
+            acc = acc.union(rect);
+        }
+        index += 1;
+    }
+    acc
+}
+
+/// Paints `rect` of the bare desktop into the back buffer for a desktop with
+/// `windows` windows.
+///
+/// The window layer is left out: the painter draws only the background gradient
+/// and the taskbar (whose button count depends on `windows`), and each window's
+/// own pixels are blitted on top by [`composite`]. That is exactly what the
+/// kernel's frame verifier does — it recomputes the desktop with
+/// `Rect::EMPTY` and compares each window region to the client's surface — so
+/// painter and verifier cannot drift. With one window this is pixel-identical to
+/// the old single-window painter, because the client's blit covered the window
+/// placeholder the painter used to draw underneath.
 fn paint_rect(
     back: *mut u32,
     stride: u32,
@@ -436,7 +518,7 @@ fn paint_rect(
     width: u32,
     height: u32,
     rect: Rect,
-    window: Rect,
+    windows: u32,
 ) {
     let right = if rect.right() > width { width } else { rect.right() };
     let bottom = if rect.bottom() > height {
@@ -448,7 +530,9 @@ fn paint_rect(
     while y < bottom {
         let mut x = rect.x;
         while x < right {
-            if let Some(pixel) = pixel_at_with_window(font, format, x, y, width, height, window) {
+            if let Some(pixel) =
+                pixel_at_with_window_count(font, format, x, y, width, height, Rect::EMPTY, windows)
+            {
                 // SAFETY: the kernel mapped `stride * height` pixels at `back`
                 // with user permissions and `rect` stays inside them.
                 unsafe {
@@ -601,23 +685,42 @@ fn composite(
     width: u32,
     height: u32,
     stride: u32,
-    window_pixels: *const u32,
-    window_stride: u32,
-    window: Rect,
+    wm: &Wm,
+    layers: &[Layer; MAX_WINDOWS],
     cursor: Cursor,
     rect: Rect,
 ) {
-    paint_rect(back, stride, format, font, width, height, rect, window);
-    blit_window(
-        back,
-        stride,
-        window_pixels,
-        window_stride,
-        window,
-        rect,
-        width,
-        height,
-    );
+    // The desktop (background + taskbar, one button per registered window) is
+    // painted bare; every window's pixels are blitted over it in z-order, so a
+    // window that moved leaves bare desktop where it used to be and its own
+    // surface where it is now.
+    paint_rect(back, stride, format, font, width, height, rect, wm.count() as u32);
+    // Bottom-first, the same order the painter lays the taskbar buttons out.
+    let mut index = 0;
+    while index < wm.z_len() {
+        let Some(id) = wm.z_at(index) else {
+            break;
+        };
+        // A hidden or closed window has an empty rectangle and paints nothing.
+        if let Some(origin) = wm.rect_of(id) {
+            if !origin.is_empty() {
+                let layer = &layers[id as usize];
+                if layer.is_live() {
+                    blit_window(
+                        back,
+                        stride,
+                        layer.pixels,
+                        layer.info.stride,
+                        origin,
+                        rect,
+                        width,
+                        height,
+                    );
+                }
+            }
+        }
+        index += 1;
+    }
     draw_cursor(back, stride, format, width, height, cursor, rect);
     blit_rect(back, fb, stride, rect);
 }

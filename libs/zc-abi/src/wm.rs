@@ -17,7 +17,7 @@
 //! host-tested like the rest of the desktop layout.
 
 use crate::cursor::Cursor;
-use crate::desktop::{Rect, TITLE_HEIGHT, panel_height};
+use crate::desktop::{Rect, TITLE_HEIGHT, launcher_button_rect, panel_height};
 use crate::font::GLYPH_W;
 use crate::ui::Event;
 
@@ -146,6 +146,15 @@ pub enum Kind {
     Restored,
     /// The close glyph was pressed; the window's session is over.
     Closed,
+    /// The launcher button was pressed; the caller should start the next app.
+    ///
+    /// The window manager names no window for this action — the window being
+    /// launched does not exist yet — so [`Action::window`] is the window-0
+    /// sentinel, the same convention [`Action::NONE`] uses. Starting the app is
+    /// the caller's policy: the compositor and the kernel each add the next
+    /// window at the shared [`window_rect_for`] rectangle, so the placement they
+    /// derive from one press stays identical.
+    Launched,
 }
 
 impl Action {
@@ -607,6 +616,14 @@ impl Wm {
             Event::Press { button, .. } => {
                 if button & crate::cursor::BUTTON_LEFT == 0 {
                     return Action::NONE;
+                }
+                // The launcher button sits in the same taskbar band as the task
+                // buttons, so it is tested first: a press there is a launch
+                // request, not a selection. It names no window — the one being
+                // launched does not exist yet — so the caller adds the next one
+                // at the shared layout rectangle.
+                if launcher_button_rect(self.screen_h).contains(at.x, at.y) {
+                    return Action::of(0, Kind::Launched);
                 }
                 // The taskbar is under everything — `clamp_window` keeps windows
                 // clear of the panel — so checking it first is for readability,
@@ -1089,18 +1106,25 @@ mod tests {
     }
 
     #[test]
-    fn the_launcher_button_and_a_shown_task_button_do_nothing() {
+    fn the_launcher_button_asks_to_launch_and_a_shown_task_button_is_inert() {
         let mut d = Driver::new();
         let window = d.wm.window();
+        // The launcher is a launch request: it names no window and changes no
+        // placement — adding the window is the caller's job.
         let launcher = crate::desktop::launcher_button_rect(H);
+        d.hover(Rect::new(launcher.x + launcher.w / 2, launcher.y + launcher.h / 2, 1, 1));
+        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), act(Kind::Launched));
+        assert_eq!(d.feed(0, 0, 0), act(Kind::None));
+        assert!(d.wm.is_shown());
+        assert_eq!(d.wm.window(), window);
+        // A task button for an already-shown, already-focused window does
+        // nothing.
         let task = crate::desktop::task_button_rect(H);
-        for button in [launcher, task] {
-            d.hover(Rect::new(button.x + button.w / 2, button.y + button.h / 2, 1, 1));
-            assert_eq!(d.feed(BUTTON_LEFT, 0, 0), act(Kind::None));
-            assert_eq!(d.feed(0, 0, 0), act(Kind::None));
-            assert!(d.wm.is_shown());
-            assert_eq!(d.wm.window(), window);
-        }
+        d.hover(Rect::new(task.x + task.w / 2, task.y + task.h / 2, 1, 1));
+        assert_eq!(d.feed(BUTTON_LEFT, 0, 0), act(Kind::None));
+        assert_eq!(d.feed(0, 0, 0), act(Kind::None));
+        assert!(d.wm.is_shown());
+        assert_eq!(d.wm.window(), window);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 # Build the ZC OS UEFI loader and kernel, and package them into a bootable
 # FAT image that QEMU/OVMF can start.
 #
-# Usage: tools/build-efi.sh [--test | --test-close]
+# Usage: tools/build-efi.sh [--test | --test-close | --fm]
 #   --test         build with the qemu-exit feature so tools/run-qemu.sh --test
 #                  can terminate the emulator with a status code once the kernel
 #                  reaches its idle state. The scripted mouse session stops with
@@ -13,6 +13,11 @@
 #                  final frame with no window in it — which is why it is a
 #                  separate image and a separate CI run, and why the default is
 #                  the one a person boots (ADR 0026).
+#   --fm           build the two-window proof: the kernel and the window client
+#                  gain fm-proof, so the scripted session clicks the launcher,
+#                  the compositor opens window 1, and the verifier placement-checks
+#                  both windows. Its own image, like the close proof, so the
+#                  shipped single-window frame is never overwritten.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -22,9 +27,12 @@ uefi_target=x86_64-unknown-uefi
 none_target=x86_64-unknown-none
 esp_size_mib=4
 # `qemu-exit` belongs to both binaries; `close-proof` only to the kernel, which is
-# the only one with the scripted mouse session.
+# the only one with the scripted mouse session. `fm-proof` is the kernel's extra
+# script step *and* the window client's second-window mode, so each is set where
+# it belongs.
 loader_features=""
 kernel_features=""
+win_features=""
 image=build/zcos.img
 
 case "${1:-}" in
@@ -41,10 +49,18 @@ case "${1:-}" in
         # `tools/run-qemu.sh` booted a desktop that destroys its own window.
         image=build/zcos-close.img
         ;;
+    --fm)
+        loader_features="--features qemu-exit"
+        kernel_features="--features qemu-exit,fm-proof"
+        win_features="--features fm-proof"
+        # Its own image and its own CI log, for the same reason the close proof
+        # has one: the shipped single-window frame must stay byte-identical.
+        image=build/zcos-fm.img
+        ;;
     "")
         ;;
     *)
-        echo "usage: $0 [--test|--test-close]" >&2
+        echo "usage: $0 [--test|--test-close|--fm]" >&2
         exit 2
         ;;
 esac
@@ -103,7 +119,7 @@ cargo build --manifest-path user/zc-devmgr/Cargo.toml \
 cargo build --manifest-path user/zc-initd/Cargo.toml \
     --target "$none_target" --target-dir target --release
 cargo build --manifest-path user/zc-win/Cargo.toml \
-    --target "$none_target" --target-dir target --release
+    --target "$none_target" --target-dir target --release $win_features
 ./tools/mkinitramfs.sh \
     "target/$none_target/release/producer:producer.elf" \
     "target/$none_target/release/consumer:consumer.elf" \

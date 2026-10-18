@@ -26,6 +26,11 @@ qemu-exit = []
 # the same image is what a person boots interactively, and a demo that closes its
 # own window leaves an empty desktop with nothing left to interact with.
 close-proof = []
+# Serve the launcher-click script so the second window opens, and seed window 1
+# in the kernel's own window machine to match. Off by default so the shipped
+# frame is the single-window one and its checksum never moves; the `--fm` build
+# turns it on to prove two windows end to end.
+fm-proof = []
 
 [lints]
 workspace = true

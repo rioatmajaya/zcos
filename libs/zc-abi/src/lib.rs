@@ -40,8 +40,9 @@ pub use driver::{
 };
 pub use fb::encode;
 pub use cursor::{
-    BUTTON_LEFT, BUTTON_MIDDLE, BUTTON_RIGHT, Cursor, MOUSE_NO_REPORT, MOUSE_SCRIPT, MouseStep,
-    SPRITE_H, SPRITE_W, pack_report, script_len, unpack_report,
+    BUTTON_LEFT, BUTTON_MIDDLE, BUTTON_RIGHT, Cursor, MOUSE_LAUNCH_SCRIPT, MOUSE_NO_REPORT,
+    MOUSE_SCRIPT, MOUSE_SCRIPT_LEN_WINDOW_UP, MouseStep, SPRITE_H, SPRITE_W, ScriptVariant,
+    pack_report, script_len, script_len_for, script_step, script_variant, unpack_report,
 };
 pub use desktop::{
     DamageList, FRAME_INITIAL, FRAME_MOVED, HASH_OFFSET, HASH_PRIME, MAX_TASK_BUTTONS,

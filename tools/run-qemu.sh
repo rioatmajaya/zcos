@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # Boot the ZC OS loader image under QEMU with OVMF.
 #
-# Usage: tools/run-qemu.sh [--test | --test-close]
+# Usage: tools/run-qemu.sh [--test | --test-close | --fm]
 #   --test         run headless with isa-debug-exit and return the emulator's
 #                  status, for automated boot checks. Requires an image built
 #                  with tools/build-efi.sh --test. Leaves the window on screen at
@@ -12,6 +12,9 @@
 #                  scripted close click. That run ends with no window on screen,
 #                  so it proves the erase instead. The two claims need different
 #                  final frames, so CI runs both (ADR 0026).
+#   --fm           the same, against an image built with tools/build-efi.sh --fm,
+#                  whose scripted session clicks the launcher so a second window
+#                  opens. Proves two windows end to end.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -41,13 +44,18 @@ case "${1:-}" in
         image=build/zcos-close.img
         build_hint="tools/build-efi.sh --test-close"
         ;;
+    --fm)
+        mode=--fm
+        image=build/zcos-fm.img
+        build_hint="tools/build-efi.sh --fm"
+        ;;
     "")
         mode=interactive
         image=build/zcos.img
         build_hint="tools/build-efi.sh"
         ;;
     *)
-        echo "usage: $0 [--test|--test-close]" >&2
+        echo "usage: $0 [--test|--test-close|--fm]" >&2
         exit 2
         ;;
 esac

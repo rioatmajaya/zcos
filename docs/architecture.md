@@ -251,9 +251,18 @@ pointer queues, and verifier snapshots are indexed by window id, and
 and snapshot travel together. `SYS_WINDOW_ID` (37) tells a client which window it
 owns, and `wm_assign(window) = IPC_WM + 2*window` gives each window its own
 assignment channel while `wm_reply(kind, window)` routes the ack back to the
-right client. A second client — the same `win.elf` binary, distinguished only by
-its task slot and window id — boots beside the first and finds its channel; the
-visible file manager that fills window 1 is a later slice.
+right client.
+
+A second window opens from a launcher press, not a compile-time switch: `Wm`
+returns `Kind::Launched` when a press lands on the launcher button, and the
+compositor and the kernel each add the next window at the shared
+`window_rect_for` rectangle on their own copy of that report, so the placement
+stays a proof. The compositor composites every registered window generically (one
+`Layer` per window id, a bare-desktop paint whose taskbar button count follows
+`wm.count()`, and a z-order surface blit), so one window paints exactly the frame
+the old single-window compositor did — the shipped checksum never moves. The
+launcher gesture is a script ending (`script_variant`), so the second window
+appears only in the `--fm` image; the file manager that fills window 1 is F8h-1c-2.
 
 The window pixels remain proven, not trusted, but the proof splits by what is
 knowable. Outside the window the frame checksum recomputes `pixel_at` exactly.

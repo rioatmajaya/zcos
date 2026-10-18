@@ -96,7 +96,15 @@ client is the same `win.elf` binary — no second initramfs entry, so the boot
 frame's `ls` output and both checksums are byte-identical — spawned as task 9,
 window 1; it proves it booted and wired, then exits, because a client blocked on
 an unassignment channel deadlocks the scripted boot. See
-[ADR 0039](docs/adr/0039-a-second-window-client-and-per-window-state.md).
+[ADR 0039](docs/adr/0039-a-second-window-client-and-per-window-state.md). F8h-1c-1
+makes a second window visible: a launcher-button press is a new `Kind::Launched`
+action, the compositor and the kernel each add the next window at the shared
+`window_rect_for` rectangle on their own copy of that report, the compositor
+composites N windows generically and decodes replies by window id, and the
+launcher gesture is a script ending — so the shipped boot never launches and both
+its checksums are unchanged. `--fm` builds `build/zcos-fm.img`, which boot-logs a
+second window and two `wm: content ok` proofs. See
+[ADR 0040](docs/adr/0040-a-second-window-is-visible.md).
 
 ### Fixed
 

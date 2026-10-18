@@ -2095,20 +2095,19 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             }
         }
         Ok(Action::MouseRead) => {
-            use zc_abi::cursor::{MOUSE_NO_REPORT, MOUSE_SCRIPT, pack_report, script_len};
+            use zc_abi::cursor::{MOUSE_NO_REPORT, pack_report, script_step, script_variant};
             // The scripted session runs first, so the boot proof derives the
             // same pointer position the compositor paints; after it the live
             // movement the drain accumulated is delivered. Non-blocking: the
             // compositor polls, so it never waits on a report that may not come.
             // SAFETY: owned here; interrupts are masked through this arm.
-            // A `close-proof` build serves the whole script and ends the
-            // window's session, which is what proves the close protocol. Every
+            // `close-proof` serves the whole script and ends window 0's session;
+            // `fm-proof` serves the launcher click that opens window 1; every
             // other build serves only the window-up prefix, so an interactive
             // boot leaves a window on screen for the person to actually use.
-            let len = script_len(cfg!(feature = "close-proof"));
+            let variant = script_variant(cfg!(feature = "close-proof"), cfg!(feature = "fm-proof"));
             let index = unsafe { &mut *addr_of_mut!(MOUSE_SCRIPT_INDEX) };
-            if *index < len {
-                let step = MOUSE_SCRIPT[*index];
+            if let Some(step) = script_step(variant, *index) {
                 *index += 1;
                 // The scripted reports carry button bits, so the boot proof
                 // drives the window machine exactly as live input does.
@@ -4379,7 +4378,21 @@ fn apply_report(buttons: u8, dx: i8, dy: i8) {
         }
         let event = (*addr_of_mut!(INPUT)).report(buttons, dx, dy);
         let after = *addr_of!(CURSOR);
-        let _ = wm.apply(after, event);
+        let action = wm.apply(after, event);
+        // The launcher press is the compositor's cue to start the next app; the
+        // kernel mirrors it by adding the same window at the same shared
+        // rectangle, so both machines hold two windows and the verifier can
+        // placement-check window 1. Without the launch report (the default boot)
+        // this never fires and the frame stays single-window.
+        if action.kind == zc_abi::wm::Kind::Launched {
+            let id = wm.count() as u32;
+            if (id as usize) < zc_abi::wm::MAX_WINDOWS {
+                let _ = wm.add(
+                    id,
+                    zc_abi::window_rect_for(id, zc_abi::FRAME_INITIAL, info.width, info.height),
+                );
+            }
+        }
     }
     // The window's own copy of this report, derived after the placement machine
     // has acted: a drag that moves the window and a report that lands inside it
