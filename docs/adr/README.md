@@ -48,6 +48,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0039](0039-a-second-window-client-and-per-window-state.md) | A second window client, and per-window kernel state | Accepted |
 | [0040](0040-a-second-window-is-visible.md) | A second window is visible | Accepted |
 | [0041](0041-the-second-window-is-a-file-manager.md) | The second window is a file manager | Accepted |
+| [0042](0042-the-proof-scripts-belong-to-the-test-build.md) | The proof scripts belong to the test build | Accepted |
 
 ## Adding a decision
 

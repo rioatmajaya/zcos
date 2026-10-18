@@ -127,9 +127,11 @@ report packs as `(buttons << 16) | (dx << 8) | dy`, where `buttons` is a button
 bitmask and `dx`/`dy` are two's-complement byte deltas; the largest real word is
 `0x0007_FFFF`, so it can never collide with the sentinel. `cursor::pack_report`
 and `cursor::unpack_report` (`libs/zc-abi/src/cursor.rs`) are the canonical
-codec. The kernel serves a fixed scripted session first, then the movement the
-input drain accumulated, so the compositor and the kernel's frame verifier
-derive the same pointer position from one source.
+codec. In a `qemu-exit` boot-test build the kernel serves a fixed scripted
+session first, then the movement the input drain accumulated; every other build
+(the image a person boots) serves the live movement only, so the desktop does not
+move on its own. The compositor and the kernel's frame verifier derive the same
+pointer position from one source.
 
 Button bits are `BUTTON_LEFT` = 1, `BUTTON_RIGHT` = 2, `BUTTON_MIDDLE` = 4,
 matching the PS/2 flags byte the driver assembles. The scripted session
@@ -194,12 +196,13 @@ window across its remembered footprint and erases nothing otherwise.
 The two final-frame proofs are alternatives chosen by the session's end state: a
 window on screen proves *placement* (ADR 0018), a window gone proves the *erase*.
 
-`SYS_MOUSE_READ` serves `cursor::MOUSE_SCRIPT`, and `cursor::script_len(close)`
-decides how much of it: the whole array, or the prefix before the close suffix.
-The kernel picks with `cfg!(feature = "close-proof")` — off by default, so an
-interactive build leaves the window on screen; on for the CI run that proves the
-close protocol. The two variants are prefixes of one array and therefore cannot
-describe a gesture differently.
+`SYS_MOUSE_READ` serves `cursor::MOUSE_SCRIPT` in a `qemu-exit` boot-test build,
+and `cursor::script_variant(close, fm)` decides which: the shared prefix plus the
+close suffix, the prefix plus the launcher-click suffix, or the prefix alone. The
+kernel picks with `cfg!(feature = "close-proof")` / `cfg!(feature = "fm-proof")`,
+both off by default, so an interactive build serves no script and leaves the
+window on screen for the person; the variants are endings of one array and
+therefore cannot describe a gesture differently.
 
 Hit regions are derived from the renderers, never open-coded beside them:
 `terminal::close_rect` / `minimize_rect` (used by `Term::render`) and

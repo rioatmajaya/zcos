@@ -203,13 +203,17 @@ the wrong kernel in the one you boot.
 
 ### What an interactive boot shows
 
-`run-qemu.sh` starts with a **scripted mouse session**, which is why the desktop
-looks like it is acting on its own: the window drags itself to the left edge,
-minimizes, and is restored from the taskbar. It ends with the window **on screen**
-and every task still running, so afterwards you can move the pointer, type into the
-window, and use the serial shell on the QEMU terminal (`help`, `cat`, `ls`,
-`stat`, `write`, `tmp`, `chmod`, `poweroff`, `exit` — listed in
-`tools/boot-script.txt`).
+`run-qemu.sh` starts an **idle desktop**: the window manager and the terminal sit
+still and respond only to your input. The scripted mouse and keyboard sessions
+(the window dragging itself, the terminal typing `help`/`cat`/`ls`) belong to the
+automated boot proof and run **only in the `--test` builds**, whose kernel arms
+them. The image you boot serves no script, so nothing moves on its own — see
+[ADR 0042](docs/adr/0042-the-proof-scripts-belong-to-the-test-build.md).
+
+The window is **on screen** and every task is running, so you can move the
+pointer, drag the window, click its decorations, type into the window, and use
+the serial shell on the QEMU terminal (`help`, `cat`, `ls`, `stat`, `write`,
+`tmp`, `chmod`, `poweroff`, `exit` — listed in `tools/boot-script.txt`).
 
 A normal build never arms the task watchdog, so the machine stays up
 indefinitely; only the `--test` builds arm it, because a wedged task must fail CI

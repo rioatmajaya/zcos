@@ -538,6 +538,19 @@ const fn user_deadline(start: u64) -> u64 {
     }
 }
 
+/// Returns whether this build serves the scripted mouse and keyboard sessions.
+///
+/// The scripts exist so the headless boot test has a deterministic frame to
+/// recompute, and only the test builds (`qemu-exit`) run headless. The image a
+/// person boots must not: without this guard the desktop dragged, minimized, and
+/// restored its own window and the terminal typed `help`/`cat`/`ls` itself — the
+/// machine "moved on its own" before anyone touched it. A human session starts
+/// idle and responds only to real input; the proofs are unaffected, because CI
+/// only ever boots the `qemu-exit` builds.
+const fn scripted_session() -> bool {
+    cfg!(feature = "qemu-exit")
+}
+
 /// Saves every general-purpose register into a [`SyscallRegs`] block, calls
 /// the dispatcher, writes the result back into the saved `rax`, and resumes
 /// with `iretq` — unless the dispatcher returned [`EXIT_TO_KERNEL`], in
@@ -2107,15 +2120,26 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             // same pointer position the compositor paints; after it the live
             // movement the drain accumulated is delivered. Non-blocking: the
             // compositor polls, so it never waits on a report that may not come.
-            // SAFETY: owned here; interrupts are masked through this arm.
+            //
+            // Only the automated test builds serve it (see `scripted_session`):
             // `close-proof` serves the whole script and ends window 0's session;
-            // `fm-proof` serves the launcher click that opens window 1; every
-            // other build serves only the window-up prefix, so an interactive
-            // boot leaves a window on screen for the person to actually use.
-            let variant = script_variant(cfg!(feature = "close-proof"), cfg!(feature = "fm-proof"));
-            let index = unsafe { &mut *addr_of_mut!(MOUSE_SCRIPT_INDEX) };
-            if let Some(step) = script_step(variant, *index) {
-                *index += 1;
+            // `fm-proof` serves the launcher click that opens window 1; the plain
+            // `--test` build serves only the window-up prefix. The image a person
+            // boots serves none, so the desktop does not move on its own.
+            let step = if scripted_session() {
+                let variant =
+                    script_variant(cfg!(feature = "close-proof"), cfg!(feature = "fm-proof"));
+                // SAFETY: owned here; interrupts are masked through this arm.
+                let index = unsafe { &mut *addr_of_mut!(MOUSE_SCRIPT_INDEX) };
+                let step = script_step(variant, *index);
+                if step.is_some() {
+                    *index += 1;
+                }
+                step
+            } else {
+                None
+            };
+            if let Some(step) = step {
                 // The scripted reports carry button bits, so the boot proof
                 // drives the window machine exactly as live input does.
                 apply_report(step.buttons, step.dx, step.dy);
@@ -4238,15 +4262,19 @@ fn window_is_focused(window: u32) -> bool {
 /// person goes to the window they selected, not to whichever client asks first.
 fn next_window_event(me: usize, pointer: bool, window: u32) -> Option<u64> {
     use zc_abi::terminal::SCRIPT;
-    // SAFETY: owned here; called with interrupts masked.
-    let cursors = unsafe { &mut *addr_of_mut!(TERM_CURSORS) };
-    let cursor = &mut cursors[me];
-    if (*cursor as usize) < SCRIPT.len() {
-        // The scripted session runs first, so the proof boot derives the same
-        // final screen the client paints.
-        let byte = SCRIPT[*cursor as usize];
-        *cursor += 1;
-        return Some(u64::from(byte));
+    // The scripted keystrokes belong to the automated test only. The image a
+    // person boots serves none, so the terminal does not type itself.
+    if scripted_session() {
+        // SAFETY: owned here; called with interrupts masked.
+        let cursors = unsafe { &mut *addr_of_mut!(TERM_CURSORS) };
+        let cursor = &mut cursors[me];
+        if (*cursor as usize) < SCRIPT.len() {
+            // The scripted session runs first, so the proof boot derives the same
+            // final screen the client paints.
+            let byte = SCRIPT[*cursor as usize];
+            *cursor += 1;
+            return Some(u64::from(byte));
+        }
     }
     // After the script the terminal reads the physical keyboard the drain
     // routed here; a byte is popped only when returned, so a retry never drops

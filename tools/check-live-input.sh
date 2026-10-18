@@ -132,12 +132,19 @@ sock.close()
 PY
 }
 
-# Wait for the desktop to finish its scripted session.
-echo "== waiting for the scripted session to finish =="
+# Wait for the desktop to reach its idle event loop.
+#
+# The interactive image serves no scripted session (the kernel gates the mouse
+# and keyboard scripts on the `qemu-exit` test builds), so there is no
+# `compositor: window restored` marker to wait for. The compositor logs
+# `compositor: cursor ok` right after its (empty) scripted cursor session and
+# before it blocks in the reply channel, so that marker is the point where the
+# desktop is up, both windows are painted, and it is idle waiting for input.
+echo "== waiting for the desktop to come up =="
 waited=0
-until grep -aq "compositor: window restored" "$tmp/serial.log" 2>/dev/null; do
+until grep -aq "compositor: cursor ok" "$tmp/serial.log" 2>/dev/null; do
     if [ "$waited" -ge "$boot_timeout" ]; then
-        echo "error: the desktop never finished its scripted session" >&2
+        echo "error: the desktop never came up" >&2
         tail -5 "$tmp/serial.log" 2>/dev/null || true
         exit 1
     fi

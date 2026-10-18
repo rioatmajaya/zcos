@@ -114,6 +114,17 @@ and only `--fm` packs it, so both shipped checksums are unchanged. See
 
 ### Fixed
 
+- **The image a person boots replayed the boot proof's script at them** (F8).
+  Every build served the scripted mouse session (the window dragged, minimized,
+  and restored itself) and the scripted terminal session (`help`/`cat`/`ls`
+  typed themselves), so the interactive desktop appeared to act on its own and
+  could not be judged by hand. The kernel now gates both scripts on the
+  `qemu-exit` test feature, so only the `--test` builds replay them and the
+  shipped image starts idle and responds only to real input. Both frame
+  checksums are unchanged, because CI only boots the test builds.
+  `tools/check-live-input.sh` now waits for `compositor: cursor ok` (an idle
+  marker) instead of the scripted `compositor: window restored`. See
+  [ADR 0042](docs/adr/0042-the-proof-scripts-belong-to-the-test-build.md).
 - **The boot CI asserted boot log lines that had drifted** (F8h). Two `grep -q`
   expectations in the boot job no longer matched the running machine, so the job
   failed at the first one with no useful message — the runner's `set -e` stops on
