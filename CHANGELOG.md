@@ -100,6 +100,13 @@ an unassignment channel deadlocks the scripted boot. See
 
 ### Fixed
 
+- **The boot CI asserted boot log lines that had drifted** (F8h). Two `grep -q`
+  expectations in the boot job no longer matched the running machine, so the job
+  failed at the first one with no useful message — the runner's `set -e` stops on
+  the first miss, and the error surfaced next to unrelated DMA checks. The shell
+  help line gained `ls` in F8h-0 and the address-space count became 10 in F8h-1b;
+  both expectations now name what the boot actually logs
+  (`Commands: help echo cat ls stat …` and `user: 10 address spaces`).
 - **Every trap shared one interrupt stack, and a waiting syscall proved it was
   not safe** (F8k). All IDT gates named IST1 on the reasoning that an interrupt
   gate clears IF, so handlers cannot nest and one stack per CPU suffices. That
