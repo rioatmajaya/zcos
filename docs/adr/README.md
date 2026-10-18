@@ -47,6 +47,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0038](0038-the-window-manager-holds-a-table.md) | The window manager holds a table, not a window | Accepted |
 | [0039](0039-a-second-window-client-and-per-window-state.md) | A second window client, and per-window kernel state | Accepted |
 | [0040](0040-a-second-window-is-visible.md) | A second window is visible | Accepted |
+| [0041](0041-the-second-window-is-a-file-manager.md) | The second window is a file manager | Accepted |
 
 ## Adding a decision
 

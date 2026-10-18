@@ -32,7 +32,6 @@ esp_size_mib=4
 # it belongs.
 loader_features=""
 kernel_features=""
-win_features=""
 image=build/zcos.img
 
 case "${1:-}" in
@@ -52,7 +51,6 @@ case "${1:-}" in
     --fm)
         loader_features="--features qemu-exit"
         kernel_features="--features qemu-exit,fm-proof"
-        win_features="--features fm-proof"
         # Its own image and its own CI log, for the same reason the close proof
         # has one: the shipped single-window frame must stay byte-identical.
         image=build/zcos-fm.img
@@ -119,7 +117,18 @@ cargo build --manifest-path user/zc-devmgr/Cargo.toml \
 cargo build --manifest-path user/zc-initd/Cargo.toml \
     --target "$none_target" --target-dir target --release
 cargo build --manifest-path user/zc-win/Cargo.toml \
-    --target "$none_target" --target-dir target --release $win_features
+    --target "$none_target" --target-dir target --release
+# The file manager is only in the two-window image: it is window 1's client
+# there. Building and packing it into the shared initramfs would change the
+# shipped boot frame's `ls` listing (and its checksum), so the default image
+# never sees it.
+extra=""
+if [ "$image" = "build/zcos-fm.img" ]; then
+    cargo build --manifest-path user/zc-fm/Cargo.toml \
+        --target "$none_target" --target-dir target --release
+    extra="target/$none_target/release/fm:fm.elf"
+fi
+# shellcheck disable=SC2086
 ./tools/mkinitramfs.sh \
     "target/$none_target/release/producer:producer.elf" \
     "target/$none_target/release/consumer:consumer.elf" \
@@ -129,7 +138,8 @@ cargo build --manifest-path user/zc-win/Cargo.toml \
     "target/$none_target/release/kbd:kbd.elf" \
     "target/$none_target/release/devmgr:devmgr.elf" \
     "target/$none_target/release/initd:initd.elf" \
-    "target/$none_target/release/win:win.elf"
+    "target/$none_target/release/win:win.elf" \
+    $extra
 ./tools/mkdisk.sh
 dd if=/dev/zero of="$image" bs=1M count="$esp_size_mib" status=none
 mkfs.vfat "$image" >/dev/null

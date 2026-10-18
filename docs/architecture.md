@@ -262,7 +262,12 @@ stays a proof. The compositor composites every registered window generically (on
 `wm.count()`, and a z-order surface blit), so one window paints exactly the frame
 the old single-window compositor did — the shipped checksum never moves. The
 launcher gesture is a script ending (`script_variant`), so the second window
-appears only in the `--fm` image; the file manager that fills window 1 is F8h-1c-2.
+appears only in the `--fm` image. In that image window 1 is the file manager: a
+separate `zc-fm` binary builds a `zc-abi::fm::Fm` listing through `SYS_READDIR`,
+and the kernel's verifier rebuilds the same listing from its own mount table and
+compares every pixel — a generic `SurfaceModel` trait lets the terminal and the
+file manager share one placement/content loop, so the listing is proven, not
+trusted.
 
 The window pixels remain proven, not trusted, but the proof splits by what is
 knowable. Outside the window the frame checksum recomputes `pixel_at` exactly.

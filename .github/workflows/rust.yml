@@ -304,6 +304,40 @@ jobs:
         ! grep -q "desktop checksum mismatch" build/boot-close.log
         grep -q "kernel reached idle state" build/boot-close.log
 
+    # A third frame proof: the two-window image. Its scripted session presses the
+    # launcher, the compositor opens window 1, and the verifier proves both window
+    # regions. It is its own image (zcos-fm.img) and its own log for the same
+    # reason the close proof is: the shipped single-window frame must stay
+    # byte-identical, and packing fm.elf into the shared initramfs would change
+    # the window's `ls` listing (and its checksum). Window 1 runs the file
+    # manager, whose listing the kernel independently recomputes from its mount
+    # table, so `wm: content ok` appears twice — once per window.
+    - name: Build the two-window image
+      run: ./tools/build-efi.sh --fm
+    - name: Boot test the two-window proof
+      run: ./tools/run-qemu.sh --fm > build/boot-fm.log 2>&1
+    - name: Check the two-window proof
+      run: |
+        cat build/boot-fm.log
+        grep -q "win1 entry" build/boot-fm.log
+        grep -q "compositor: window 1 launched" build/boot-fm.log
+        grep -q "task 9: fm: ready" build/boot-fm.log
+        grep -q "task 9: fm: listing ok" build/boot-fm.log
+        grep -q "task 9: fm: window painted" build/boot-fm.log
+        # Window 1's content is proven by the kernel listing the same directory
+        # through its own mount table, not by trusting the client.
+        grep -q "fm: listing ok" build/boot-fm.log
+        # Both windows reach the content check: window 0 (terminal) and window 1
+        # (file manager), so exactly two `wm: content ok` lines.
+        test "$(grep -c 'wm: content ok' build/boot-fm.log)" -eq 2
+        grep -q "fb: desktop checksum ok" build/boot-fm.log
+        ! grep -q "window placement mismatch" build/boot-fm.log
+        ! grep -q "window content mismatch" build/boot-fm.log
+        ! grep -q "cursor checksum mismatch" build/boot-fm.log
+        ! grep -q "desktop checksum mismatch" build/boot-fm.log
+        ! grep -q "ipc deadlock" build/boot-fm.log
+        grep -q "kernel reached idle state" build/boot-fm.log
+
     # The two boot checks above prove the *scripted* frame. They say nothing about
     # input a person types, and a written claim to the contrary once survived
     # review here precisely because nothing typed anything (ADR 0030).
@@ -349,3 +383,5 @@ jobs:
         tail -60 build/boot.log 2>/dev/null || echo "(missing)"
         echo "===== build/boot-close.log (tail) ====="
         tail -60 build/boot-close.log 2>/dev/null || echo "(missing)"
+        echo "===== build/boot-fm.log (tail) ====="
+        tail -60 build/boot-fm.log 2>/dev/null || echo "(missing)"

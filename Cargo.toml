@@ -17,6 +17,7 @@ exclude = [
     "user/zc-blk",
     "user/zc-consumer",
     "user/zc-devmgr",
+    "user/zc-fm",
     "user/zc-initd",
     "user/zc-kbd",
     "user/zc-producer",

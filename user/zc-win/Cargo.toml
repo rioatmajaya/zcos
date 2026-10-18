@@ -17,14 +17,6 @@ zc-user = { path = "../zc-user" }
 zc-ui = { path = "../zc-ui" }
 zc-abi = { path = "../../libs/zc-abi" }
 
-[features]
-# Serve as a real second-window client: block on window 1's assignment channel
-# and run the terminal. Off by default, where window 1 proves it booted and finds
-# its channel, then exits — because the shipped boot never launches a second
-# window and a lone client blocked on an unassigned channel deadlocks it. The
-# `--fm` build turns it on to prove two windows end to end.
-fm-proof = []
-
 [lints]
 workspace = true
 

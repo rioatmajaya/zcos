@@ -154,12 +154,19 @@ const WINDOW_CLIENT_NAME: &str = "win.elf";
 
 /// File name of the second window client inside the initramfs.
 ///
-/// The same binary as [`WINDOW_CLIENT_NAME`] (`win.elf`): it asks the kernel
-/// which window it owns (`SYS_WINDOW_ID`), so the image needs no second build.
-/// Reusing the one binary keeps the initramfs listing — and therefore the
-/// boot frame's `ls` output and its checksum — byte-identical to the
-/// single-window boot; only a distinct task slot and window id separate the
-/// two instances.
+/// With `fm-proof` it is `fm.elf`, the file manager that fills window 1 in the
+/// two-window image. Without it — the shipped image, which never launches a
+/// second window — it is the same `win.elf` as [`WINDOW_CLIENT_NAME`], so the
+/// second task exists, proves it booted, and exits. Reusing `win.elf` keeps the
+/// initramfs listing, and therefore the boot frame's `ls` output and its
+/// checksum, byte-identical to the single-window boot.
+#[cfg(feature = "fm-proof")]
+const SECOND_WINDOW_CLIENT_NAME: &str = "fm.elf";
+/// File name of the second window client inside the initramfs.
+///
+/// See the `fm-proof` variant: the shipped image has no second window, so the
+/// idle second client runs `win.elf` and the listing is unchanged.
+#[cfg(not(feature = "fm-proof"))]
 const SECOND_WINDOW_CLIENT_NAME: &str = "win.elf";
 
 /// User virtual address the display framebuffer is mapped at.
@@ -2364,7 +2371,7 @@ fn verify_dma_window() {
 /// key or painted the wrong pixels fails here.
 fn snapshot_window_surface(surface: &zc_kernel::surface::Surface, window: u32) {
     use zc_abi::terminal::{SCRIPT, Term, run_command_with};
-    use zc_abi::{HASH_OFFSET, PixelFormat, hash_step};
+    use zc_abi::PixelFormat;
 
     // SAFETY: published once during setup before any task ran.
     let info = unsafe { core::ptr::addr_of!(FB_INFO).read() };
@@ -2386,57 +2393,112 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface, window: u32) {
     if surface.width != placed.w || surface.height != placed.h {
         crate::fail("window surface geometry mismatch");
     }
-    // The content is the terminal screen the kernel served the client. The
-    // kernel derives it from its own mount table, so the scripted `cat` proves
-    // the client read the same bytes through the VFS.
+    // The content is the window's own model, derived from the kernel's mount
+    // table so a client that painted something else fails the pixel compare.
     //
-    // The font loads before the read counter resets, so the "script read a
-    // file" check below still measures the scripted session, not this load.
+    // Window 0 is the terminal: the kernel replays the scripted keystrokes
+    // through the same `Term` the client drives. Window 1 (the `--fm` image) is
+    // the file manager: the kernel lists the same directory through its own
+    // mount table into the same `Fm` the client builds from `SYS_READDIR`.
     let font = verifier_font();
-    // SAFETY: owned here; reset before the replay.
+    // SAFETY: owned here; reset before the content is derived.
     unsafe { addr_of_mut!(WINDOW_VFS_READS).write(0) };
     // SAFETY: as above.
     unsafe { addr_of_mut!(WINDOW_LS_ENTRIES).write(0) };
-    let mut terminal = Term::new();
-    let mut key = 0;
-    while key < SCRIPT.len() {
-        if let Some(line) = terminal.push_key(SCRIPT[key]) {
-            run_command_with(&mut terminal, line.as_bytes(), kernel_read_file, kernel_list_dir);
+    if window == 0 {
+        let mut terminal = Term::new();
+        let mut key = 0;
+        while key < SCRIPT.len() {
+            if let Some(line) = terminal.push_key(SCRIPT[key]) {
+                run_command_with(
+                    &mut terminal,
+                    line.as_bytes(),
+                    kernel_read_file,
+                    kernel_list_dir,
+                );
+            }
+            key += 1;
         }
-        key += 1;
+        // SAFETY: `kernel_read_file` owns the counter and ran above.
+        if unsafe { addr_of!(WINDOW_VFS_READS).read() } == 0 {
+            crate::fail("window script read no file");
+        }
+        crate::serial::write_str("wm: vfs content ok\n");
+        // The script's `ls` must have produced a real entry. Without this the
+        // client and the verifier could both print "cannot list" and still agree,
+        // turning the listing proof into a proof that two failures match.
+        // SAFETY: `kernel_list_dir` owns the counter and ran above.
+        if unsafe { addr_of!(WINDOW_LS_ENTRIES).read() } == 0 {
+            crate::fail("window script listed nothing");
+        }
+        crate::serial::write_str("wm: ls ok\n");
+        // The pointer script's window-local reports, replayed through the same
+        // routing the client's stream came from. The button click changes the
+        // terminal's label, so this must run before the pixels are compared — and
+        // the script must click something, or the proof would silently degrade to
+        // "the client painted whatever it liked".
+        zc_abi::replay_pointer(
+            &mut terminal,
+            info.width,
+            info.height,
+            surface.width,
+            surface.height,
+            cfg!(feature = "close-proof"),
+            window,
+        );
+        if terminal.clicks() == 0 {
+            crate::fail("window script clicked nothing");
+        }
+        crate::serial::write_str("wm: click ok\n");
+        hash_window_surface(&terminal, surface, font, format, &wm, window);
+        return;
     }
-    // SAFETY: `kernel_read_file` owns the counter and ran above.
-    if unsafe { addr_of!(WINDOW_VFS_READS).read() } == 0 {
-        crate::fail("window script read no file");
+    // Window 1: the file manager. Build the same listing the client sees, from
+    // the kernel's own mount table, and prove it pixel for pixel.
+    let mut fm = zc_abi::Fm::new();
+    let mut index = 0;
+    loop {
+        match kernel_list_dir(b"/", index) {
+            zc_abi::terminal::Listing::Entry(entry) => {
+                fm.push(entry.kind, entry.name());
+                index += 1;
+            }
+            zc_abi::terminal::Listing::End => break,
+            zc_abi::terminal::Listing::Error => {
+                fm.fail();
+                break;
+            }
+        }
     }
-    crate::serial::write_str("wm: vfs content ok\n");
-    // The script's `ls` must have produced a real entry. Without this the
-    // client and the verifier could both print "cannot list" and still agree,
-    // turning the listing proof into a proof that two failures match.
     // SAFETY: `kernel_list_dir` owns the counter and ran above.
     if unsafe { addr_of!(WINDOW_LS_ENTRIES).read() } == 0 {
-        crate::fail("window script listed nothing");
+        crate::fail("fm window listed nothing");
     }
-    crate::serial::write_str("wm: ls ok\n");
-    // The pointer script's window-local reports, replayed through the same
-    // routing the client's stream came from. The button click changes the
-    // terminal's label, so this must run before the pixels are compared — and
-    // the script must click something, or the proof would silently degrade to
-    // "the client painted whatever it liked". Window 0 is the click target;
-    // window 1 is on top at the start but the script never lands in its body.
-    zc_abi::replay_pointer(
-        &mut terminal,
-        info.width,
-        info.height,
-        surface.width,
-        surface.height,
-        cfg!(feature = "close-proof"),
-        window,
-    );
-    if window == 0 && terminal.clicks() == 0 {
-        crate::fail("window script clicked nothing");
-    }
-    crate::serial::write_str("wm: click ok\n");
+    crate::serial::write_str("fm: listing ok\n");
+    hash_window_surface(&fm, surface, font, format, &wm, window);
+}
+
+/// Hashes a window surface against a shared content model and stores the result.
+///
+/// Generic over the model so the terminal (`Term`) and the file manager (`Fm`)
+/// share one pixel loop: both expose `pixel(font, format, lx, ly, w, h)`, so the
+/// placement hash and the exact-content compare are written once. A pixel the
+/// cursor or a higher window covers is skipped from the placement hash on both
+/// sides, exactly as [`verify_framebuffer`] skips it; the content compare still
+/// covers every pixel, because no client draws the pointer.
+fn hash_window_surface<P: SurfaceModel>(
+    model: &P,
+    surface: &zc_kernel::surface::Surface,
+    font: zc_abi::Font<'_>,
+    format: zc_abi::PixelFormat,
+    wm: &zc_abi::wm::Wm,
+    window: u32,
+) {
+    use zc_abi::{HASH_OFFSET, hash_step};
+
+    let Some(placed) = wm.window_of(window) else {
+        crate::fail("window surface has no window");
+    };
     let cursor = expected_cursor();
     let mut hash = HASH_OFFSET;
     let mut ly = 0;
@@ -2449,19 +2511,11 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface, window: u32) {
             // SAFETY: the surface frames come from the frame allocator below
             // the identity map, the same assumption `build_fb_tables` makes.
             let pixel = unsafe { read_volatile((frame + offset as u64) as *const u32) };
-            // Where the pointer is opaque the display shows it, not the client's
-            // pixel, so the placement hash skips those pixels on both sides. The
-            // content comparison below still covers every pixel: the client
-            // never draws the pointer.
-            //
-            // A pixel another window covers is not on the display either, so it
-            // is skipped here exactly as `verify_framebuffer` skips it. A hidden
-            // window has no visible pixel at all and hashes to the offset.
             let on_screen = wm.top_at(placed.x + lx, placed.y + ly) == Some(window);
             if on_screen && cursor.color_at(placed.x + lx, placed.y + ly).is_none() {
                 hash = hash_step(hash, pixel);
             }
-            let Some(expected) = terminal.pixel(font, format, lx, ly, surface.width, surface.height)
+            let Some(expected) = model.pixel(font, format, lx, ly, surface.width, surface.height)
             else {
                 crate::fail("unsupported window format");
             };
@@ -2477,6 +2531,51 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface, window: u32) {
         (*addr_of_mut!(WINDOW_SNAPSHOTS))[window as usize] = Some(hash);
     }
     crate::serial::write_str("wm: content ok\n");
+}
+
+/// A window content model the kernel can recompute pixel for pixel.
+///
+/// Implemented for the terminal and the file manager so [`hash_window_surface`]
+/// is one loop over either.
+trait SurfaceModel {
+    /// Encodes one window-local pixel, or `None` for an unencodable format.
+    fn pixel(
+        &self,
+        font: zc_abi::Font<'_>,
+        format: zc_abi::PixelFormat,
+        lx: u32,
+        ly: u32,
+        w: u32,
+        h: u32,
+    ) -> Option<u32>;
+}
+
+impl SurfaceModel for zc_abi::terminal::Term {
+    fn pixel(
+        &self,
+        font: zc_abi::Font<'_>,
+        format: zc_abi::PixelFormat,
+        lx: u32,
+        ly: u32,
+        w: u32,
+        h: u32,
+    ) -> Option<u32> {
+        zc_abi::terminal::Term::pixel(self, font, format, lx, ly, w, h)
+    }
+}
+
+impl SurfaceModel for zc_abi::Fm {
+    fn pixel(
+        &self,
+        font: zc_abi::Font<'_>,
+        format: zc_abi::PixelFormat,
+        lx: u32,
+        ly: u32,
+        w: u32,
+        h: u32,
+    ) -> Option<u32> {
+        zc_abi::Fm::pixel(self, font, format, lx, ly, w, h)
+    }
 }
 
 /// Successful reads the frame verifier's scripted session performed.

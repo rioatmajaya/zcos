@@ -104,7 +104,13 @@ composites N windows generically and decodes replies by window id, and the
 launcher gesture is a script ending — so the shipped boot never launches and both
 its checksums are unchanged. `--fm` builds `build/zcos-fm.img`, which boot-logs a
 second window and two `wm: content ok` proofs. See
-[ADR 0040](docs/adr/0040-a-second-window-is-visible.md).
+[ADR 0040](docs/adr/0040-a-second-window-is-visible.md). F8h-1c-2 makes window 1
+the file manager: a new `zc-fm` binary lists the initramfs root through
+`SYS_READDIR` into a shared `zc-abi::fm::Fm` renderer, and the verifier rebuilds
+the same listing from its own mount table and compares every pixel, so the
+listing is proven rather than trusted. The kernel picks `fm.elf` under `fm-proof`
+and only `--fm` packs it, so both shipped checksums are unchanged. See
+[ADR 0041](docs/adr/0041-the-second-window-is-a-file-manager.md).
 
 ### Fixed
 

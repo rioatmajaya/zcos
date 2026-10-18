@@ -13,6 +13,7 @@
 
 pub mod cursor;
 pub mod desktop;
+pub mod fm;
 pub mod font;
 pub mod driver;
 pub mod fb;
@@ -87,6 +88,7 @@ pub use syscall::{
 pub use terminal::{
     BUTTON_FG, BUTTON_H, BUTTON_W, Term, button_rect,
 };
+pub use fm::{FM_COLS, FM_NAME_MAX, FM_ROWS, Fm};
 pub use ui::{
     Event, Input, WINDOW_MAX_COORD, WINDOW_NO_EVENT, WINDOW_POINTER_TAG, WindowEvent,
     WindowPointer, decode_window_event, hit_all, hit_topmost, pack_window_pointer,
