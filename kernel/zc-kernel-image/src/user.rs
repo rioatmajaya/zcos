@@ -2478,10 +2478,11 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface, window: u32) {
         return;
     }
     // Window 1: the file manager. Build the same listing the client sees, from
-    // the kernel's own mount table, then replay the launch session's click into
-    // the same `Fm` state machine the client drives. The click is a proof, not a
-    // hint: a client that ignored it, or opened another directory, lands on a
-    // different title and listing than this replay and fails the pixel compare.
+    // the kernel's own mount table, then replay the launch session's clicks into
+    // the same `Fm` state machine the client drives. The clicks are a proof,
+    // not a hint: a client that ignored them, opened another directory, or read
+    // different file bytes lands on a different title, preview, and pixels than
+    // this replay and fails the compare.
     let mut fm = zc_abi::Fm::new();
     zc_abi::reload(&mut fm, b"/", kernel_list_dir);
     // SAFETY: `kernel_list_dir` owns the counter and ran above.
@@ -2490,12 +2491,24 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface, window: u32) {
     }
     crate::serial::write_str("fm: listing ok\n");
     zc_abi::replay_launch(info.width, info.height, |x, y| {
-        let _ = fm.click(x, y, surface.width, surface.height, kernel_list_dir);
+        let _ = fm.click(
+            x,
+            y,
+            surface.width,
+            surface.height,
+            kernel_list_dir,
+            kernel_read_file,
+        );
     });
-    if fm.path() != b"/dev" {
-        crate::fail("fm window did not navigate to /dev");
+    if fm.path() != b"/hello.txt" || !fm.previewing() {
+        crate::fail("fm window did not open hello.txt");
+    }
+    // SAFETY: `kernel_read_file` owns the counter and ran during the replay.
+    if unsafe { addr_of!(WINDOW_VFS_READS).read() } == 0 {
+        crate::fail("fm window read no file");
     }
     crate::serial::write_str("fm: open ok\n");
+    crate::serial::write_str("fm: preview ok\n");
     hash_window_surface(&fm, surface, font, format, &wm, window);
 }
 

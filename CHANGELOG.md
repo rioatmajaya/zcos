@@ -120,7 +120,17 @@ click now fails with `fm window did not navigate` instead of matching a static
 frame. The `--fm` boot logs `task 9: fm: pointer ok`, `task 9: fm: open ok`, and
 `fm: open ok` before two `wm: content ok` lines, while both shipped checksums
 stay unchanged because the launch suffix never runs there. See
-[ADR 0043](docs/adr/0043-the-file-manager-navigates-by-proof.md).
+[ADR 0043](docs/adr/0043-the-file-manager-navigates-by-proof.md). F8h-1c-4 lets
+the file manager open a file: a second click on the selected row reads it through
+the VFS, the shared `Fm` formats the bytes into wrapped lines and marks binary or
+empty content, and the title names the file. The `--fm` script opens `dev/`,
+walks back, and double-clicks `hello.txt`, so the final frame proves both
+navigation and a VFS read; the verifier replays the same clicks and reads the
+file through its own mount table, failing with `fm window did not open hello.txt`
+or `fm window read no file`. The `--fm` checksum becomes
+`0x78ebd6d359914da7`, while both shipped checksums stay unchanged because the
+launch suffix never runs there. See
+[ADR 0044](docs/adr/0044-the-file-manager-opens-a-file-by-proof.md).
 
 ### Fixed
 

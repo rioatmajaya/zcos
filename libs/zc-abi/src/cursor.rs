@@ -166,15 +166,19 @@ pub const MOUSE_SCRIPT: &[MouseStep] = &[
 /// report stream* rather than enabled by a compile-time switch in the
 /// compositor.
 ///
-/// The last six steps are the file manager's interaction: walk into window 1's
-/// content, press the directory row, and release. Window 1 sits at
+/// The last fifteen steps are the file manager's interaction. Window 1 sits at
 /// [`crate::desktop::window_rect_for`]`(1, FRAME_INITIAL)`, which is
 /// `(80, 432, 426, 266)` on the boot display, so `(106, 504)` is row 2 — the
 /// `dev/` entry, after the `data/` and `tmp/` mount points the VFS lists first.
-/// The kernel replays the same press into its own [`crate::fm::Fm`] and walks
-/// its own mount table, so the final `/dev` listing is a proof rather than a
-/// claim. A separate array (not a prefix of [`MOUSE_SCRIPT`]) because the close
-/// and launch suffixes are mutually exclusive endings of the same prefix.
+/// The script opens `dev/`, clicks its `..` row at `(106, 464)` to return to the
+/// root, then selects `hello.txt` in the last visible row 9 at `(106, 630)` and
+/// clicks it again to open the preview. That row is the tenth entry: the three
+/// mount points and the six files from `blk.elf` through `font8x16.raw`. The
+/// kernel replays every click into its own [`crate::fm::Fm`], walks its own
+/// mount table, and reads `hello.txt` through its own VFS, so both the
+/// navigation and the file read are proofs rather than claims. A separate array
+/// (not a prefix of [`MOUSE_SCRIPT`]) because the close and launch suffixes are
+/// mutually exclusive endings of the same prefix.
 pub const MOUSE_LAUNCH_SCRIPT: &[MouseStep] = &[
     // (300, 150) -> (24, 16): three clamped moves onto the launcher centre.
     step(0, -127, -127),
@@ -190,6 +194,19 @@ pub const MOUSE_LAUNCH_SCRIPT: &[MouseStep] = &[
     step(0, 0, 107),
     // Click the `dev/` row. The client opens it; the kernel's replay must land
     // on the same row or the window pixels stop matching.
+    step(BUTTON_LEFT, 0, 0),
+    step(0, 0, 0),
+    // (106, 504) -> (106, 464): the `..` row in `/dev`, which walks back.
+    step(0, 0, -40),
+    step(BUTTON_LEFT, 0, 0),
+    step(0, 0, 0),
+    // (106, 464) -> (106, 630): row 9 is `hello.txt`, after the three mount
+    // points and the six files `blk.elf` through `font8x16.raw`. The first click
+    // selects it; the second opens a preview through the VFS.
+    step(0, 0, 127),
+    step(0, 0, 39),
+    step(BUTTON_LEFT, 0, 0),
+    step(0, 0, 0),
     step(BUTTON_LEFT, 0, 0),
     step(0, 0, 0),
 ];
@@ -541,6 +558,11 @@ mod tests {
         assert!(
             body.contains(cursor.x, cursor.y),
             "the launch script never entered window 1's content"
+        );
+        assert_eq!(
+            (cursor.x, cursor.y),
+            (106, 630),
+            "the launch script must end on the hello.txt row"
         );
         // The launch variant shares the exact prefix the default boot serves,
         // so the first 28 steps are byte-identical and only the suffix differs.

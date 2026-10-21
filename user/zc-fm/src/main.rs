@@ -9,10 +9,12 @@
 //! every pixel, so the listing is a proof: a client that lists the wrong
 //! directory or paints the wrong rows fails the frame checksum.
 //!
-//! A click on a directory row enters it and a click on a file row selects it.
-//! Both decisions live in [`Fm`], and the kernel replays the same scripted
-//! clicks into the same state machine with its own lister, so the `/dev` title
-//! and listing in the proof frame are derived rather than trusted.
+//! A click on a directory row enters it, a first click on a file row selects
+//! it, and a second click opens a preview read through the VFS. Every decision
+//! lives in [`Fm`], and the kernel replays the same scripted clicks into the
+//! same state machine with its own lister and reader, so the final
+//! `/hello.txt` title, preview bytes, and pixels are derived rather than
+//! trusted.
 //!
 //! The session ends through the same path as the terminal: `SYS_WINDOW_READ`
 //! returns `u64::MAX` when the window closes or the shell exits, and this client
@@ -23,14 +25,18 @@
 #![allow(unsafe_code)]
 
 use zc_abi::{
-    DIRENT_LEN, DirEntry, Event, Fm, FONT_LEN, FONT_PATH, Font, IPC_WM_REPLY, Listing, PixelFormat,
-    READDIR_END, READDIR_ENTRY, SurfaceInfo, WM_ACK, WM_DONE, reload, wm_assign, wm_reply,
+    DIRENT_LEN, DirEntry, Event, FM_PREVIEW_MAX, Fm, FONT_LEN, FONT_PATH, Font, IPC_WM_REPLY,
+    Listing, PixelFormat, READDIR_END, READDIR_ENTRY, SurfaceInfo, WM_ACK, WM_DONE, reload,
+    wm_assign, wm_reply,
 };
 use zc_ui::{Window, WindowEvent};
 use zc_user::{close, log, open, read, readdir, recv_from, send_to, surface_map, task_exit, window_id};
 
 /// Whether the client has logged its one navigation marker.
 static mut OPEN_LOGGED: bool = false;
+
+/// Whether the client has logged its one preview marker.
+static mut PREVIEW_LOGGED: bool = false;
 
 /// Whether the client has logged that the window-local pointer stream arrived.
 static mut POINTER_LOGGED: bool = false;
@@ -95,12 +101,39 @@ fn list_dir(path: &[u8], index: usize) -> Listing {
     }
 }
 
-/// Logs the navigation marker once, so CI can prove the click opened a
-/// directory rather than only that a pointer report arrived.
+/// Reads a file through the VFS, for [`Fm::open`].
+///
+/// One read fills the whole preview buffer (`FM_PREVIEW_MAX` is the syscall's
+/// 512-byte limit), and the descriptor is closed on every path after it opens.
+/// The kernel's verifier uses its own mount table for the same path, so a
+/// client that shows different bytes fails the frame check.
+fn read_file(path: &[u8], out: &mut [u8]) -> Option<usize> {
+    let path = core::str::from_utf8(path).ok()?;
+    let fd = open(path);
+    if fd == u64::MAX {
+        return None;
+    }
+    let len = out.len().min(FM_PREVIEW_MAX);
+    let got = read(fd, &mut out[..len]);
+    close(fd);
+    if got == u64::MAX { None } else { Some(got as usize) }
+}
+
+/// Logs the navigation and preview markers once, so CI can prove the clicks
+/// opened a directory and read a file rather than only that a pointer report
+/// arrived.
 fn announce(fm: &Fm) {
-    if fm.path() != b"/" {
+    if fm.previewing() {
         // SAFETY: this is the only task that writes the flag, and it is read
         // again only by this task.
+        unsafe {
+            if !PREVIEW_LOGGED {
+                PREVIEW_LOGGED = true;
+                log("fm: preview ok\n");
+            }
+        }
+    } else if fm.path() != b"/" {
+        // SAFETY: as above: single writer, single reader.
         unsafe {
             if !OPEN_LOGGED {
                 OPEN_LOGGED = true;
@@ -151,11 +184,12 @@ pub unsafe extern "C" fn _start() -> ! {
         log("fm: listing ok\n");
         paint(&fm, font, pixels, surface.stride, format, surface.width, surface.height);
         let _ = send_to(IPC_WM_REPLY as u64, wm_reply(WM_ACK, window));
-        // The model owns navigation, so the loop only forwards input into it.
-        // A click on a directory row re-lists that directory; a click on a file
-        // selects it; `r`/Enter refreshes and Backspace walks up. The kernel's
-        // verifier replays the scripted click through the same `Fm::click`, so
-        // the final path and pixels are derived rather than trusted.
+        // The model owns navigation and preview, so the loop only forwards
+        // input into it. A click on a directory row re-lists it, a first click
+        // on a file selects it, and a second click reads and previews it;
+        // `r`/Enter refreshes and Backspace walks up or closes a preview. The
+        // kernel's verifier replays the same clicks through `Fm::click`, so the
+        // final path, file bytes, and pixels are derived rather than trusted.
         let mut win = Window::new();
         while let Some(event) = win.next() {
             let changed = match event {
@@ -177,6 +211,7 @@ pub unsafe extern "C" fn _start() -> ! {
                             surface.width,
                             surface.height,
                             list_dir,
+                            read_file,
                         )
                 }
             };
@@ -196,7 +231,7 @@ pub unsafe extern "C" fn _start() -> ! {
     task_exit()
 }
 
-/// Fills the window surface with the file manager's rendered listing.
+/// Fills the window surface with the file manager's rendered listing or preview.
 fn paint(
     fm: &Fm,
     font: Font<'_>,

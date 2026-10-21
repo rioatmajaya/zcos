@@ -7,11 +7,13 @@
 //! from its own mount table and recomputes every pixel, so a client that lists
 //! the wrong directory or paints the wrong rows fails the frame checksum.
 //!
-//! The manager is interactive: a click on a directory row enters it, a click on
-//! a file row selects it, and the title bar carries the current path. The
-//! navigation lives here, not in the client, so the kernel's replay executes the
-//! *same* clicks through the *same* state machine with its own mount table as the
-//! lister — a client that navigates somewhere else fails the pixel compare.
+//! The manager is interactive: a click on a directory row enters it, a first
+//! click on a file row selects it, a second click reads and previews it, and the
+//! title bar carries the current path. Navigation and the preview format live
+//! here, not in the client, so the kernel's replay executes the *same* clicks
+//! through the *same* state machine with its own mount table as the lister and
+//! reader — a client that navigates or previews something else fails the pixel
+//! compare.
 //!
 //! Everything is allocation-free and, where it matters, `const`-callable, so the
 //! kernel and the client share one implementation.
@@ -72,6 +74,17 @@ pub const FM_ROWS: usize = 10;
 /// truncated name still renders deterministically on both sides.
 pub const FM_NAME_MAX: usize = FM_COLS;
 
+/// Maximum bytes read for one file preview.
+///
+/// This is the largest read the window client can ask for in one syscall
+/// (`MAX_USER_IO_LEN` is 512), so a preview is one read and both sides format
+/// exactly the same bytes. A larger file is shown truncated; the window has no
+/// scrollbar yet.
+pub const FM_PREVIEW_MAX: usize = 512;
+
+/// Content rows in a preview; the first body row is the `..` back row.
+const FM_PREVIEW_ROWS: usize = FM_ROWS - 1;
+
 /// Left padding inside the body, in pixels.
 const PAD_X: u32 = 6;
 /// Top padding inside the body, in pixels.
@@ -79,7 +92,7 @@ const PAD_Y: u32 = 6;
 /// Vertical distance between text baselines, in pixels.
 const LINE_H: u32 = GLYPH_H + 2;
 
-/// A file-manager window's content: a directory listing and where it is.
+/// A file-manager window's content: a directory listing, or one file's preview.
 ///
 /// The listing is stored as up to [`FM_ROWS`] names with a kind flag each, in
 /// the order `SYS_READDIR` returned them. A directory name renders with a
@@ -87,6 +100,11 @@ const LINE_H: u32 = GLYPH_H + 2;
 /// every listing in the system. [`PARENT_NAME`] is an ordinary first row when
 /// the current path is not the root; the renderer leaves its name unadorned
 /// because `../` would be a path, not a name.
+///
+/// A preview replaces the listing with `..` plus formatted file lines. The path
+/// becomes the *file* path, so the title names what is on screen and `up` walks
+/// back to its directory. Both modes are one state machine, so the verifier
+/// replays the same clicks and reads the same bytes.
 #[derive(Clone, Copy)]
 pub struct Fm {
     names: [[u8; FM_NAME_MAX]; FM_ROWS],
@@ -97,7 +115,7 @@ pub struct Fm {
     rows: u8,
     /// Whether the listing failed (a load error rather than an empty directory).
     error: bool,
-    /// Current directory, always absolute and never empty.
+    /// Current directory, or the file being previewed.
     path: [u8; FM_PATH_MAX],
     /// Meaningful bytes of `path`.
     path_len: u8,
@@ -107,6 +125,14 @@ pub struct Fm {
     /// `row + 1` keeps `0` free as "none", so the struct stays `Copy` and needs
     /// no `Option`.
     selected: u8,
+    /// Whether the body shows a file preview instead of a directory listing.
+    preview: bool,
+    /// Formatted preview lines, already wrapped to [`FM_COLS`] cells.
+    preview_lines: [[u8; FM_COLS]; FM_PREVIEW_ROWS],
+    /// Meaningful bytes of each preview line.
+    preview_lens: [u8; FM_PREVIEW_ROWS],
+    /// Number of preview lines filled.
+    preview_rows: u8,
 }
 
 impl Fm {
@@ -124,6 +150,10 @@ impl Fm {
             path,
             path_len: 1,
             selected: 0,
+            preview: false,
+            preview_lines: [[0u8; FM_COLS]; FM_PREVIEW_ROWS],
+            preview_lens: [0u8; FM_PREVIEW_ROWS],
+            preview_rows: 0,
         }
     }
 
@@ -139,7 +169,8 @@ impl Fm {
         &self.path[..self.path_len as usize]
     }
 
-    /// Points the listing at `path` and clears its rows, error, and selection.
+    /// Points the listing at `path` and clears its rows, error, preview, and
+    /// selection.
     ///
     /// [`reload`] calls this before filling the rows, so a navigation can never
     /// show the previous directory's tail under the new title.
@@ -168,6 +199,8 @@ impl Fm {
         self.rows = 0;
         self.error = false;
         self.selected = 0;
+        self.preview = false;
+        self.preview_rows = 0;
     }
 
     /// Appends one entry; entries past [`FM_ROWS`] are dropped.
@@ -203,8 +236,14 @@ impl Fm {
     }
 
     /// Returns the name stored in row `row`, without the trailing slash.
+    ///
+    /// In a preview, row 0 is the `..` back row and content rows have no name;
+    /// the renderer reads [`Fm::preview_line`] for those instead.
     #[must_use]
     pub fn name(&self, row: usize) -> &[u8] {
+        if self.preview {
+            return if row == 0 { PARENT_NAME } else { &[] };
+        }
         if row >= self.rows as usize {
             return &[];
         }
@@ -214,12 +253,18 @@ impl Fm {
     /// Returns whether row `row` is a directory.
     #[must_use]
     pub const fn is_dir(&self, row: usize) -> bool {
+        if self.preview {
+            return row == 0;
+        }
         row < self.rows as usize && self.kinds[row] == crate::KIND_DIR as u8
     }
 
     /// Returns whether row `row` is the synthetic parent entry.
     #[must_use]
     pub const fn is_parent(&self, row: usize) -> bool {
+        if self.preview {
+            return row == 0;
+        }
         if row >= self.rows as usize {
             return false;
         }
@@ -238,23 +283,56 @@ impl Fm {
         }
     }
 
-    /// Returns the listing row containing `(x, y)`, or `None` outside the body.
+    /// Returns whether the body shows a file preview.
+    #[must_use]
+    pub const fn previewing(&self) -> bool {
+        self.preview
+    }
+
+    /// Returns the number of formatted preview lines.
+    #[must_use]
+    pub const fn preview_rows(&self) -> u8 {
+        self.preview_rows
+    }
+
+    /// Returns preview line `line`, or an empty slice when it is not filled.
+    #[must_use]
+    pub fn preview_line(&self, line: usize) -> &[u8] {
+        if line >= self.preview_rows as usize {
+            return &[];
+        }
+        &self.preview_lines[line][..self.preview_lens[line] as usize]
+    }
+
+    /// Returns how many body rows are visible in the current mode.
+    const fn visible_rows(&self) -> usize {
+        if self.preview {
+            1 + self.preview_rows as usize
+        } else if self.error {
+            1
+        } else {
+            self.rows as usize
+        }
+    }
+
+    /// Returns the body row containing `(x, y)`, or `None` outside the body.
     ///
-    /// This is the one hit-test the client and the verifier both use. The title
-    /// bar, the border, the padding above the first row, and the empty space
-    /// below the last row all miss, so a placement gesture can never look like a
-    /// click on a row.
+    /// This is the one hit-test the client and the verifier both use. A listing
+    /// row, the preview's `..` row, and a preview content row all share the same
+    /// geometry; the title bar, the border, the padding above the first row, a
+    /// failed listing, and the empty space below the last row all miss, so a
+    /// placement gesture can never look like a click on a row.
     #[must_use]
     pub const fn row_at(&self, x: u32, y: u32, w: u32, h: u32) -> Option<usize> {
         if w < 2 || h < 2 || x < PAD_X || x >= w - 2 {
             return None;
         }
-        if y < TITLE_HEIGHT + PAD_Y || y >= h - 2 {
+        if self.error || y < TITLE_HEIGHT + PAD_Y || y >= h - 2 {
             return None;
         }
         let rel = y - (TITLE_HEIGHT + PAD_Y);
         let row = (rel / LINE_H) as usize;
-        if row < self.rows as usize {
+        if row < self.visible_rows() {
             Some(row)
         } else {
             None
@@ -263,27 +341,34 @@ impl Fm {
 
     /// Applies a click at window-local `(x, y)`.
     ///
-    /// A directory row enters it through `list`; a file row selects it. Returns
-    /// whether the model changed, so the caller repaints and acknowledges only
-    /// on a real change — the same rule the terminal's button follows.
+    /// In a listing, a directory row enters it through `list`, a first click on
+    /// a file selects it, and a second click on that file opens a preview
+    /// through `read`. In a preview, row 0 (`..`) returns to the directory and
+    /// the content rows ignore clicks. Returns whether the model changed, so
+    /// the caller repaints and acknowledges only on a real change.
     ///
-    /// `list` is the caller's directory reader: the client injects the
-    /// `SYS_READDIR` syscall and the kernel's verifier injects its own mount
-    /// table. Both feed [`reload`], so the pixels cannot diverge.
-    pub fn click<L>(&mut self, x: u32, y: u32, w: u32, h: u32, list: L) -> bool
+    /// `list` and `read` are the caller's filesystem: the client injects the
+    /// `SYS_READDIR`/`SYS_OPEN`/`SYS_READ` syscalls and the kernel's verifier
+    /// injects its own mount table. Both feed [`reload`] and [`Fm::open`], so
+    /// the pixels cannot diverge.
+    pub fn click<L, R>(&mut self, x: u32, y: u32, w: u32, h: u32, list: L, read: R) -> bool
     where
         L: FnMut(&[u8], usize) -> Listing,
+        R: FnMut(&[u8], &mut [u8]) -> Option<usize>,
     {
         let Some(row) = self.row_at(x, y, w, h) else {
             return false;
         };
+        if self.preview {
+            return if row == 0 { self.up(list) } else { false };
+        }
         if self.is_parent(row) {
             return self.up(list);
         }
         if !self.is_dir(row) {
             let selected = (row + 1) as u8;
             if self.selected == selected {
-                return false;
+                return self.open(row, read);
             }
             self.selected = selected;
             return true;
@@ -296,6 +381,33 @@ impl Fm {
             return false;
         };
         reload(self, &path[..len], list);
+        true
+    }
+
+    /// Reads file row `row` through `read` and enters preview mode.
+    ///
+    /// Returns `false` when the path does not fit or the read fails, leaving the
+    /// selection where it was. A zero-length read is a valid empty file, not a
+    /// failure, so an empty preview still proves the read happened.
+    fn open<R>(&mut self, row: usize, mut read: R) -> bool
+    where
+        R: FnMut(&[u8], &mut [u8]) -> Option<usize>,
+    {
+        let mut path = [0u8; FM_PATH_MAX];
+        let Some(len) = self.child_path(row, &mut path) else {
+            return false;
+        };
+        let mut bytes = [0u8; FM_PREVIEW_MAX];
+        let Some(count) = read(&path[..len], &mut bytes) else {
+            return false;
+        };
+        let count = count.min(FM_PREVIEW_MAX);
+        let (lines, lens, rows) = format_preview(&bytes[..count]);
+        self.set_path(&path[..len]);
+        self.preview_lines = lines;
+        self.preview_lens = lens;
+        self.preview_rows = rows;
+        self.preview = true;
         true
     }
 
@@ -316,10 +428,16 @@ impl Fm {
     }
 
     /// Re-reads the current directory, keeping the path.
+    ///
+    /// A preview is not a directory listing, so refresh is a no-op there; the
+    /// user closes it with `..` or Backspace instead.
     pub fn refresh<L>(&mut self, list: L) -> bool
     where
         L: FnMut(&[u8], usize) -> Listing,
     {
+        if self.preview {
+            return false;
+        }
         let mut path = [0u8; FM_PATH_MAX];
         let len = self.path_len as usize;
         path[..len].copy_from_slice(self.path());
@@ -327,15 +445,19 @@ impl Fm {
         true
     }
 
-    /// Builds the absolute path of the directory in row `row`.
+    /// Builds the absolute path of the entry in row `row`.
     ///
+    /// Works for both a directory row (navigation) and a file row (preview).
     /// Returns the number of bytes written, or `None` when the destination is
-    /// too small or the row is not a directory.
+    /// too small or the row has no name.
     fn child_path(&self, row: usize, out: &mut [u8; FM_PATH_MAX]) -> Option<usize> {
-        if !self.is_dir(row) {
+        if self.preview || row >= self.rows as usize {
             return None;
         }
         let name = self.name(row);
+        if name.is_empty() {
+            return None;
+        }
         let base = self.path();
         let root = base == b"/";
         let needed = base.len() + if root { 0 } else { 1 } + name.len();
@@ -376,26 +498,43 @@ impl Fm {
         }
         let rel = body_y - PAD_Y;
         let row = (rel / LINE_H) as usize;
-        if row >= FM_ROWS {
+        if row >= self.visible_rows() {
             return BG;
         }
-        // A failed listing shows one centered message row, like the shell's
-        // `ls: cannot list`.
-        let text: &[u8] = if self.error {
+        // Three bodies share one glyph loop: a listing row, a preview row
+        // (`..` plus formatted file lines), or the one-line failure message. The
+        // tuple carries the text, its meaningful length, whether it gets the
+        // directory slash, and whether it is the selected file.
+        let (text, stored_len, is_dir_name, selected): (&[u8], u32, bool, bool) = if self.preview {
             if row == 0 {
-                b"cannot list"
+                (PARENT_NAME, PARENT_NAME.len() as u32, false, false)
             } else {
-                &[]
+                (
+                    self.preview_lines[row - 1].as_slice(),
+                    self.preview_lens[row - 1] as u32,
+                    false,
+                    false,
+                )
+            }
+        } else if self.error {
+            if row == 0 {
+                (b"cannot list".as_slice(), 11, false, false)
+            } else {
+                (&[], 0, false, false)
             }
         } else if row >= self.rows as usize {
-            &[]
+            (&[], 0, false, false)
         } else {
-            self.names[row].as_slice()
+            (
+                self.names[row].as_slice(),
+                self.lens[row] as u32,
+                self.is_dir(row) && !self.is_parent(row),
+                self.selected == (row as u8).wrapping_add(1),
+            )
         };
         if text.is_empty() {
             return BG;
         }
-        let selected = self.selected == (row as u8).wrapping_add(1);
         let base = if selected { SELECT_BG } else { BG };
         let rel_x = lx - PAD_X;
         let col = rel_x / GLYPH_W;
@@ -403,14 +542,6 @@ impl Fm {
         // longer than its stored bytes and the extra cell is a glyph, not a
         // stored byte. The synthetic parent is already a path segment, so it is
         // the one directory name the renderer leaves unadorned.
-        let (is_dir_name, stored_len) = if self.error {
-            (false, text.len() as u32)
-        } else {
-            (
-                self.is_dir(row) && !self.is_parent(row),
-                self.lens[row] as u32,
-            )
-        };
         let shown_len = if is_dir_name { stored_len + 1 } else { stored_len };
         if col >= shown_len {
             return base;
@@ -541,6 +672,75 @@ pub fn parent_path(path: &[u8]) -> &[u8] {
     b"/"
 }
 
+/// Formats a preview into fixed-width lines, the one way both sides do it.
+///
+/// Newlines start a new line, tabs become one space, and a line longer than
+/// [`FM_COLS`] wraps. A binary file (a byte outside printable ASCII, tab,
+/// newline, or carriage return) shows `[binary file]` instead of glyph soup; an
+/// empty file shows `(empty)`. The result is capped at the body's content rows,
+/// so a large file is truncated rather than overflowing the window.
+fn format_preview(
+    bytes: &[u8],
+) -> (
+    [[u8; FM_COLS]; FM_PREVIEW_ROWS],
+    [u8; FM_PREVIEW_ROWS],
+    u8,
+) {
+    let mut lines = [[0u8; FM_COLS]; FM_PREVIEW_ROWS];
+    let mut lens = [0u8; FM_PREVIEW_ROWS];
+    if bytes.is_empty() {
+        let message = b"(empty)";
+        lines[0][..message.len()].copy_from_slice(message);
+        lens[0] = message.len() as u8;
+        return (lines, lens, 1);
+    }
+    if bytes.iter().any(|&b| {
+        b > 0x7e || (b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t')
+    }) {
+        let message = b"[binary file]";
+        lines[0][..message.len()].copy_from_slice(message);
+        lens[0] = message.len() as u8;
+        return (lines, lens, 1);
+    }
+    let mut row = 0usize;
+    let mut col = 0usize;
+    for &byte in bytes {
+        if byte == b'\r' {
+            continue;
+        }
+        if byte == b'\n' {
+            lens[row] = col as u8;
+            row += 1;
+            col = 0;
+            if row >= FM_PREVIEW_ROWS {
+                return (lines, lens, FM_PREVIEW_ROWS as u8);
+            }
+            continue;
+        }
+        let ch = if byte == b'\t' { b' ' } else { byte };
+        if col >= FM_COLS {
+            lens[row] = col as u8;
+            row += 1;
+            col = 0;
+            if row >= FM_PREVIEW_ROWS {
+                return (lines, lens, FM_PREVIEW_ROWS as u8);
+            }
+        }
+        lines[row][col] = ch;
+        col += 1;
+    }
+    if row < FM_PREVIEW_ROWS {
+        lens[row] = col as u8;
+        row += 1;
+    }
+    // A file ending in a newline should not leave an extra blank row; an
+    // all-newline file still keeps one row so the preview is visibly non-empty.
+    while row > 1 && lens[row - 1] == 0 {
+        row -= 1;
+    }
+    (lines, lens, row as u8)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -641,6 +841,15 @@ mod tests {
         assert!(painted, "the fail message painted nothing");
     }
 
+    #[test]
+    fn a_failed_listing_is_not_a_clickable_row() {
+        let (w, h) = (426u32, 266u32);
+        let mut fm = Fm::new();
+        fm.fail();
+        assert!(!click(&mut fm, PAD_X + 4, TITLE_HEIGHT + PAD_Y + 4, w, h));
+        assert!(fm.selected().is_none());
+    }
+
     /// A stand-in filesystem: the two directories this module navigates.
     fn fake_list(path: &[u8], index: usize) -> Listing {
         let entries: &[(u32, &[u8])] = match path {
@@ -648,6 +857,12 @@ mod tests {
                 (crate::KIND_DIR, b"data"),
                 (crate::KIND_DIR, b"tmp"),
                 (crate::KIND_DIR, b"dev"),
+                (crate::KIND_FILE, b"blk.elf"),
+                (crate::KIND_FILE, b"compositor.elf"),
+                (crate::KIND_FILE, b"consumer.elf"),
+                (crate::KIND_FILE, b"devmgr.elf"),
+                (crate::KIND_FILE, b"fm.elf"),
+                (crate::KIND_FILE, b"font8x16.raw"),
                 (crate::KIND_FILE, b"hello.txt"),
             ],
             b"/dev" => &[
@@ -664,6 +879,22 @@ mod tests {
         Listing::Entry(entry)
     }
 
+    /// A stand-in file reader with one text file and one binary file.
+    fn fake_read(path: &[u8], out: &mut [u8]) -> Option<usize> {
+        let bytes: &[u8] = match path {
+            b"/hello.txt" => b"hello from the ZC OS initramfs\n",
+            b"/font8x16.raw" => &[0x00, 0x01, 0xfe, 0xff],
+            _ => return None,
+        };
+        let len = bytes.len().min(out.len());
+        out[..len].copy_from_slice(&bytes[..len]);
+        Some(len)
+    }
+
+    fn click(fm: &mut Fm, x: u32, y: u32, w: u32, h: u32) -> bool {
+        fm.click(x, y, w, h, fake_list, fake_read)
+    }
+
     #[test]
     fn the_parent_path_is_the_leading_directory() {
         assert_eq!(parent_path(b"/"), b"/");
@@ -678,7 +909,7 @@ mod tests {
         let mut root = Fm::new();
         reload(&mut root, b"/", fake_list);
         assert_eq!(root.path(), b"/");
-        assert_eq!(root.rows(), 4);
+        assert_eq!(root.rows(), 10);
         assert!(!root.is_parent(0));
 
         let mut dev = Fm::new();
@@ -696,26 +927,68 @@ mod tests {
         reload(&mut fm, b"/", fake_list);
         // Row 2 is `dev`, after the two mount points the VFS lists first.
         let row_y = TITLE_HEIGHT + PAD_Y + 2 * LINE_H + 4;
-        assert!(fm.click(PAD_X + 4, row_y, w, h, fake_list));
+        assert!(click(&mut fm, PAD_X + 4, row_y, w, h));
         assert_eq!(fm.path(), b"/dev");
         assert_eq!(fm.name(0), PARENT_NAME);
         assert!(fm.selected().is_none(), "navigation clears the selection");
         // The synthetic parent row walks back to the root.
-        assert!(fm.click(PAD_X + 4, TITLE_HEIGHT + PAD_Y + 4, w, h, fake_list));
+        assert!(click(&mut fm, PAD_X + 4, TITLE_HEIGHT + PAD_Y + 4, w, h));
         assert_eq!(fm.path(), b"/");
     }
 
     #[test]
-    fn clicking_a_file_row_selects_it_and_a_second_click_is_a_no_op() {
+    fn clicking_a_file_row_selects_it_and_a_second_click_previews_it() {
         let (w, h) = (426u32, 266u32);
         let mut fm = Fm::new();
         reload(&mut fm, b"/", fake_list);
-        // Row 3 is `hello.txt`.
-        let y = TITLE_HEIGHT + PAD_Y + 3 * LINE_H + 4;
-        assert!(fm.click(PAD_X + 4, y, w, h, fake_list));
-        assert_eq!(fm.selected(), Some(3));
-        assert_eq!(fm.path(), b"/", "a file click must not navigate");
-        assert!(!fm.click(PAD_X + 4, y, w, h, fake_list));
+        // Row 9 is the last visible row: `hello.txt`, after the mounts and the
+        // five alphabetically earlier files.
+        let y = TITLE_HEIGHT + PAD_Y + 9 * LINE_H + 4;
+        assert!(click(&mut fm, PAD_X + 4, y, w, h));
+        assert_eq!(fm.selected(), Some(9));
+        assert_eq!(fm.path(), b"/", "the first click must not navigate");
+        assert!(!fm.previewing());
+        assert!(click(&mut fm, PAD_X + 4, y, w, h));
+        assert_eq!(fm.path(), b"/hello.txt");
+        assert!(fm.previewing());
+        assert_eq!(fm.preview_rows(), 1);
+        assert_eq!(fm.preview_line(0), b"hello from the ZC OS initramfs");
+        // The preview's `..` row returns to the directory listing.
+        assert!(click(&mut fm, PAD_X + 4, TITLE_HEIGHT + PAD_Y + 4, w, h));
+        assert_eq!(fm.path(), b"/");
+        assert!(!fm.previewing());
+        assert_eq!(fm.selected(), None);
+    }
+
+    #[test]
+    fn preview_formatting_handles_empty_wrapping_and_newlines() {
+        let (lines, lens, rows) = format_preview(b"");
+        assert_eq!(rows, 1);
+        assert_eq!(&lines[0][..lens[0] as usize], b"(empty)");
+
+        let (lines, lens, rows) = format_preview(b"abc\ndef");
+        assert_eq!(rows, 2);
+        assert_eq!(&lines[0][..lens[0] as usize], b"abc");
+        assert_eq!(&lines[1][..lens[1] as usize], b"def");
+
+        let long = [b'x'; FM_COLS + 1];
+        let (_, lens, rows) = format_preview(&long);
+        assert_eq!(rows, 2);
+        assert_eq!(lens[0] as usize, FM_COLS);
+        assert_eq!(lens[1], 1);
+    }
+
+    #[test]
+    fn a_binary_file_previews_a_placeholder() {
+        let (w, h) = (426u32, 266u32);
+        let mut fm = Fm::new();
+        reload(&mut fm, b"/", fake_list);
+        let y = TITLE_HEIGHT + PAD_Y + 8 * LINE_H + 4;
+        assert!(click(&mut fm, PAD_X + 4, y, w, h));
+        assert!(click(&mut fm, PAD_X + 4, y, w, h));
+        assert_eq!(fm.path(), b"/font8x16.raw");
+        assert!(fm.previewing());
+        assert_eq!(fm.preview_line(0), b"[binary file]");
     }
 
     #[test]
@@ -725,10 +998,10 @@ mod tests {
         reload(&mut fm, b"/", fake_list);
         // The title bar, the border, and the empty space below the listing are
         // the window manager's or nobody's, never a row.
-        assert!(!fm.click(PAD_X + 4, 4, w, h, fake_list));
-        assert!(!fm.click(0, 0, w, h, fake_list));
-        assert!(!fm.click(w - 2, h - 2, w, h, fake_list));
-        assert!(!fm.click(PAD_X + 4, TITLE_HEIGHT + PAD_Y + FM_ROWS as u32 * LINE_H, w, h, fake_list));
+        assert!(!click(&mut fm, PAD_X + 4, 4, w, h));
+        assert!(!click(&mut fm, 0, 0, w, h));
+        assert!(!click(&mut fm, w - 2, h - 2, w, h));
+        assert!(!click(&mut fm, PAD_X + 4, TITLE_HEIGHT + PAD_Y + FM_ROWS as u32 * LINE_H, w, h));
         assert_eq!(fm.path(), b"/");
         assert!(fm.selected().is_none());
     }
@@ -762,12 +1035,12 @@ mod tests {
         let font = Font::embedded();
         let mut fm = Fm::new();
         reload(&mut fm, b"/", fake_list);
-        let y = TITLE_HEIGHT + PAD_Y + 3 * LINE_H + 4;
+        let y = TITLE_HEIGHT + PAD_Y + 9 * LINE_H + 4;
         // Somewhere past the end of `hello.txt` in the same row, the selection
         // paints its own background instead of the plain body color.
         let x = PAD_X + 20 * GLYPH_W;
         assert_eq!(fm.render(font, x, y, w, h), BG);
-        let _ = fm.click(PAD_X + 4, y, w, h, fake_list);
+        let _ = click(&mut fm, PAD_X + 4, y, w, h);
         assert_eq!(fm.render(font, x, y, w, h), SELECT_BG);
     }
 }

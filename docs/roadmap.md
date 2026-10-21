@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 7 grants`, `task 6: devmgr: blk published`, `dma: window coherent ok` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–7, F8e-1–4, F8h-0/0b/1a/1b/1c-1/1c-2/1c-3, live-input check, F8g-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: font vfs ok`; `compositor: font vfs ok`; `font: vfs ok`; `client: window painted`; `client: vfs ok`; `client: pointer ok`; `client: click ok`; `client: ls ok`; `wm: window mapped`; `wm: pointer routed`; `wm: click ok`; `wm: ls ok`; `task 2: data/`; `task 2: kbd`; `task 2: probe`; `win1 entry`; `task 9: client: window 1 idle`; `compositor: window 1 launched` (fm run); `task 9: fm: ready` (fm run); `fm: listing ok` (fm run); `task 9: fm: pointer ok` (fm run); `task 9: fm: open ok` (fm run); `fm: open ok` (fm run); `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed` (close run); `compositor: window erased` (close run); `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui/session/vfs/fm host tests pass; `zc-storage` zcfs read_dir tests pass |
+| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–7, F8e-1–4, F8h-0/0b/1a/1b/1c-1/1c-2/1c-3/1c-4, live-input check, F8g-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: font vfs ok`; `compositor: font vfs ok`; `font: vfs ok`; `client: window painted`; `client: vfs ok`; `client: pointer ok`; `client: click ok`; `client: ls ok`; `wm: window mapped`; `wm: pointer routed`; `wm: click ok`; `wm: ls ok`; `task 2: data/`; `task 2: kbd`; `task 2: probe`; `win1 entry`; `task 9: client: window 1 idle`; `compositor: window 1 launched` (fm run); `task 9: fm: ready` (fm run); `fm: listing ok` (fm run); `task 9: fm: pointer ok` (fm run); `task 9: fm: open ok` (fm run); `task 9: fm: preview ok` (fm run); `fm: open ok` (fm run); `fm: preview ok` (fm run); `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed` (close run); `compositor: window erased` (close run); `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui/session/vfs/fm host tests pass; `zc-storage` zcfs read_dir tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -877,6 +877,27 @@ full browser. Note them as follow-ups, do not build them here.
         joins, the parent row, directory entry, file selection, out-of-body
         clicks, and the scripted click's landing. See
         [`adr/0043`](adr/0043-the-file-manager-navigates-by-proof.md).
+      - [x] F8h-1c-4: the file manager opens a file. A first click on a file row
+        selects it and a second click reads it through a caller-supplied reader
+        and enters preview mode. The shared `Fm` formats the bytes into wrapped
+        lines, marks a binary file `[binary file]` and an empty one `(empty)`,
+        moves the file path into the title (`Files /hello.txt`), and uses the
+        synthetic `..` row to return to the directory. The client injects
+        `SYS_OPEN`/`SYS_READ`; the verifier injects its own `kernel_read_file`,
+        so the preview is derived from the same bytes rather than trusted. The
+        `--fm` script now opens `dev/`, clicks `..`, and double-clicks
+        `hello.txt` in row 9 — the tenth visible entry, after the three mount
+        points and six alphabetically earlier files (`blk.elf` through
+        `font8x16.raw`). The boot logs
+        `task 9: fm: preview ok` and `fm: preview ok`; the verifier fails with
+        `fm window did not open hello.txt` or `fm window read no file` if its
+        replay did not read the file. The `--fm` frame checksum becomes
+        `0x78ebd6d359914da7`; the shipped checksums stay
+        `0xd616ad79aaefb099` / `0x6d66e82d0f2d6fb8` because the launch suffix
+        never runs there. Host tests cover text, binary, empty, newline, and
+        wrapped previews, first-click selection, second-click preview, and the
+        `..` back row. See
+        [`adr/0044`](adr/0044-the-file-manager-opens-a-file-by-proof.md).
 - [ ] F8i: audio stack (virtio-snd first, then HD Audio) after the desktop is
       stable.
 - [ ] F8j: USB stack (xHCI) for keyboard, mouse, and mass storage.
@@ -1034,6 +1055,17 @@ full browser. Note them as follow-ups, do not build them here.
   scripted press lands on a directory row and that the shared state machine joins
   paths, walks to the parent, selects files, and rejects clicks outside the rows.
   See [`adr/0043`](adr/0043-the-file-manager-navigates-by-proof.md).
+- The file manager opens a file (F8h-1c-4): the `--fm` boot logs
+  `task 9: fm: preview ok` and `fm: preview ok`, and its final frame is
+  `Files /hello.txt` with the initramfs text in the body after two
+  `wm: content ok` lines and `fb: desktop checksum ok` (`0x78ebd6d359914da7`).
+  The verifier fails with `fm window did not open hello.txt` if its replay does
+  not end on the file, and with `fm window read no file` if no VFS read
+  happened, so a static window or a client that only changed its title cannot
+  pass. `zc-abi` host tests prove that a first click selects, a second opens,
+  the `..` row returns, and text, binary, empty, newline, and wrapped content
+  format identically. See
+  [`adr/0044`](adr/0044-the-file-manager-opens-a-file-by-proof.md).
 - Clean shutdown: `power: halt clean`.
 - Audio plays a known tone and the driver reports no XRUN under a stress
   buffer: `snd: playback ok`.

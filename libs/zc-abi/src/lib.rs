@@ -88,7 +88,10 @@ pub use syscall::{
 pub use terminal::{
     BUTTON_FG, BUTTON_H, BUTTON_W, Listing, Term, button_rect,
 };
-pub use fm::{FM_COLS, FM_NAME_MAX, FM_PATH_MAX, FM_ROWS, Fm, PARENT_NAME, parent_path, reload};
+pub use fm::{
+    FM_COLS, FM_NAME_MAX, FM_PATH_MAX, FM_PREVIEW_MAX, FM_ROWS, Fm, PARENT_NAME, parent_path,
+    reload,
+};
 pub use ui::{
     Event, Input, WINDOW_MAX_COORD, WINDOW_NO_EVENT, WINDOW_POINTER_TAG, WindowEvent,
     WindowPointer, decode_window_event, hit_all, hit_topmost, pack_window_pointer,

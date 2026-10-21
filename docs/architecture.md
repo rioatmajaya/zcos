@@ -268,9 +268,14 @@ and the kernel's verifier rebuilds the same listing from its own mount table and
 compares every pixel — a generic `SurfaceModel` trait lets the terminal and the
 file manager share one placement/content loop, so the listing is proven, not
 trusted. The listing is also interactive: a click on a directory row enters it
-through the shared `Fm::click`, and the `--fm` script's click is replayed by
-`replay_launch` into that same state machine over the kernel's mount table, so
-the final `/dev` title and rows are derived rather than trusted.
+through the shared `Fm::click`, a second click on a selected file reads it
+through a caller-supplied reader and opens a preview, and the `..` row returns
+to the directory. The `--fm` script opens `dev/`, walks back, and double-clicks
+`hello.txt`; `replay_launch` replays those clicks into the same state machine
+over the kernel's mount table and reads the file with the kernel's own reader,
+so the final `Files /hello.txt` title and its text are derived rather than
+trusted. The preview formats the same bytes on both sides, marks binary content
+and empty files, and wraps long lines at the window edge.
 
 The window pixels remain proven, not trusted, but the proof splits by what is
 knowable. Outside the window the frame checksum recomputes `pixel_at` exactly.

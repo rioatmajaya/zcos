@@ -313,10 +313,12 @@ jobs:
     # manager, whose listing the kernel independently recomputes from its mount
     # table, so `wm: content ok` appears twice — once per window.
     #
-    # The script then clicks the `dev/` row inside window 1. The client opens it
-    # through `SYS_READDIR`; the verifier replays the same press into the same
-    # `Fm` state machine over its own mount table, so the `/dev` title and rows
-    # in the final frame are derived rather than trusted.
+    # The script then clicks the `dev/` row inside window 1, walks back with the
+    # `..` row, and double-clicks `hello.txt`. The client lists with
+    # `SYS_READDIR` and reads with `SYS_OPEN`/`SYS_READ`; the verifier replays
+    # the same clicks into the same `Fm` state machine over its own mount table,
+    # so the `/hello.txt` title and preview bytes in the final frame are derived
+    # rather than trusted.
     - name: Build the two-window image
       run: ./tools/build-efi.sh --fm
     - name: Boot test the two-window proof
@@ -329,18 +331,23 @@ jobs:
         grep -q "task 9: fm: ready" build/boot-fm.log
         grep -q "task 9: fm: listing ok" build/boot-fm.log
         grep -q "task 9: fm: pointer ok" build/boot-fm.log
-        # The click opened a directory, not only arrived: both sides log it.
+        # The clicks opened a directory and then a file, not only arrived: both
+        # sides log each transition.
         grep -q "task 9: fm: open ok" build/boot-fm.log
+        grep -q "task 9: fm: preview ok" build/boot-fm.log
         grep -q "task 9: fm: window painted" build/boot-fm.log
         # Window 1's content is proven by the kernel listing the same directory
-        # through its own mount table and replaying the same click.
+        # and reading the same file through its own mount table while replaying
+        # the same clicks.
         grep -q "fm: listing ok" build/boot-fm.log
         grep -q "fm: open ok" build/boot-fm.log
+        grep -q "fm: preview ok" build/boot-fm.log
         # Both windows reach the content check: window 0 (terminal) and window 1
         # (file manager), so exactly two `wm: content ok` lines.
         test "$(grep -c 'wm: content ok' build/boot-fm.log)" -eq 2
         grep -q "fb: desktop checksum ok" build/boot-fm.log
-        ! grep -q "fm window did not navigate" build/boot-fm.log
+        ! grep -q "fm window did not open hello.txt" build/boot-fm.log
+        ! grep -q "fm window read no file" build/boot-fm.log
         ! grep -q "window placement mismatch" build/boot-fm.log
         ! grep -q "window content mismatch" build/boot-fm.log
         ! grep -q "cursor checksum mismatch" build/boot-fm.log

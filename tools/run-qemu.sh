@@ -14,8 +14,9 @@
 #                  final frames, so CI runs both (ADR 0026).
 #   --fm           the same, against an image built with tools/build-efi.sh --fm,
 #                  whose scripted session clicks the launcher so a second window
-#                  opens and then clicks its file-manager `dev/` row. Proves two
-#                  windows and the navigation end to end.
+#                  opens, opens its `dev/` row, walks back, and double-clicks
+#                  `hello.txt`. Proves two windows, navigation, and a VFS read
+#                  end to end.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)

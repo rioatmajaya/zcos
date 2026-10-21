@@ -266,13 +266,19 @@ mod tests {
         assert_eq!(replay(false).clicks(), replay(true).clicks());
     }
 
-    /// The two directories the launch script's final click can reach.
+    /// The two directories the launch script walks through.
     fn launch_list(path: &[u8], index: usize) -> crate::terminal::Listing {
         let entries: &[(u32, &[u8])] = match path {
             b"/" => &[
                 (crate::KIND_DIR, b"data"),
                 (crate::KIND_DIR, b"tmp"),
                 (crate::KIND_DIR, b"dev"),
+                (crate::KIND_FILE, b"blk.elf"),
+                (crate::KIND_FILE, b"compositor.elf"),
+                (crate::KIND_FILE, b"consumer.elf"),
+                (crate::KIND_FILE, b"devmgr.elf"),
+                (crate::KIND_FILE, b"fm.elf"),
+                (crate::KIND_FILE, b"font8x16.raw"),
                 (crate::KIND_FILE, b"hello.txt"),
             ],
             b"/dev" => &[
@@ -289,34 +295,48 @@ mod tests {
         crate::terminal::Listing::Entry(entry)
     }
 
-    #[test]
-    fn the_launch_script_navigates_the_file_manager_into_dev() {
-        // The client derives its clicks from the kernel's routed queue; this
-        // replay derives them from the same script. The final path is what the
-        // frame proof compares, so it must be `/dev` rather than the root.
-        let mut fm = crate::Fm::new();
-        crate::reload(&mut fm, b"/", launch_list);
-        replay_launch(SCREEN.0, SCREEN.1, |x, y| {
-            let _ = fm.click(x, y, SURFACE.0, SURFACE.1, launch_list);
-        });
-        assert_eq!(fm.path(), b"/dev");
-        assert_eq!(fm.name(0), crate::fm::PARENT_NAME);
-        assert_eq!(fm.name(1), b"blk");
+    /// The one file the launch script opens.
+    fn launch_read(path: &[u8], out: &mut [u8]) -> Option<usize> {
+        if path != b"/hello.txt" {
+            return None;
+        }
+        let bytes = b"hello from the ZC OS initramfs\n";
+        let len = bytes.len().min(out.len());
+        out[..len].copy_from_slice(&bytes[..len]);
+        Some(len)
     }
 
     #[test]
-    fn the_launch_click_lands_on_a_directory_row() {
-        // A click on a file would only select it and leave the path at `/`, so
-        // this distinguishes "the script clicked something" from "the script
-        // opened the directory the proof expects".
+    fn the_launch_script_navigates_and_previews_a_file() {
+        // The client derives its clicks from the kernel's routed queue; this
+        // replay derives them from the same script. The script opens `dev/`,
+        // walks back to the root, and double-clicks `hello.txt`, so the final
+        // state proves both navigation and a VFS read.
+        let mut fm = crate::Fm::new();
+        crate::reload(&mut fm, b"/", launch_list);
+        replay_launch(SCREEN.0, SCREEN.1, |x, y| {
+            let _ = fm.click(x, y, SURFACE.0, SURFACE.1, launch_list, launch_read);
+        });
+        assert_eq!(fm.path(), b"/hello.txt");
+        assert!(fm.previewing());
+        assert_eq!(fm.preview_line(0), b"hello from the ZC OS initramfs");
+    }
+
+    #[test]
+    fn the_launch_script_clicks_four_times_and_ends_in_a_preview() {
+        // The script opens `dev/`, leaves it, selects `hello.txt`, and opens it.
+        // A click on a file's first press only selects, so this distinguishes
+        // "the script clicked something" from "the script opened the file the
+        // proof expects".
         let mut fm = crate::Fm::new();
         crate::reload(&mut fm, b"/", launch_list);
         let mut presses = 0;
         replay_launch(SCREEN.0, SCREEN.1, |x, y| {
             presses += 1;
-            let _ = fm.click(x, y, SURFACE.0, SURFACE.1, launch_list);
+            let _ = fm.click(x, y, SURFACE.0, SURFACE.1, launch_list, launch_read);
         });
-        assert_eq!(presses, 1, "the launch session must click exactly once");
-        assert_eq!(fm.path(), b"/dev", "the scripted click did not open a directory");
+        assert_eq!(presses, 4, "the launch session must click four times");
+        assert_eq!(fm.path(), b"/hello.txt", "the scripted clicks did not open the file");
+        assert!(fm.previewing());
     }
 }

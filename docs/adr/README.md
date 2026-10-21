@@ -50,6 +50,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0041](0041-the-second-window-is-a-file-manager.md) | The second window is a file manager | Accepted |
 | [0042](0042-the-proof-scripts-belong-to-the-test-build.md) | The proof scripts belong to the test build | Accepted |
 | [0043](0043-the-file-manager-navigates-by-proof.md) | The file manager navigates by proof | Accepted |
+| [0044](0044-the-file-manager-opens-a-file-by-proof.md) | The file manager opens a file by proof | Accepted |
 
 ## Adding a decision
 
