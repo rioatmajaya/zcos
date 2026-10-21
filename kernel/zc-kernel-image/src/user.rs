@@ -2478,27 +2478,24 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface, window: u32) {
         return;
     }
     // Window 1: the file manager. Build the same listing the client sees, from
-    // the kernel's own mount table, and prove it pixel for pixel.
+    // the kernel's own mount table, then replay the launch session's click into
+    // the same `Fm` state machine the client drives. The click is a proof, not a
+    // hint: a client that ignored it, or opened another directory, lands on a
+    // different title and listing than this replay and fails the pixel compare.
     let mut fm = zc_abi::Fm::new();
-    let mut index = 0;
-    loop {
-        match kernel_list_dir(b"/", index) {
-            zc_abi::terminal::Listing::Entry(entry) => {
-                fm.push(entry.kind, entry.name());
-                index += 1;
-            }
-            zc_abi::terminal::Listing::End => break,
-            zc_abi::terminal::Listing::Error => {
-                fm.fail();
-                break;
-            }
-        }
-    }
+    zc_abi::reload(&mut fm, b"/", kernel_list_dir);
     // SAFETY: `kernel_list_dir` owns the counter and ran above.
     if unsafe { addr_of!(WINDOW_LS_ENTRIES).read() } == 0 {
         crate::fail("fm window listed nothing");
     }
     crate::serial::write_str("fm: listing ok\n");
+    zc_abi::replay_launch(info.width, info.height, |x, y| {
+        let _ = fm.click(x, y, surface.width, surface.height, kernel_list_dir);
+    });
+    if fm.path() != b"/dev" {
+        crate::fail("fm window did not navigate to /dev");
+    }
+    crate::serial::write_str("fm: open ok\n");
     hash_window_surface(&fm, surface, font, format, &wm, window);
 }
 

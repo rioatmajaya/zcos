@@ -15,9 +15,11 @@
 #                  the one a person boots (ADR 0026).
 #   --fm           build the two-window proof: the kernel and the window client
 #                  gain fm-proof, so the scripted session clicks the launcher,
-#                  the compositor opens window 1, and the verifier placement-checks
-#                  both windows. Its own image, like the close proof, so the
-#                  shipped single-window frame is never overwritten.
+#                  the compositor opens window 1, and the script then clicks the
+#                  file manager's `dev/` row. The verifier placement-checks both
+#                  windows and replays that click into its own mount table. Its
+#                  own image, like the close proof, so the shipped single-window
+#                  frame is never overwritten.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)

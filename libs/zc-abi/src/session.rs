@@ -14,11 +14,13 @@
 //!
 //! Everything here is pure and allocation-free, like the rest of the crate.
 
-use crate::cursor::{BUTTON_LEFT, Cursor, MOUSE_SCRIPT, script_len};
+use crate::cursor::{
+    BUTTON_LEFT, Cursor, MOUSE_SCRIPT, ScriptVariant, script_len, script_len_for, script_step,
+};
 use crate::desktop::{FRAME_INITIAL, FRAME_MOVED, window_rect, window_rect_for};
 use crate::terminal::Term;
 use crate::ui::{Event, Input};
-use crate::wm::{Wm, window_pointer_at};
+use crate::wm::{Kind, Wm, window_pointer_at};
 
 /// Replays the scripted pointer session into `term` for window `window`.
 ///
@@ -80,6 +82,70 @@ pub fn replay_pointer(
             }
         }
         index += 1;
+    }
+}
+
+/// Replays the launch session's window-local clicks into `on_press`.
+///
+/// The `--fm` boot adds window 1 on the launcher press and then clicks a
+/// directory row inside it. The kernel's frame verifier has to derive the same
+/// navigation the client performed, and the only report stream it may trust is
+/// the one it served. This runs that stream through the same [`Wm`] and
+/// [`Input`] the router used, adds window 1 on the same `Kind::Launched` action
+/// the kernel mirrors, and hands each press inside window 1's content area to
+/// `on_press` in window-local coordinates.
+///
+/// The client derives its edges from the derived queue rather than from this
+/// function, so `on_press` is the verifier-side shape of exactly the events the
+/// client received. Feeding the callback into [`crate::fm::Fm::click`] makes the
+/// file manager's navigation a proof: a client that opened another directory,
+/// or ignored the click, fails the pixel compare.
+pub fn replay_launch<F>(screen_w: u32, screen_h: u32, mut on_press: F)
+where
+    F: FnMut(u32, u32),
+{
+    let mut wm = Wm::new(
+        screen_w,
+        screen_h,
+        window_rect(FRAME_MOVED, screen_w, screen_h),
+    );
+    let mut cursor = Cursor::new(screen_w, screen_h);
+    // The global stream drives placement; the routed copy is what the client's
+    // `Window` sees, and only reports inside window 1 after it was launched are
+    // pushed to it.
+    let mut raw = Input::new();
+    let mut routed = Input::new();
+    let len = script_len_for(ScriptVariant::Launch);
+    let mut index = 0;
+    while index < len {
+        let Some(step) = script_step(ScriptVariant::Launch, index) else {
+            break;
+        };
+        let event = raw.report(step.buttons, step.dx, step.dy);
+        cursor.apply(step.dx, step.dy, screen_w, screen_h);
+        let action = wm.apply(cursor, event);
+        if action.kind == Kind::Launched {
+            let id = wm.count() as u32;
+            let _ = wm.add(id, window_rect_for(id, FRAME_INITIAL, screen_w, screen_h));
+        }
+        index += 1;
+        // Focus is the kernel's routing decision: a report belongs to window 1
+        // only while it is the focused window and the pointer is in its content
+        // area. The title bar and the desktop never reach the client.
+        if wm.focused() != 1 {
+            continue;
+        }
+        let Some(rect) = wm.rect_of(1) else {
+            continue;
+        };
+        let Some((x, y)) = window_pointer_at(rect, cursor.x, cursor.y) else {
+            continue;
+        };
+        if let Event::Press { button, .. } = routed.report(step.buttons, step.dx, step.dy) {
+            if button & BUTTON_LEFT != 0 {
+                on_press(x, y);
+            }
+        }
     }
 }
 
@@ -198,5 +264,59 @@ mod tests {
         // identical or the frame check would be a coin toss.
         assert_eq!(replay(false).clicks(), replay(false).clicks());
         assert_eq!(replay(false).clicks(), replay(true).clicks());
+    }
+
+    /// The two directories the launch script's final click can reach.
+    fn launch_list(path: &[u8], index: usize) -> crate::terminal::Listing {
+        let entries: &[(u32, &[u8])] = match path {
+            b"/" => &[
+                (crate::KIND_DIR, b"data"),
+                (crate::KIND_DIR, b"tmp"),
+                (crate::KIND_DIR, b"dev"),
+                (crate::KIND_FILE, b"hello.txt"),
+            ],
+            b"/dev" => &[
+                (crate::KIND_CHR, b"blk"),
+                (crate::KIND_CHR, b"kbd"),
+            ],
+            _ => &[],
+        };
+        let Some((kind, name)) = entries.get(index) else {
+            return crate::terminal::Listing::End;
+        };
+        let mut entry = crate::DirEntry::new(*kind);
+        entry.set_name(name).expect("name fits");
+        crate::terminal::Listing::Entry(entry)
+    }
+
+    #[test]
+    fn the_launch_script_navigates_the_file_manager_into_dev() {
+        // The client derives its clicks from the kernel's routed queue; this
+        // replay derives them from the same script. The final path is what the
+        // frame proof compares, so it must be `/dev` rather than the root.
+        let mut fm = crate::Fm::new();
+        crate::reload(&mut fm, b"/", launch_list);
+        replay_launch(SCREEN.0, SCREEN.1, |x, y| {
+            let _ = fm.click(x, y, SURFACE.0, SURFACE.1, launch_list);
+        });
+        assert_eq!(fm.path(), b"/dev");
+        assert_eq!(fm.name(0), crate::fm::PARENT_NAME);
+        assert_eq!(fm.name(1), b"blk");
+    }
+
+    #[test]
+    fn the_launch_click_lands_on_a_directory_row() {
+        // A click on a file would only select it and leave the path at `/`, so
+        // this distinguishes "the script clicked something" from "the script
+        // opened the directory the proof expects".
+        let mut fm = crate::Fm::new();
+        crate::reload(&mut fm, b"/", launch_list);
+        let mut presses = 0;
+        replay_launch(SCREEN.0, SCREEN.1, |x, y| {
+            presses += 1;
+            let _ = fm.click(x, y, SURFACE.0, SURFACE.1, launch_list);
+        });
+        assert_eq!(presses, 1, "the launch session must click exactly once");
+        assert_eq!(fm.path(), b"/dev", "the scripted click did not open a directory");
     }
 }

@@ -110,7 +110,17 @@ the file manager: a new `zc-fm` binary lists the initramfs root through
 the same listing from its own mount table and compares every pixel, so the
 listing is proven rather than trusted. The kernel picks `fm.elf` under `fm-proof`
 and only `--fm` packs it, so both shipped checksums are unchanged. See
-[ADR 0041](docs/adr/0041-the-second-window-is-a-file-manager.md).
+[ADR 0041](docs/adr/0041-the-second-window-is-a-file-manager.md). F8h-1c-3 makes
+that window navigate: `zc-abi::fm::Fm` owns the current path, selection, row
+hit-test, and click decision, so a directory row opens through a caller-supplied
+lister and a file row highlights. The title bar carries the path, the `--fm`
+script clicks the `dev/` row, and `replay_launch` feeds the same press to the
+kernel's own mount table through the same `Fm::click`; a client that ignores the
+click now fails with `fm window did not navigate` instead of matching a static
+frame. The `--fm` boot logs `task 9: fm: pointer ok`, `task 9: fm: open ok`, and
+`fm: open ok` before two `wm: content ok` lines, while both shipped checksums
+stay unchanged because the launch suffix never runs there. See
+[ADR 0043](docs/adr/0043-the-file-manager-navigates-by-proof.md).
 
 ### Fixed
 

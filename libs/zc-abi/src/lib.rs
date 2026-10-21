@@ -66,7 +66,7 @@ pub use service::{
     SERVICE_KIND_EXIT, SERVICE_KIND_FAULT, service_cap, supervise_event, supervise_kind,
     supervise_service,
 };
-pub use session::replay_pointer;
+pub use session::{replay_launch, replay_pointer};
 pub use surface::{
     SURFACE_CAP_TAG, SURFACE_END, SURFACE_FACTORY, SURFACE_MAX_PAGES, SURFACE_SLOTS,
     SURFACE_SLOT_STRIDE, SURFACE_VIRT, SurfaceInfo, surface_cap,
@@ -86,9 +86,9 @@ pub use syscall::{
     SYS_WINDOW_ID, SYS_WINDOW_READ, SYS_WRITE, SYS_YIELD, SyscallError,
 };
 pub use terminal::{
-    BUTTON_FG, BUTTON_H, BUTTON_W, Term, button_rect,
+    BUTTON_FG, BUTTON_H, BUTTON_W, Listing, Term, button_rect,
 };
-pub use fm::{FM_COLS, FM_NAME_MAX, FM_ROWS, Fm};
+pub use fm::{FM_COLS, FM_NAME_MAX, FM_PATH_MAX, FM_ROWS, Fm, PARENT_NAME, parent_path, reload};
 pub use ui::{
     Event, Input, WINDOW_MAX_COORD, WINDOW_NO_EVENT, WINDOW_POINTER_TAG, WindowEvent,
     WindowPointer, decode_window_event, hit_all, hit_topmost, pack_window_pointer,

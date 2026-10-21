@@ -187,6 +187,7 @@ cargo test --workspace
 ./tools/run-qemu.sh           # boot it under QEMU + OVMF
 ./tools/run-qemu.sh --test    # headless boot test for CI (window left on screen)
 ./tools/run-qemu.sh --test-close  # the second CI run: proves the close protocol
+./tools/build-efi.sh --fm && ./tools/run-qemu.sh --fm  # two windows, file-manager navigation
 ```
 
 `tools/build-efi.sh` needs the `x86_64-unknown-uefi` and

@@ -267,7 +267,10 @@ separate `zc-fm` binary builds a `zc-abi::fm::Fm` listing through `SYS_READDIR`,
 and the kernel's verifier rebuilds the same listing from its own mount table and
 compares every pixel — a generic `SurfaceModel` trait lets the terminal and the
 file manager share one placement/content loop, so the listing is proven, not
-trusted.
+trusted. The listing is also interactive: a click on a directory row enters it
+through the shared `Fm::click`, and the `--fm` script's click is replayed by
+`replay_launch` into that same state machine over the kernel's mount table, so
+the final `/dev` title and rows are derived rather than trusted.
 
 The window pixels remain proven, not trusted, but the proof splits by what is
 knowable. Outside the window the frame checksum recomputes `pixel_at` exactly.

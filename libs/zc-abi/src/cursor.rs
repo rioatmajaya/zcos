@@ -164,14 +164,32 @@ pub const MOUSE_SCRIPT: &[MouseStep] = &[
 /// it. The press is what makes the shared [`crate::wm::Wm`] machine derive
 /// `Kind::Launched` on both sides, so the second window is *derived from the
 /// report stream* rather than enabled by a compile-time switch in the
-/// compositor. A separate array (not a prefix of [`MOUSE_SCRIPT`]) because the
-/// close and launch suffixes are mutually exclusive endings of the same prefix.
+/// compositor.
+///
+/// The last six steps are the file manager's interaction: walk into window 1's
+/// content, press the directory row, and release. Window 1 sits at
+/// [`crate::desktop::window_rect_for`]`(1, FRAME_INITIAL)`, which is
+/// `(80, 432, 426, 266)` on the boot display, so `(106, 504)` is row 2 — the
+/// `dev/` entry, after the `data/` and `tmp/` mount points the VFS lists first.
+/// The kernel replays the same press into its own [`crate::fm::Fm`] and walks
+/// its own mount table, so the final `/dev` listing is a proof rather than a
+/// claim. A separate array (not a prefix of [`MOUSE_SCRIPT`]) because the close
+/// and launch suffixes are mutually exclusive endings of the same prefix.
 pub const MOUSE_LAUNCH_SCRIPT: &[MouseStep] = &[
     // (300, 150) -> (24, 16): three clamped moves onto the launcher centre.
     step(0, -127, -127),
     step(0, -127, -7),
     step(0, -22, 0),
     // Press the launcher, then release, so the gesture is one clean click.
+    step(BUTTON_LEFT, 0, 0),
+    step(0, 0, 0),
+    // (24, 16) -> (106, 504): four clamped moves into window 1's body.
+    step(0, 82, 127),
+    step(0, 0, 127),
+    step(0, 0, 127),
+    step(0, 0, 107),
+    // Click the `dev/` row. The client opens it; the kernel's replay must land
+    // on the same row or the window pixels stop matching.
     step(BUTTON_LEFT, 0, 0),
     step(0, 0, 0),
 ];
@@ -482,18 +500,21 @@ mod tests {
     }
 
     #[test]
-    fn the_launch_variant_ends_on_the_launcher_button() {
+    fn the_launch_variant_opens_the_second_window_and_clicks_it() {
         let (w, h) = (1280u32, 800u32);
-        // The launch variant is the shared prefix plus a walk to the launcher
-        // and one press; it must land inside the rectangle the panel paints, or
-        // the derived `Kind::Launched` would never fire.
+        // The launch variant is the shared prefix plus a walk to the launcher,
+        // one press, and the walk into window 1's listing. The launcher press
+        // must land inside the rectangle the panel paints, or the derived
+        // `Kind::Launched` would never fire; the final click must land inside
+        // window 1's content, or the file manager never navigates.
         let launcher = crate::desktop::launcher_button_rect(h);
         let mut cursor = Cursor::new(w, h);
         let mut wm = crate::wm::Wm::new(w, h, crate::desktop::window_rect(
             crate::desktop::FRAME_MOVED, w, h,
         ));
         let mut input = crate::ui::Input::new();
-        let mut launched = false;
+        let mut launched_at = None;
+        let mut second = None;
         for index in 0..script_len_for(ScriptVariant::Launch) {
             let Some(entry) = script_step(ScriptVariant::Launch, index) else {
                 break;
@@ -502,13 +523,24 @@ mod tests {
             cursor.apply(entry.dx, entry.dy, w, h);
             let action = wm.apply(cursor, event);
             if action.kind == crate::wm::Kind::Launched {
-                launched = true;
+                launched_at = Some((cursor.x, cursor.y));
+                let id = wm.count() as u32;
+                let _ = wm.add(
+                    id,
+                    crate::desktop::window_rect_for(id, crate::desktop::FRAME_INITIAL, w, h),
+                );
+                second = wm.rect_of(1);
             }
         }
-        assert!(launched, "the launch script never pressed the launcher");
+        let at = launched_at.expect("the launch script never pressed the launcher");
         assert!(
-            launcher.contains(cursor.x, cursor.y),
+            launcher.contains(at.0, at.1),
             "the launch click left the launcher rectangle"
+        );
+        let body = crate::wm::content(second.expect("window 1 was never added"));
+        assert!(
+            body.contains(cursor.x, cursor.y),
+            "the launch script never entered window 1's content"
         );
         // The launch variant shares the exact prefix the default boot serves,
         // so the first 28 steps are byte-identical and only the suffix differs.
