@@ -3,24 +3,29 @@
 # FAT image that QEMU/OVMF can start.
 #
 # Usage: tools/build-efi.sh [--test | --test-close | --fm]
-#   --test         build with the qemu-exit feature so tools/run-qemu.sh --test
-#                  can terminate the emulator with a status code once the kernel
-#                  reaches its idle state. The scripted mouse session stops with
-#                  the window on screen.
+#   (no flag)      build build/zcos.img, the image a person boots: loader,
+#                  kernel, user tasks, and the file manager. The kernel has
+#                  fm-proof but no qemu-exit, so the desktop starts idle and a
+#                  launcher click opens the file-manager window. This is the
+#                  human-testable image; no extra run flag is needed.
+#   --test         build build/zcos-test.img with qemu-exit for
+#                  tools/run-qemu.sh --test. It keeps the single-window proof:
+#                  window 1 runs the idle win.elf client, so the scripted frame
+#                  and its checksum stay the ones ADR 0036 recorded. A separate
+#                  image means a CI run cannot replace the human-testable one.
 #   --test-close   as above, and additionally build the kernel with close-proof so
 #                  the scripted session also clicks close. That proves the
 #                  window's session-ending protocol end to end, at the cost of a
 #                  final frame with no window in it — which is why it is a
-#                  separate image and a separate CI run, and why the default is
-#                  the one a person boots (ADR 0026).
-#   --fm           build the two-window proof: the kernel and the window client
-#                  gain fm-proof, so the scripted session clicks the launcher,
-#                  the compositor opens window 1, and the script opens `dev/`,
-#                  walks back, and double-clicks `hello.txt`. The verifier
-#                  placement-checks both windows and replays those clicks and
-#                  the file read into its own mount table. Its own image, like
-#                  the close proof, so the shipped single-window frame is never
-#                  overwritten.
+#                  separate image and a separate CI run (ADR 0026).
+#   --fm           build the two-window proof: the kernel gains fm-proof and
+#                  window 1 runs the separate `fm.elf`, so the scripted session
+#                  clicks the launcher, the compositor opens window 1, and the
+#                  script opens `dev/`, walks back, and double-clicks
+#                  `hello.txt`. The verifier placement-checks both windows and
+#                  replays those clicks and the file read into its own mount
+#                  table. It is a headless CI proof image; the default image is
+#                  the one a person uses.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -29,18 +34,26 @@ cd "$root"
 uefi_target=x86_64-unknown-uefi
 none_target=x86_64-unknown-none
 esp_size_mib=4
-# `qemu-exit` belongs to both binaries; `close-proof` only to the kernel, which is
-# the only one with the scripted mouse session. `fm-proof` is the kernel's extra
-# script step *and* the window client's second-window mode, so each is set where
-# it belongs.
+# `qemu-exit` belongs to both binaries; `close-proof` and `fm-proof` only to the
+# kernel, which owns the scripted session. `fm-proof` makes the kernel select
+# `fm.elf` as window 1's client and serve the launch suffix; the client itself is
+# the separate `zc-fm` binary. The default image includes `fm.elf` and starts it
+# as window 1's client; the scripted --test images deliberately keep `win.elf` so
+# their single-window frame remains byte-identical.
 loader_features=""
-kernel_features=""
+kernel_features="--features fm-proof"
 image=build/zcos.img
+include_fm=1
 
 case "${1:-}" in
     --test)
         loader_features="--features qemu-exit"
         kernel_features="--features qemu-exit"
+        # The scripted single-window proof gets its own image, like the close
+        # and two-window proofs, so it can never leave a test kernel where the
+        # next `tools/run-qemu.sh` expects the human-testable desktop.
+        image=build/zcos-test.img
+        include_fm=0
         ;;
     --test-close)
         loader_features="--features qemu-exit"
@@ -50,12 +63,14 @@ case "${1:-}" in
         # left `build/zcos.img` holding the close-proof kernel, and the next
         # `tools/run-qemu.sh` booted a desktop that destroys its own window.
         image=build/zcos-close.img
+        include_fm=0
         ;;
     --fm)
         loader_features="--features qemu-exit"
         kernel_features="--features qemu-exit,fm-proof"
         # Its own image and its own CI log, for the same reason the close proof
-        # has one: the shipped single-window frame must stay byte-identical.
+        # has one: the shipped human image starts idle, and this one runs the
+        # scripted two-window proof.
         image=build/zcos-fm.img
         ;;
     "")
@@ -121,12 +136,12 @@ cargo build --manifest-path user/zc-initd/Cargo.toml \
     --target "$none_target" --target-dir target --release
 cargo build --manifest-path user/zc-win/Cargo.toml \
     --target "$none_target" --target-dir target --release
-# The file manager is only in the two-window image: it is window 1's client
-# there. Building and packing it into the shared initramfs would change the
-# shipped boot frame's `ls` listing (and its checksum), so the default image
-# never sees it.
+# The file manager is window 1's client in the human-testable image and in the
+# two-window proof. The scripted --test images omit it so their single-window
+# initramfs listing — and therefore the checksums recorded in ADR 0036 — stay
+# byte-identical.
 extra=""
-if [ "$image" = "build/zcos-fm.img" ]; then
+if [ "$include_fm" -eq 1 ]; then
     cargo build --manifest-path user/zc-fm/Cargo.toml \
         --target "$none_target" --target-dir target --release
     extra="target/$none_target/release/fm:fm.elf"

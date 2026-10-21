@@ -259,10 +259,12 @@ compositor and the kernel each add the next window at the shared
 `window_rect_for` rectangle on their own copy of that report, so the placement
 stays a proof. The compositor composites every registered window generically (one
 `Layer` per window id, a bare-desktop paint whose taskbar button count follows
-`wm.count()`, and a z-order surface blit), so one window paints exactly the frame
-the old single-window compositor did — the shipped checksum never moves. The
-launcher gesture is a script ending (`script_variant`), so the second window
-appears only in the `--fm` image. In that image window 1 is the file manager: a
+`wm.count()`, and a z-order surface blit), so the scripted single-window proof
+still paints the frame whose checksum ADR 0036 recorded. The launcher gesture is
+a script ending (`script_variant`), so the automated launch belongs to the
+`--fm` image. The default image packs the same `fm.elf` and starts it as window
+1's client, and a person's launcher click reaches the same `Wm` path through live
+input. In both the default and `--fm` images window 1 is the file manager: a
 separate `zc-fm` binary builds a `zc-abi::fm::Fm` listing through `SYS_READDIR`,
 and the kernel's verifier rebuilds the same listing from its own mount table and
 compares every pixel — a generic `SurfaceModel` trait lets the terminal and the
@@ -275,7 +277,10 @@ to the directory. The `--fm` script opens `dev/`, walks back, and double-clicks
 over the kernel's mount table and reads the file with the kernel's own reader,
 so the final `Files /hello.txt` title and its text are derived rather than
 trusted. The preview formats the same bytes on both sides, marks binary content
-and empty files, and wraps long lines at the window edge.
+and empty files, and wraps long lines at the window edge. The default image's
+interactive boot is not checksummed because it serves no script; the CI proof
+images keep the exact frames, and `tools/check-live-input.sh` separately asserts
+that the default image actually started `fm.elf`.
 
 The window pixels remain proven, not trusted, but the proof splits by what is
 knowable. Outside the window the frame checksum recomputes `pixel_at` exactly.

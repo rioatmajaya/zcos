@@ -1,6 +1,8 @@
 # 0043 — The file manager navigates by proof
 
 - **Status:** accepted
+- **Superseded in part by:** [0045](0045-the-default-image-ships-the-apps-a-person-can-test.md)
+  for the default image's contents
 - **Date:** 2026-10-21
 - **Affects:** `libs/zc-abi` (`fm`, `session`, `cursor`, `lib`), `user/zc-fm`,
   `kernel/zc-kernel-image`, CI, F8h

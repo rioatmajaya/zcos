@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 7 grants`, `task 6: devmgr: blk published`, `dma: window coherent ok` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–7, F8e-1–4, F8h-0/0b/1a/1b/1c-1/1c-2/1c-3/1c-4, live-input check, F8g-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: font vfs ok`; `compositor: font vfs ok`; `font: vfs ok`; `client: window painted`; `client: vfs ok`; `client: pointer ok`; `client: click ok`; `client: ls ok`; `wm: window mapped`; `wm: pointer routed`; `wm: click ok`; `wm: ls ok`; `task 2: data/`; `task 2: kbd`; `task 2: probe`; `win1 entry`; `task 9: client: window 1 idle`; `compositor: window 1 launched` (fm run); `task 9: fm: ready` (fm run); `fm: listing ok` (fm run); `task 9: fm: pointer ok` (fm run); `task 9: fm: open ok` (fm run); `task 9: fm: preview ok` (fm run); `fm: open ok` (fm run); `fm: preview ok` (fm run); `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed` (close run); `compositor: window erased` (close run); `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui/session/vfs/fm host tests pass; `zc-storage` zcfs read_dir tests pass |
+| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–7, F8e-1–4, F8h-0/0b/1a/1b/1c-1/1c-2/1c-3/1c-4/1c-5, live-input check, F8g-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: font vfs ok`; `compositor: font vfs ok`; `font: vfs ok`; `client: window painted`; `client: vfs ok`; `client: pointer ok`; `client: click ok`; `client: ls ok`; `wm: window mapped`; `wm: pointer routed`; `wm: click ok`; `wm: ls ok`; `task 2: data/`; `task 2: kbd`; `task 2: probe`; `win1 entry`; `task 9: client: window 1 idle`; `compositor: window 1 launched` (fm run); `task 9: fm: ready` (default/fm run); `fm: listing ok` (fm run); `task 9: fm: pointer ok` (fm run); `task 9: fm: open ok` (fm run); `task 9: fm: preview ok` (fm run); `fm: open ok` (fm run); `fm: preview ok` (fm run); `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed` (close run); `compositor: window erased` (close run); `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui/session/vfs/fm host tests pass; `zc-storage` zcfs read_dir tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -564,11 +564,12 @@ full browser. Note them as follow-ups, do not build them here.
         kernel feature behind `build-efi.sh --test-close` keeps the close protocol
         proven end to end. CI runs both, each asserting the other's markers are
         absent, so placement is proven again *and* the erase keeps its proof.
-        Each variant also writes its **own** image (`build/zcos.img` versus
-        `build/zcos-close.img`): sharing one path meant the last build won, so a CI
-        close run left the interactive image holding the close-proof kernel — a
-        person booting it saw the old empty desktop and reasonably concluded the
-        fix had done nothing. `run-qemu.sh` now also refuses to boot an image
+        Each variant also writes its **own** image (`build/zcos-test.img` for the
+        window-up proof versus `build/zcos-close.img`), leaving `build/zcos.img`
+        for the human-testable desktop: sharing one path meant the last build won,
+        so a CI close run left the interactive image holding the close-proof
+        kernel — a person booting it saw the old empty desktop and reasonably
+        concluded the fix had done nothing. `run-qemu.sh` now also refuses to boot an image
         older than the sources, since that reads the same way. See
         [`adr/0029`](adr/0029-two-scripted-sessions.md).
 - [x] F8c: 2D renderer with a bitmap font and text overlay. `zc-abi::font`
@@ -837,11 +838,12 @@ full browser. Note them as follow-ups, do not build them here.
         windows generically (one `Layer` per window id, bare-desktop paint with
         `pixel_at_with_window_count(..., wm.count())`, z-order blit) and decodes
         replies with `wm_reply_kind`/`wm_reply_window`. The launcher gesture is a
-        script ending (`script_variant(close, fm)`), so the shipped boot never
-        launches and both its checksums are unchanged
+        script ending (`script_variant(close, fm)`), so the scripted proof boot
+        never launches and both of its checksums are unchanged
         (`0xd616ad79aaefb099` / `0x6d66e82d0f2d6fb8`). `--fm` builds
-        `build/zcos-fm.img` with the kernel and client `fm-proof` features; booting
-        it logs `compositor: window 1 launched` and two `wm: content ok` lines
+        `build/zcos-fm.img` with the kernel's `fm-proof` feature and the separate
+        `fm.elf` client; booting it logs `compositor: window 1 launched` and two
+        `wm: content ok` lines
         before `fb: desktop checksum ok` on a two-window frame. Window 1 reuses the
         trusted `win.elf` so this slice proves the plumbing; the file manager is
         F8h-1c-2. See [`adr/0040`](adr/0040-a-second-window-is-visible.md).
@@ -852,8 +854,8 @@ full browser. Note them as follow-ups, do not build them here.
         its own mount table and compares every pixel — a generic `SurfaceModel`
         trait lets the terminal and the file manager share one placement/content
         loop — so the listing is proven, not trusted. The kernel picks `fm.elf`
-        under `fm-proof` and `win.elf` otherwise, and only `--fm` packs `fm.elf`,
-        so both shipped checksums are unchanged
+        under `fm-proof` and `win.elf` otherwise, and at this slice only `--fm`
+        packs `fm.elf`, so both scripted proof checksums are unchanged
         (`0xd616ad79aaefb099` / `0x6d66e82d0f2d6fb8`). The `--fm` boot logs
         `task 9: fm: ready` and two `wm: content ok` lines. See
         [`adr/0041`](adr/0041-the-second-window-is-a-file-manager.md).
@@ -871,8 +873,8 @@ full browser. Note them as follow-ups, do not build them here.
         `fm window did not navigate to /dev` instead of agreeing with a static
         client.
         The boot logs `task 9: fm: pointer ok`, `task 9: fm: open ok`, and
-        `fm: open ok` before two `wm: content ok` lines. The shipped image never
-        runs the launch suffix, so both shipped checksums are unchanged
+        `fm: open ok` before two `wm: content ok` lines. The scripted proof
+        image never runs the launch suffix, so both proof checksums are unchanged
         (`0xd616ad79aaefb099` / `0x6d66e82d0f2d6fb8`). Host tests cover path
         joins, the parent row, directory entry, file selection, out-of-body
         clicks, and the scripted click's landing. See
@@ -892,12 +894,25 @@ full browser. Note them as follow-ups, do not build them here.
         `task 9: fm: preview ok` and `fm: preview ok`; the verifier fails with
         `fm window did not open hello.txt` or `fm window read no file` if its
         replay did not read the file. The `--fm` frame checksum becomes
-        `0x78ebd6d359914da7`; the shipped checksums stay
+        `0x78ebd6d359914da7`; the scripted proof checksums stay
         `0xd616ad79aaefb099` / `0x6d66e82d0f2d6fb8` because the launch suffix
         never runs there. Host tests cover text, binary, empty, newline, and
         wrapped previews, first-click selection, second-click preview, and the
         `..` back row. See
         [`adr/0044`](adr/0044-the-file-manager-opens-a-file-by-proof.md).
+      - [x] F8h-1c-5: the default image ships the file manager. With no flag,
+        `tools/build-efi.sh` now packs `fm.elf` and builds the kernel with
+        `fm-proof` but no `qemu-exit`, so `tools/run-qemu.sh` boots an
+        interactive desktop and the `ZC` launcher opens the file-manager window
+        through live input. The scripted single-window proof moved to
+        `build/zcos-test.img` instead of overwriting the image a person boots;
+        it keeps the idle `win.elf` second client, 12 initramfs files, and
+        `0xd616ad79aaefb099`. The close and `--fm` images keep their own paths
+        and checksums, and `--fm` remains the headless launcher, navigation, and
+        preview proof. `tools/check-live-input.sh` boots the default image and
+        now fails unless it logs `task 9: fm: ready`, so the human-testable
+        image cannot silently omit the app. See
+        [`adr/0045`](adr/0045-the-default-image-ships-the-apps-a-person-can-test.md).
 - [ ] F8i: audio stack (virtio-snd first, then HD Audio) after the desktop is
       stable.
 - [ ] F8j: USB stack (xHCI) for keyboard, mouse, and mass storage.
@@ -1066,6 +1081,16 @@ full browser. Note them as follow-ups, do not build them here.
   the `..` row returns, and text, binary, empty, newline, and wrapped content
   format identically. See
   [`adr/0044`](adr/0044-the-file-manager-opens-a-file-by-proof.md).
+- The default image ships the file manager (F8h-1c-5): a plain
+  `tools/build-efi.sh` packs `fm.elf` and leaves `build/zcos.img` interactive,
+  so `tools/run-qemu.sh` needs no mode flag. `tools/check-live-input.sh` logs
+  `task 9: fm: ready` on that image; the scripted `--test` image still logs
+  `task 9: client: window 1 idle` and keeps `0xd616ad79aaefb099`, while
+  `--test-close` and `--fm` keep `0x6d66e82d0f2d6fb8` and
+  `0x78ebd6d359914da7`. The `--fm` run remains the proof that the launcher,
+  navigation, and preview work; the default image is the same app through live
+  input. See
+  [`adr/0045`](adr/0045-the-default-image-ships-the-apps-a-person-can-test.md).
 - Clean shutdown: `power: halt clean`.
 - Audio plays a known tone and the driver reports no XRUN under a stress
   buffer: `snd: playback ok`.

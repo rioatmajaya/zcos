@@ -183,11 +183,11 @@ disk-backed zcfs mount the same listing through a new exchange request, so
 cargo test --workspace
 ./tools/verify-host.sh
 
-./tools/build-efi.sh          # produce build/zcos.img (loader + kernel + user tasks + initramfs)
-./tools/run-qemu.sh           # boot it under QEMU + OVMF
-./tools/run-qemu.sh --test    # headless boot test for CI (window left on screen)
-./tools/run-qemu.sh --test-close  # the second CI run: proves the close protocol
-./tools/build-efi.sh --fm && ./tools/run-qemu.sh --fm  # two windows, file-manager navigation and preview
+./tools/build-efi.sh          # build build/zcos.img: the image a person boots, file manager included
+./tools/run-qemu.sh           # boot it under QEMU + OVMF; click ZC to open the file manager
+./tools/build-efi.sh --test && ./tools/run-qemu.sh --test  # headless single-window proof
+./tools/build-efi.sh --test-close && ./tools/run-qemu.sh --test-close  # close proof
+./tools/build-efi.sh --fm && ./tools/run-qemu.sh --fm  # headless two-window proof: launcher, navigation, preview
 ```
 
 `tools/build-efi.sh` needs the `x86_64-unknown-uefi` and
@@ -198,22 +198,31 @@ The host verification script checks all of them.
 **`run-qemu.sh` does not build.** It boots whatever `build/zcos.img` already
 holds, and refuses to start if that image is older than the sources — booting a
 stale kernel looks exactly like a fix that had no effect. If you have changed
-anything, run `./tools/build-efi.sh` first. The two CI variants write to their own
-images (`build/zcos.img` and `build/zcos-close.img`), so a CI run can never leave
-the wrong kernel in the one you boot.
+anything, run `./tools/build-efi.sh` first. The CI variants write to their own
+images (`build/zcos-test.img`, `build/zcos-close.img`, and
+`build/zcos-fm.img`), so no CI run can leave the wrong kernel in the one you
+boot. The default build keeps `build/zcos.img` as the human-testable image.
 
 ### What an interactive boot shows
 
 `run-qemu.sh` starts an **idle desktop**: the window manager and the terminal sit
 still and respond only to your input. The scripted mouse and keyboard sessions
 (the window dragging itself, the terminal typing `help`/`cat`/`ls`) belong to the
-automated boot proof and run **only in the `--test` builds**, whose kernel arms
-them. The image you boot serves no script, so nothing moves on its own — see
+automated boot proofs and run **only in the CI builds** (`--test`,
+`--test-close`, and `--fm`), whose kernel arms them. The image you boot serves no
+script, so nothing moves on its own — see
 [ADR 0042](docs/adr/0042-the-proof-scripts-belong-to-the-test-build.md).
 
-The window is **on screen** and every task is running, so you can move the
-pointer, drag the window, click its decorations, type into the window, and use
-the serial shell on the QEMU terminal (`help`, `cat`, `ls`, `stat`, `write`,
+The default image includes the file manager. Click the `ZC` launcher in the
+top-left taskbar to open it. A directory click enters that directory; a first
+click on a file selects it, and a second click opens a preview read through the
+VFS; `..` or Backspace walks back up. The same clicks are proved headlessly by
+`--fm`, but you can try them here without any extra flag — see
+[ADR 0045](docs/adr/0045-the-default-image-ships-the-apps-a-person-can-test.md).
+
+The terminal window is **on screen** and every task is running, so you can move
+the pointer, drag the window, click its decorations, type into the window, and
+use the serial shell on the QEMU terminal (`help`, `cat`, `ls`, `stat`, `write`,
 `tmp`, `chmod`, `poweroff`, `exit` — listed in `tools/boot-script.txt`).
 
 A normal build never arms the task watchdog, so the machine stays up

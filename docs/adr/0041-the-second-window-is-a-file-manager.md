@@ -1,6 +1,8 @@
 # 0041 — The second window is a file manager
 
 - **Status:** accepted
+- **Superseded in part by:** [0045](0045-the-default-image-ships-the-apps-a-person-can-test.md)
+  for the default image's contents
 - **Date:** 2026-10-18
 - **Affects:** `libs/zc-abi` (`fm`, `lib`), `kernel/zc-kernel-image`,
   `user/zc-fm`, `tools/build-efi.sh`, CI, F8h

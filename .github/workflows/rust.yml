@@ -170,10 +170,11 @@ jobs:
         grep -q "task 3: wm: move ok" build/boot.log
         grep -q "task 3: compositor: frame updated" build/boot.log
         grep -q "task 3: compositor: ready" build/boot.log
-        # The second window client is spawned from the same `win.elf` binary
-        # (distinguished only by its task slot and window id), learns its id,
-        # and exits cleanly — proven live but idle until F8h-1c gives it a
-        # surface, so the single-window frame (and its checksum) is unchanged.
+        # The scripted single-window image deliberately keeps the same `win.elf`
+        # binary as its second client (distinguished only by its task slot and
+        # window id): it learns its id and exits cleanly, so the 12-file
+        # initramfs, the `ls` listing, and the checksum stay unchanged. The
+        # default human image runs `fm.elf` here instead (ADR 0045).
         grep -q "win1 entry" build/boot.log
         grep -q "task 9: client: window 1 idle" build/boot.log
         grep -q "wm: content ok" build/boot.log
@@ -307,11 +308,13 @@ jobs:
     # A third frame proof: the two-window image. Its scripted session presses the
     # launcher, the compositor opens window 1, and the verifier proves both window
     # regions. It is its own image (zcos-fm.img) and its own log for the same
-    # reason the close proof is: the shipped single-window frame must stay
-    # byte-identical, and packing fm.elf into the shared initramfs would change
-    # the window's `ls` listing (and its checksum). Window 1 runs the file
-    # manager, whose listing the kernel independently recomputes from its mount
-    # table, so `wm: content ok` appears twice — once per window.
+    # reason the close proof is: the scripted single-window frame must stay
+    # byte-identical, and packing fm.elf into that proof's initramfs would change
+    # the window's `ls` listing (and its checksum). The default image does pack
+    # fm.elf for a person to use, but it serves no script and has no frame
+    # checksum. Window 1 runs the file manager in the default and --fm images,
+    # whose listing the kernel independently recomputes from its mount table, so
+    # `wm: content ok` appears twice — once per window — in the --fm run.
     #
     # The script then clicks the `dev/` row inside window 1, walks back with the
     # `..` row, and double-clicks `hello.txt`. The client lists with
@@ -361,8 +364,11 @@ jobs:
     #
     # This needs a normal (non-`--test`) image: the watchdog is armed only in the
     # test builds, and typing leaves the session running by design, so a machine
-    # that is *supposed* to stay up is what we are checking. It writes its own
-    # image, so it cannot disturb the two logs above.
+    # that is *supposed* to stay up is what we are checking. This is also the
+    # human-testable default image, which now packs the file manager; the check
+    # asserts `task 9: fm: ready` so CI cannot prove a CI-only image while the
+    # one a person boots is missing the app. It writes build/zcos.img, separately
+    # from the test, close, and two-window proof images and logs.
     - name: Build the interactive image for the live-input check
       run: ./tools/build-efi.sh
     - name: Prove typed input reaches the window

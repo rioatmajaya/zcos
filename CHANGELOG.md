@@ -130,7 +130,16 @@ file through its own mount table, failing with `fm window did not open hello.txt
 or `fm window read no file`. The `--fm` checksum becomes
 `0x78ebd6d359914da7`, while both shipped checksums stay unchanged because the
 launch suffix never runs there. See
-[ADR 0044](docs/adr/0044-the-file-manager-opens-a-file-by-proof.md).
+[ADR 0044](docs/adr/0044-the-file-manager-opens-a-file-by-proof.md). F8h-1c-5
+makes the file manager part of the image a person boots: a plain
+`tools/build-efi.sh` now packs `fm.elf` and builds the kernel with `fm-proof` but
+without `qemu-exit`, so `tools/run-qemu.sh` opens an interactive desktop and the
+`ZC` launcher starts window 1 through live input. The scripted single-window
+proof builds `build/zcos-test.img` instead of overwriting the human image, and
+the close and `--fm` proofs keep their own paths and checksums;
+`tools/check-live-input.sh` now also fails unless the default image logs
+`task 9: fm: ready`. See
+[ADR 0045](docs/adr/0045-the-default-image-ships-the-apps-a-person-can-test.md).
 
 ### Fixed
 

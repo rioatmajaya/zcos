@@ -155,17 +155,18 @@ const WINDOW_CLIENT_NAME: &str = "win.elf";
 /// File name of the second window client inside the initramfs.
 ///
 /// With `fm-proof` it is `fm.elf`, the file manager that fills window 1 in the
-/// two-window image. Without it — the shipped image, which never launches a
-/// second window — it is the same `win.elf` as [`WINDOW_CLIENT_NAME`], so the
-/// second task exists, proves it booted, and exits. Reusing `win.elf` keeps the
+/// default interactive image and the two-window proof image. The scripted
+/// --test images omit `fm-proof` and run the same `win.elf` as
+/// [`WINDOW_CLIENT_NAME`], so the second task proves it booted and exits while
+/// the single-window frame stays byte-identical. Reusing `win.elf` keeps that
 /// initramfs listing, and therefore the boot frame's `ls` output and its
-/// checksum, byte-identical to the single-window boot.
+/// checksum, unchanged.
 #[cfg(feature = "fm-proof")]
 const SECOND_WINDOW_CLIENT_NAME: &str = "fm.elf";
 /// File name of the second window client inside the initramfs.
 ///
-/// See the `fm-proof` variant: the shipped image has no second window, so the
-/// idle second client runs `win.elf` and the listing is unchanged.
+/// See the `fm-proof` variant: the scripted --test image has no file-manager
+/// window, so its idle second client runs `win.elf` and the listing is unchanged.
 #[cfg(not(feature = "fm-proof"))]
 const SECOND_WINDOW_CLIENT_NAME: &str = "win.elf";
 
@@ -2421,9 +2422,10 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface, window: u32) {
     // table so a client that painted something else fails the pixel compare.
     //
     // Window 0 is the terminal: the kernel replays the scripted keystrokes
-    // through the same `Term` the client drives. Window 1 (the `--fm` image) is
-    // the file manager: the kernel lists the same directory through its own
-    // mount table into the same `Fm` the client builds from `SYS_READDIR`.
+    // through the same `Term` the client drives. Window 1 (the file-manager
+    // image) is the file manager: the kernel lists the same directory through
+    // its own mount table into the same `Fm` the client builds from
+    // `SYS_READDIR`.
     let font = verifier_font();
     // SAFETY: owned here; reset before the content is derived.
     unsafe { addr_of_mut!(WINDOW_VFS_READS).write(0) };
@@ -4504,9 +4506,10 @@ fn apply_report(buttons: u8, dx: i8, dy: i8) {
             // The kernel's authoritative machine holds only the window the boot
             // paints: the second window client is live (own id, channel, queue)
             // but stays idle until a launch interaction gives it a surface, so
-            // the frame the proof recomputes is exactly the single-window one.
-            // The window manager *table* is exercised by unit tests; this boot
-            // keeps one window on screen so its checksum is unchanged.
+            // the scripted single-window proof recomputes exactly that frame.
+            // The window manager *table* is exercised by unit tests; the
+            // scripted --test image keeps one window on screen so its checksum
+            // is unchanged.
             *wm = zc_abi::wm::Wm::new(
                 info.width,
                 info.height,
@@ -4519,8 +4522,9 @@ fn apply_report(buttons: u8, dx: i8, dy: i8) {
         // The launcher press is the compositor's cue to start the next app; the
         // kernel mirrors it by adding the same window at the same shared
         // rectangle, so both machines hold two windows and the verifier can
-        // placement-check window 1. Without the launch report (the default boot)
-        // this never fires and the frame stays single-window.
+        // placement-check window 1. The scripted --test image never presses it;
+        // the default interactive image and the --fm proof do, and a person can
+        // open the file manager with the same live report.
         if action.kind == zc_abi::wm::Kind::Launched {
             let id = wm.count() as u32;
             if (id as usize) < zc_abi::wm::MAX_WINDOWS {

@@ -22,9 +22,10 @@
 # input must be byte-identical. Only then does a difference mean what it says.
 #
 # The check asserts:
-#   1. an idle desktop is stable (two idle dumps are identical),
-#   2. typing changes the frame (the window repainted on the keystrokes),
-#   3. the session is still healthy afterwards (no watchdog, no content or
+#   1. the human-testable image contains the file manager and starts its task,
+#   2. an idle desktop is stable (two idle dumps are identical),
+#   3. typing changes the frame (the window repainted on the keystrokes),
+#   4. the session is still healthy afterwards (no watchdog, no content or
 #      checksum mismatch, still running).
 #
 # It deliberately does *not* assert the exact pixels of the typed line. That would
@@ -152,6 +153,19 @@ until grep -aq "compositor: cursor ok" "$tmp/serial.log" 2>/dev/null; do
     waited=$((waited + 1))
 done
 sleep 2
+
+# The image a person boots must contain the apps the roadmap just added, not
+# only the ones a special CI image proves. `fm.elf` is packed into this image and
+# the kernel starts it as window 1's client; `fm: ready` is that task running.
+# The scripted `--fm` boot proves the launcher and the window itself; this check
+# makes sure the human-testable image is not missing the binary.
+for marker in "task 9: fm: ready"; do
+    if ! grep -aq "$marker" "$tmp/serial.log"; then
+        echo "error: the human-testable image is missing '$marker'" >&2
+        echo "       it must include the file manager, not only the CI proof image" >&2
+        exit 1
+    fi
+done
 
 shot() {
     rm -f "$tmp/frame.ppm"

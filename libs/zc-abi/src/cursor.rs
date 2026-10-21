@@ -108,10 +108,10 @@ const fn step(buttons: u8, dx: i8, dy: i8) -> MouseStep {
 ///
 /// The window-up prefix ends with the pointer over the window it dragged, so the
 /// proof exercises the pointer-over-window path rather than steering clear of it,
-/// **and leaves the window on screen**. That matters beyond the proof: the same
-/// build is what a person boots from `tools/run-qemu.sh`, and a demo that closes
-/// its own window leaves an empty desktop and a dead compositor with nothing left
-/// to interact with.
+/// **and leaves the window on screen**. That keeps the scripted proof useful: a
+/// demo that closes its own window leaves an empty desktop and a dead compositor
+/// with nothing left to verify. The default image a person boots serves no
+/// script, so the human desktop keeps its window until that person closes it.
 ///
 /// Coordinates are tuned for the 1280x800 boot display: the drag lands the
 /// window near the left edge so its minimize glyph is a short walk from the
@@ -218,7 +218,7 @@ pub const MOUSE_LAUNCH_SCRIPT: &[MouseStep] = &[
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScriptVariant {
     /// The shared prefix only: drag, minimize, restore, click. Leaves window 0
-    /// on screen. This is the default boot.
+    /// on screen. This is the scripted `--test` image.
     WindowUp,
     /// The prefix plus the close-glyph sequence: ends window 0's session.
     Close,
@@ -279,7 +279,8 @@ pub const MOUSE_SCRIPT_LEN_WINDOW_UP: usize = 28;
 ///
 /// `close` and `fm` are mutually exclusive endings of the shared prefix; the
 /// default (neither) is [`ScriptVariant::WindowUp`], which never launches a
-/// second window and never closes window 0, so the shipped frame is unchanged.
+/// second window and never closes window 0, so the scripted single-window proof
+/// frame is unchanged.
 #[must_use]
 pub const fn script_variant(close: bool, fm: bool) -> ScriptVariant {
     if close {
@@ -564,8 +565,9 @@ mod tests {
             (106, 630),
             "the launch script must end on the hello.txt row"
         );
-        // The launch variant shares the exact prefix the default boot serves,
-        // so the first 28 steps are byte-identical and only the suffix differs.
+        // The launch variant shares the exact prefix the --test and close boots
+        // serve, so the first 28 steps are byte-identical and only the suffix
+        // differs.
         assert_eq!(script_len_for(ScriptVariant::Launch), MOUSE_SCRIPT_LEN_WINDOW_UP + MOUSE_LAUNCH_SCRIPT.len());
         for index in 0..MOUSE_SCRIPT_LEN_WINDOW_UP {
             assert_eq!(

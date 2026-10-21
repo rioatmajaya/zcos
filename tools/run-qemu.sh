@@ -2,6 +2,9 @@
 # Boot the ZC OS loader image under QEMU with OVMF.
 #
 # Usage: tools/run-qemu.sh [--test | --test-close | --fm]
+#   (no flag)      boot build/zcos.img interactively. This is the image a person
+#                  tests: an idle desktop with the terminal on screen and the
+#                  file manager one launcher click away.
 #   --test         run headless with isa-debug-exit and return the emulator's
 #                  status, for automated boot checks. Requires an image built
 #                  with tools/build-efi.sh --test. Leaves the window on screen at
@@ -16,7 +19,8 @@
 #                  whose scripted session clicks the launcher so a second window
 #                  opens, opens its `dev/` row, walks back, and double-clicks
 #                  `hello.txt`. Proves two windows, navigation, and a VFS read
-#                  end to end.
+#                  end to end. This is the CI proof; the default image is the
+#                  interactive equivalent.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -38,7 +42,7 @@ is_stale() {
 case "${1:-}" in
     --test)
         mode=--test
-        image=build/zcos.img
+        image=build/zcos-test.img
         build_hint="tools/build-efi.sh --test"
         ;;
     --test-close)

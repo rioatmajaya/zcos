@@ -172,8 +172,10 @@ pub unsafe extern "C" fn _start() -> ! {
     let mut wm = Wm::new(width, height, window_rect(FRAME_INITIAL, width, height));
 
     // One slot per window id. Window 0 is launched now; a later window is
-    // launched only when a `Kind::Launched` action fires, so the default boot
-    // (whose script never presses the launcher) keeps exactly one surface.
+    // launched only when a `Kind::Launched` action fires. The scripted --test
+    // image never presses the launcher, so its single-window proof keeps exactly
+    // one surface; a human on the default image can open the file manager by
+    // pressing the same launcher.
     let mut layers = [Layer::EMPTY; MAX_WINDOWS];
 
     // Launch window 0: create its surface, delegate a read/write capability, map
