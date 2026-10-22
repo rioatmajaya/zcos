@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Prove that live keyboard input reaches the window client and repaints it.
+# Prove that live keyboard and mouse input reach the window client and compositor.
 #
 # Usage: tools/check-live-input.sh
 #
@@ -7,13 +7,15 @@
 # ---------------
 # The boot checks prove the *scripted* frame: the kernel serves a fixed mouse and
 # keyboard script and recomputes the desktop from it. That says nothing about
-# input a person actually types. For a long stretch this repository carried a
+# input a person actually produces. For a long stretch this repository carried a
 # written claim that the window "shows the terminal's scripted keystrokes rather
 # than anything typed" — and nothing in CI contradicted it, because no check typed
 # anything. The claim was false; a user had to prove it with a screenshot.
 #
 # A green boot test is therefore not evidence about live input, and this script is
-# the evidence. It fails if the claim regresses.
+# the evidence. It fails if the claim regresses. The same concern applies to the
+# pointer: the scripted `--fm` proof exercises the launcher and a directory click,
+# but only this check can prove a real mouse report survives the kernel queue.
 #
 # How it decides
 # --------------
@@ -31,7 +33,11 @@
 #      and panel pixels that change between two idle dumps),
 #   3. the desktop below the panel is stable while idle,
 #   4. typing changes the desktop below the panel (the window repainted),
-#   5. the session is still healthy afterwards (no watchdog, no content or
+#   5. a live first click inside the unfocused file manager opens `dev/`,
+#      proving the window-client baseline preserves the press that focused it,
+#   6. a live click on the `ZC` launcher is handled even when both apps are
+#      already open: it switches to the next open window and repaints the panel,
+#   7. the session is still healthy afterwards (no watchdog, no content or
 #      checksum mismatch, still running).
 #
 # It deliberately does *not* assert the exact pixels of the typed line. That would
@@ -316,6 +322,53 @@ else
     exit 1
 fi
 
+if [ "$image" = "build/zcos.img" ]; then
+    echo "== clicking the Files window's dev/ row through the monitor =="
+    # The pointer starts at (320,400) and the row is at (106,504). The window
+    # is not focused yet, so this is the first pointer report its client sees:
+    # the check fails if the kernel does not prime the press that focuses it.
+    # Small relative steps are what the PS/2 path handles reliably; a single
+    # large jump can be dropped or accelerated by QEMU's input layer.
+    mon \
+        "mouse_move -40 20" "mouse_move -40 20" "mouse_move -40 20" \
+        "mouse_move -40 20" "mouse_move -40 20" \
+        "mouse_move -14 4" >/dev/null
+    mon "mouse_move 0 0" "mouse_button 1" "mouse_move 0 0" \
+        "mouse_button 0" "mouse_move 0 0" >/dev/null
+    sleep 1
+    if ! grep -aq "task 9: fm: open ok" "$tmp/serial.log"; then
+        echo "error: the first live click inside the file manager was swallowed." >&2
+        echo "       The client must see the press that focused its window, not" >&2
+        echo "       only the matching release." >&2
+        exit 1
+    fi
+    echo "   the first live click opened dev/ and focused the file manager"
+
+    echo "== clicking the ZC launcher through the monitor =="
+    # From the file row at (106,504) to the launcher centre (20,18). Clamp to
+    # the top-left corner first: a dropped relative step then leaves the pointer
+    # at the corner rather than forty pixels below the button. Both small final
+    # steps land inside the 40x24 launcher, so one dropped step still clicks it.
+    mon \
+        "mouse_move -40 0" "mouse_move -40 0" "mouse_move -40 0" \
+        "mouse_move 0 -40" "mouse_move 0 -40" "mouse_move 0 -40" \
+        "mouse_move 0 -40" "mouse_move 0 -40" "mouse_move 0 -40" \
+        "mouse_move 0 -40" "mouse_move 0 -40" "mouse_move 0 -40" \
+        "mouse_move 0 -40" "mouse_move 0 -40" "mouse_move 0 -40" \
+        "mouse_move 0 -40" "mouse_move 0 -40" \
+        "mouse_move 10 10" "mouse_move 10 8" >/dev/null
+    mon "mouse_move 0 0" "mouse_button 1" "mouse_move 0 0" \
+        "mouse_button 0" "mouse_move 0 0" >/dev/null
+    sleep 1
+    if ! grep -aq "compositor: launcher switched window" "$tmp/serial.log"; then
+        echo "error: a live click on the ZC launcher did nothing." >&2
+        echo "       The launcher must switch to an open window when both app" >&2
+        echo "       tasks are already in use." >&2
+        exit 1
+    fi
+    echo "   the launcher press reached the compositor and switched windows"
+fi
+
 echo "== the session is still healthy =="
 for marker in "timed out" "mismatch" "error:"; do
     if grep -aq "$marker" "$tmp/serial.log"; then
@@ -331,4 +384,4 @@ fi
 echo "   no timeout, no mismatch, still running"
 
 echo
-echo "live input ok: typed keystrokes reach the window client and repaint it"
+echo "live input ok: typed keys and live clicks reach their owners and repaint"

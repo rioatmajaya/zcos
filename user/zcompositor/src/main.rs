@@ -391,16 +391,36 @@ pub unsafe extern "C" fn _start() -> ! {
         while let Some(event) = pointer.poll() {
             let cursor_before = cursor.rect();
             let windows_before = windows_union(&wm);
+            let focus_before = wm.focused();
             cursor = pointer.cursor();
             let action = wm.apply(cursor, event);
             if action.kind == Kind::Closed {
                 wm.close_of(action.window);
                 let _ = window_close(action.window);
             }
+            if action.kind == Kind::Launched {
+                // The scripted session handles this before the interactive
+                // event loop starts; the live desktop must handle it too, or a
+                // click on the launcher would do nothing at all. If both
+                // window-client tasks are in use, switch to the next open
+                // window instead of leaving the press unanswered.
+                if launch_next(&mut wm, &mut layers, width, height, format) {
+                    live += 1;
+                    log("compositor: window 1 launched\n");
+                } else if wm.cycle().is_some() {
+                    log("compositor: launcher switched window\n");
+                }
+            }
             let mut rect = cursor_before.union(cursor.rect());
             let windows_after = windows_union(&wm);
-            if windows_before != windows_after {
+            // A focus change moves the taskbar highlight even when every
+            // rectangle stayed where it was, so repaint the panel then too.
+            if windows_before != windows_after
+                || focus_before != wm.focused()
+                || action.kind == Kind::Focused
+            {
                 rect = rect.union(windows_before).union(windows_after);
+                rect = rect.union(Rect::new(0, 0, width, panel_height(height)));
             }
             composite(
                 back, &fb, format, font, width, height, surface.stride, &wm, &layers, cursor,

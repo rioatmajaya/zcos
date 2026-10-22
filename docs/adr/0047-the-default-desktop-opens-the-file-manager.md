@@ -4,6 +4,9 @@
 - **Date:** 2026-10-22
 - **Affects:** `libs/zc-abi`, `kernel/zc-kernel-image`, `user/zcompositor`,
   `tools/build-efi.sh`, `tools/check-live-input.sh`, README, F8h
+- **Follow-up:** [0048](0048-live-clicks-survive-the-kernel.md) gives the
+  exhausted launcher its next job: when both client tasks are in use, a press
+  switches to the next open window instead of doing nothing.
 
 ## Context
 
@@ -35,4 +38,6 @@ an undiscovered click is not yet a human-testable app.
 The first frame a person sees after `./tools/build-efi.sh && ./tools/run-qemu.sh`
 contains both apps; no hidden gesture is required. The proof artifacts remain
 separate and byte-identical. The `ZC` launcher is effectively exhausted once
-both apps are open; a future app menu can give it a new job.
+both apps are open; [0048](0048-live-clicks-survive-the-kernel.md) makes it
+switch to the next open window, and a future app menu can still give it a
+richer job.

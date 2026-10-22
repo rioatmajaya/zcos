@@ -519,6 +519,55 @@ impl Wm {
         changed
     }
 
+    /// Shows `id`, raises it, and focuses it, returning whether anything changed.
+    ///
+    /// This is the launcher's fallback when every app is already running: it
+    /// activates the next window instead of doing nothing. Unlike a task-button
+    /// press it is not a restore gesture, so the caller does not need a new
+    /// client frame — the surface already exists and the compositor can blit it
+    /// again.
+    pub fn activate(&mut self, id: u32) -> bool {
+        let Some(index) = self.find(id) else {
+            return false;
+        };
+        if self.windows[index].closed {
+            return false;
+        }
+        let was_shown = self.windows[index].shown;
+        let was_focused = self.focus == id;
+        let was_top = self.z_len > 0 && self.z[self.z_len - 1] == id;
+        self.windows[index].shown = true;
+        self.raise(id);
+        self.focus = id;
+        !was_shown || !was_focused || !was_top
+    }
+
+    /// Activates the next open window after the focused one, wrapping around.
+    ///
+    /// Returns the window it activated, or `None` when every window is closed.
+    /// The launcher uses this when there is no next app to start, so the button
+    /// still has a visible effect once both window-client tasks are in use.
+    pub fn cycle(&mut self) -> Option<u32> {
+        if self.count == 0 {
+            return None;
+        }
+        let start = match self.find(self.focus) {
+            Some(index) => (index + 1) % self.count,
+            None => 0,
+        };
+        let mut offset = 0;
+        while offset < self.count {
+            let index = (start + offset) % self.count;
+            let id = self.windows[index].id;
+            if !self.windows[index].closed {
+                self.activate(id);
+                return Some(id);
+            }
+            offset += 1;
+        }
+        None
+    }
+
     /// Ends the focused window's session, returning whether this call did it.
     ///
     /// Separate from [`Self::apply`] because the *deciding* side is the
@@ -1366,6 +1415,39 @@ mod tests {
         assert_eq!(wm.top_at(x, y), Some(0));
         // The press is a selection only; it never starts a drag on the body.
         assert!(!wm.is_dragging());
+    }
+
+    #[test]
+    fn the_launcher_fallback_cycles_focus_between_open_windows() {
+        let mut wm = two(1, Rect::new(500, 300, 200, 150));
+        assert_eq!(wm.focused(), 1);
+        // Window 1 is top and focused, so the next window is 0: activating it
+        // raises it and moves the taskbar highlight without touching either
+        // rectangle.
+        assert_eq!(wm.cycle(), Some(0));
+        assert_eq!(wm.focused(), 0);
+        assert_eq!(wm.z_at(0), Some(1));
+        assert_eq!(wm.z_at(1), Some(0));
+        // Cycling again wraps back to window 1.
+        assert_eq!(wm.cycle(), Some(1));
+        assert_eq!(wm.focused(), 1);
+        assert_eq!(wm.z_at(0), Some(0));
+        assert_eq!(wm.z_at(1), Some(1));
+    }
+
+    #[test]
+    fn activating_a_minimized_window_shows_it_again() {
+        let mut wm = two(1, Rect::new(500, 300, 200, 150));
+        // Minimize the focused window through its decoration.
+        let rect = wm.rect();
+        let strip = decorations(rect);
+        let (cursor, event) = press(strip.x + 2, strip.y + 2);
+        assert_eq!(wm.apply(cursor, event).kind, Kind::Minimized);
+        assert!(!wm.is_shown_of(1));
+        assert!(wm.activate(1));
+        assert!(wm.is_shown_of(1));
+        assert_eq!(wm.focused(), 1);
+        assert_eq!(wm.rect_of(1), Some(rect));
     }
 
     #[test]

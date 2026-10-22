@@ -223,9 +223,12 @@ opening before the first frame — see
 [ADR 0042](docs/adr/0042-the-proof-scripts-belong-to-the-test-build.md).
 
 The default image opens with two windows: the terminal and **Files**. The file
-manager is already listing `/`; no launcher click is needed. A directory click
-enters that directory; a first click on a file selects it, and a second click
-opens a preview read through the VFS; `..` or Backspace walks back up. The same
+manager is already listing `/`; no launcher click is needed. A live click on the
+`ZC` launcher still has a job: it opens the next app while one is available, and
+switches between the two open windows once both client tasks are in use. A
+directory click enters that directory; a first click on a file selects it, and a
+second click opens a preview read through the VFS; `..` or Backspace walks back
+up. The same
 clicks are proved headlessly by `--fm`, but you can try them here without any
 extra flag — see
 [ADR 0047](docs/adr/0047-the-default-desktop-opens-the-file-manager.md).

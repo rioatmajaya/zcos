@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 7 grants`, `task 6: devmgr: blk published`, `dma: window coherent ok` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–7, F8e-1–4, F8h-0/0b/1a/1b/1c-1/1c-2/1c-3/1c-4/1c-5/1c-6, F8h-2, live-input check, F8g-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: font vfs ok`; `compositor: font vfs ok`; `font: vfs ok`; `client: window painted`; `client: vfs ok`; `client: pointer ok`; `client: click ok`; `client: ls ok`; `wm: window mapped`; `wm: pointer routed`; `wm: click ok`; `wm: ls ok`; `task 2: data/`; `task 2: kbd`; `task 2: probe`; `win1 entry`; `task 9: client: window 1 idle`; `compositor: window 1 launched` (default/fm run); `task 9: fm: ready` (default/fm run); `task 9: fm: listing ok` (default/fm run); `fm: listing ok` (fm run); `task 9: fm: pointer ok` (fm run); `task 9: fm: open ok` (fm run); `task 9: fm: preview ok` (fm run); `fm: open ok` (fm run); `fm: preview ok` (fm run); `clock: rtc ok` (default run); `compositor: clock live` (default run); `compositor: clock tick` (default run); `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed` (close run); `compositor: window erased` (close run); `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui/session/vfs/fm host tests pass; `zc-storage` zcfs read_dir tests pass |
+| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–7, F8e-1–4, F8h-0/0b/1a/1b/1c-1/1c-2/1c-3/1c-4/1c-5/1c-6, F8h-2, F8h-3, live-input check, F8g-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: font vfs ok`; `compositor: font vfs ok`; `font: vfs ok`; `client: window painted`; `client: vfs ok`; `client: pointer ok`; `client: click ok`; `client: ls ok`; `wm: window mapped`; `wm: pointer routed`; `wm: click ok`; `wm: ls ok`; `task 2: data/`; `task 2: kbd`; `task 2: probe`; `win1 entry`; `task 9: client: window 1 idle`; `compositor: window 1 launched` (default/fm run); `task 9: fm: ready` (default/fm run); `task 9: fm: listing ok` (default/fm run); `fm: listing ok` (fm run); `task 9: fm: pointer ok` (fm run); `task 9: fm: open ok` (fm run); `task 9: fm: preview ok` (fm run); `fm: open ok` (fm run); `fm: preview ok` (fm run); `clock: rtc ok` (default run); `compositor: clock live` (default run); `compositor: clock tick` (default run); `compositor: launcher switched window` (default live run); `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed` (close run); `compositor: window erased` (close run); `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui/session/vfs/fm host tests pass; `zc-storage` zcfs read_dir tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -939,6 +939,21 @@ full browser. Note them as follow-ups, do not build them here.
         compares two idle dumps below the panel, requires the panel to advance,
         and then requires typing to change the window. See
         [`adr/0046`](adr/0046-the-taskbar-clock-is-live.md).
+      - [x] F8h-3: a live click survives the kernel. The live mouse path queues
+        one report per frame instead of coalescing a press and release into the
+        final button mask, the first live report routed to a window is preceded
+        by a baseline built from the pre-report button state, and the
+        interactive compositor handles `Kind::Launched` rather than only the
+        scripted loop. When both client tasks are busy, the `ZC` launcher calls
+        the new `Wm::cycle` on both the compositor's and kernel's machines, so
+        it raises and focuses the next open window instead of doing nothing;
+        focus changes now damage the taskbar too. `tools/check-live-input.sh`
+        clicks the launcher and the Files `dev/` row through QEMU's monitor and
+        requires `compositor: launcher switched window` and
+        `task 9: fm: open ok`. All three proof checksums stay
+        `0xd616ad79aaefb099`, `0x6d66e82d0f2d6fb8`, and
+        `0x78ebd6d359914da7`. See
+        [`adr/0048`](adr/0048-live-clicks-survive-the-kernel.md).
 - [ ] F8i: audio stack (virtio-snd first, then HD Audio) after the desktop is
       stable.
 - [ ] F8j: USB stack (xHCI) for keyboard, mouse, and mass storage.

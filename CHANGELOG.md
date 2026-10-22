@@ -156,7 +156,18 @@ file manager visible without a hidden step: the default build enables
 kernel seeds the same two windows while keeping the terminal focused, and the
 task button reads `Files`. Proof builds leave the feature off and keep their
 three recorded checksums. See
-[ADR 0047](docs/adr/0047-the-default-desktop-opens-the-file-manager.md).
+[ADR 0047](docs/adr/0047-the-default-desktop-opens-the-file-manager.md). F8h-3
+makes a live click survive the kernel: `SYS_MOUSE_READ` now queues each live
+report instead of coalescing a press and release into the last button mask, the
+first live report routed to a window is preceded by a baseline so the press that
+focused it is not adopted as a baseline, and the interactive compositor handles
+`Kind::Launched`. When both client tasks are busy, the `ZC` launcher cycles focus
+to the next open window through the new shared `Wm::cycle`; both the compositor
+and the kernel run it, and a focus change now damages the taskbar. The live-input
+check clicks the launcher and the Files `dev/` row through QEMU's monitor, while
+all three proof checksums remain `0xd616ad79aaefb099`,
+`0x6d66e82d0f2d6fb8`, and `0x78ebd6d359914da7`. See
+[ADR 0048](docs/adr/0048-live-clicks-survive-the-kernel.md).
 
 ### Fixed
 
@@ -172,6 +183,20 @@ three recorded checksums. See
   `0x78ebd6d359914da7`. See
   [ADR 0047](docs/adr/0047-the-default-desktop-opens-the-file-manager.md).
 
+- **The launcher and the first click in an unfocused window did nothing**
+  (F8h-3). Three independent losses hid the same symptom. The kernel coalesced
+  every live mouse frame between reads into one report with the latest button
+  mask, so a press and its release in one batch arrived as no click. The
+  compositor's live loop handled close events but ignored `Kind::Launched`, so
+  even a surviving launcher press had no handler. And a window client's first
+  pointer report is a baseline, so the very press that focused the window was
+  adopted silently and only its release remained. Live reports are now queued
+  one per frame, the kernel primes each window with the pre-report button state,
+  and the live loop launches or — when both client tasks are in use — cycles
+  focus to the next open window. `tools/check-live-input.sh` clicks the launcher
+  and the file manager's `dev/` row through QEMU's monitor, so all three
+  regressions fail a live boot. The three proof checksums are unchanged. See
+  [ADR 0048](docs/adr/0048-live-clicks-survive-the-kernel.md).
 - **The image a person boots replayed the boot proof's script at them** (F8).
   Every build served the scripted mouse session (the window dragged, minimized,
   and restored itself) and the scripted terminal session (`help`/`cat`/`ls`

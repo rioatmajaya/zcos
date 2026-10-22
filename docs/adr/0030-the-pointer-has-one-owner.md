@@ -4,7 +4,10 @@
 - **Date:** 2026-10-08
 - **Follow-up:** the widget blocker recorded below is resolved by
   [0034](0034-a-window-has-its-own-pointer-stream.md), which adds a derived
-  per-window stream; the one-owner rule itself stands unchanged.
+  per-window stream; the one-owner rule itself stands unchanged. The single
+  coalescing `MOUSE_PENDING` report described below was replaced by a bounded
+  live report queue in [0048](0048-live-clicks-survive-the-kernel.md), because
+  coalescing could erase a press/release edge; the one-owner rule still stands.
 - **Affects:** `user/zc-ui`, `user/zcompositor`, `user/zc-win`, `SYS_MOUSE_READ`,
   `SYS_TERM_READ`, F8e
 

@@ -2154,28 +2154,27 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             if let Some(step) = step {
                 // The scripted reports carry button bits, so the boot proof
                 // drives the window machine exactly as live input does.
-                apply_report(step.buttons, step.dx, step.dy);
+                apply_report(step.buttons, step.dx, step.dy, false);
                 regs.set_result(pack_report(step.buttons, step.dx, step.dy));
                 0
             } else {
                 // SAFETY: owned here; interrupts are masked through this arm.
                 let pending = unsafe {
-                    if addr_of!(MOUSE_PENDING_ANY).read() {
-                        let (buttons, dx, dy) = addr_of!(MOUSE_PENDING).read();
-                        // Consume the batch: clear the accumulator so the next
-                        // movement starts from zero. Without this the delivered
-                        // delta would stack on the last one and the pointer would
-                        // keep flying in the previous direction.
-                        addr_of_mut!(MOUSE_PENDING).write((0, 0, 0));
-                        addr_of_mut!(MOUSE_PENDING_ANY).write(false);
-                        Some((buttons, dx, dy))
-                    } else {
+                    if addr_of!(MOUSE_QUEUE_LEN).read() == 0 {
                         None
+                    } else {
+                        let head = addr_of!(MOUSE_QUEUE_HEAD).read();
+                        let len = addr_of!(MOUSE_QUEUE_LEN).read();
+                        let report = (*addr_of!(MOUSE_QUEUE))[head];
+                        addr_of_mut!(MOUSE_QUEUE_HEAD)
+                            .write((head + 1) % MOUSE_QUEUE_CAP);
+                        addr_of_mut!(MOUSE_QUEUE_LEN).write(len - 1);
+                        Some(report)
                     }
                 };
                 match pending {
                     Some((buttons, dx, dy)) => {
-                        apply_report(buttons, dx, dy);
+                        apply_report(buttons, dx, dy, true);
                         regs.set_result(pack_report(buttons, dx, dy));
                         0
                     }
@@ -4114,14 +4113,24 @@ static mut INPUT: zc_abi::ui::Input = zc_abi::ui::Input::new();
 /// How many reports of the scripted mouse session have been served.
 static mut MOUSE_SCRIPT_INDEX: usize = 0;
 
-/// Live mouse movement accumulated since the last read.
-///
-/// The drain may strip several frames between reads; summing their deltas keeps
-/// the pointer's total travel instead of losing all but the last frame.
-static mut MOUSE_PENDING: (u8, i8, i8) = (0, 0, 0);
+/// Maximum live mouse reports queued between reads.
+const MOUSE_QUEUE_CAP: usize = 64;
 
-/// Whether [`MOUSE_PENDING`] holds movement not yet delivered.
-static mut MOUSE_PENDING_ANY: bool = false;
+/// Live mouse reports waiting for `SYS_MOUSE_READ`, oldest first.
+///
+/// The drain may strip several frames between reads, so they are queued as
+/// separate reports instead of being coalesced. Coalescing movement into one
+/// "latest buttons and summed deltas" report loses an edge when a press and its
+/// release arrive in the same batch: the compositor then sees only the final
+/// button state and the click never happens. The compositor drains this queue
+/// one report at a time, exactly as [`zc_abi::ui::Input`] expects.
+static mut MOUSE_QUEUE: [(u8, i8, i8); MOUSE_QUEUE_CAP] = [(0, 0, 0); MOUSE_QUEUE_CAP];
+
+/// Index of the oldest queued report.
+static mut MOUSE_QUEUE_HEAD: usize = 0;
+
+/// Number of reports in [`MOUSE_QUEUE`].
+static mut MOUSE_QUEUE_LEN: usize = 0;
 
 /// Byte capacity of the PS/2 keyboard queue the window client reads.
 const WINDOW_INPUT_CAP: usize = 256;
@@ -4159,6 +4168,11 @@ static mut WINDOW_POINTERS: [zc_kernel::input::WindowQueue<64>; service::WINDOW_
 /// One marker per boot, so CI can tell the routing path ran without a log line
 /// per report.
 static mut WINDOW_POINTER_LOGGED: bool = false;
+
+/// Whether a window's client has received the baseline report that lets
+/// [`zc_abi::ui::Input`] tell a first press from a button already held.
+static mut WINDOW_POINTER_PRIMED: [bool; service::WINDOW_TASKS] =
+    [false; service::WINDOW_TASKS];
 
 /// Surface slot the compositor delegated to each window client, if any.
 ///
@@ -4378,7 +4392,7 @@ fn pop_window_pointer(window: u32) -> Option<u64> {
 /// flag ends the *keyboard* stream, but the scripted pointer gestures keep
 /// running after the shell exits, and the client is still alive draining its
 /// queue. Gating here would drop exactly the reports the boot proof relies on.
-fn route_window_pointer(buttons: u8, dx: i8, dy: i8) {
+fn route_window_pointer(held_before: u8, buttons: u8, dx: i8, dy: i8, live: bool) {
     // SAFETY: owned here; the pointer syscall runs with interrupts masked.
     unsafe {
         let wm = &*addr_of!(WM);
@@ -4390,6 +4404,30 @@ fn route_window_pointer(buttons: u8, dx: i8, dy: i8) {
         // One routing decision, shared with the boot proof: a report on the
         // title bar, a decoration, or the desktop is the window manager's.
         if let Some((x, y)) = zc_abi::wm::window_pointer_at(rect, cursor.x, cursor.y) {
+            // The client's `Input` adopts the first report it sees as a
+            // baseline instead of an edge. Without a baseline, the very press
+            // that focused this window would be swallowed: the client would see
+            // its release as the first edge and report no click. Seed the
+            // stream with the state from before this report, then deliver the
+            // report itself, so a first press is a press and a button already
+            // held while the pointer entered is not invented as one.
+            let index = window as usize;
+            if live
+                && index < service::WINDOW_TASKS
+                && !addr_of!(WINDOW_POINTER_PRIMED).read()[index]
+            {
+                let mut primed = addr_of!(WINDOW_POINTER_PRIMED).read();
+                primed[index] = true;
+                addr_of_mut!(WINDOW_POINTER_PRIMED).write(primed);
+                let baseline = zc_abi::ui::pack_window_pointer(
+                    x as u16,
+                    y as u16,
+                    held_before,
+                    0,
+                    0,
+                );
+                push_window_pointer(window, baseline);
+            }
             let word = zc_abi::ui::pack_window_pointer(
                 x as u16,
                 y as u16,
@@ -4450,7 +4488,7 @@ fn drain_domain_input() -> bool {
         }
         let mut index = 0;
         while index < frames {
-            accumulate_mouse(mouse[index]);
+            enqueue_mouse(mouse[index]);
             index += 1;
         }
     }
@@ -4525,25 +4563,28 @@ fn notify_mouse(tasks: &mut TaskTable<TASK_COUNT>) {
     }
 }
 
-/// Adds one mouse frame's deltas to the pending movement.
+/// Queues one live mouse report for the next `SYS_MOUSE_READ`.
 ///
-/// Saturated rather than wrapped: a burst of movement between reads should move
-/// the pointer as far as it really went, not wrap around. Frames accumulate
-/// within one batch (between two `SYS_MOUSE_READ` calls); the read resets the
-/// accumulator, so the next batch starts from zero instead of stacking on top
-/// of the last delivered movement.
-fn accumulate_mouse(frame: [u8; 3]) {
+/// Each frame keeps its own button mask and deltas. Summing deltas while keeping
+/// only the last mask would deliver a press and its release as a single report
+/// with no buttons held, so the compositor would see a click as a no-op.
+fn enqueue_mouse(frame: [u8; 3]) {
+    let report = (frame[0], frame[1] as i8, frame[2] as i8);
     // SAFETY: owned here; the drain runs with interrupts masked.
     unsafe {
-        let (_buttons, dx, dy) = MOUSE_PENDING;
-        MOUSE_PENDING = (
-            // The latest packet holds the current button state; OR would keep a
-            // released button stuck down across frames.
-            frame[0],
-            (i16::from(dx) + i16::from(frame[1] as i8)).clamp(-128, 127) as i8,
-            (i16::from(dy) + i16::from(frame[2] as i8)).clamp(-128, 127) as i8,
-        );
-        MOUSE_PENDING_ANY = true;
+        let head = addr_of!(MOUSE_QUEUE_HEAD).read();
+        let len = addr_of!(MOUSE_QUEUE_LEN).read();
+        if len == MOUSE_QUEUE_CAP {
+            // A full queue means the compositor has not read for a while. Keep
+            // the newest report — a click matters more than stale movement —
+            // and drop the oldest slot.
+            (*addr_of_mut!(MOUSE_QUEUE))[head] = report;
+            addr_of_mut!(MOUSE_QUEUE_HEAD).write((head + 1) % MOUSE_QUEUE_CAP);
+        } else {
+            let tail = (head + len) % MOUSE_QUEUE_CAP;
+            (*addr_of_mut!(MOUSE_QUEUE))[tail] = report;
+            addr_of_mut!(MOUSE_QUEUE_LEN).write(len + 1);
+        }
     }
 }
 
@@ -4558,9 +4599,13 @@ fn accumulate_mouse(frame: [u8; 3]) {
 /// The placement phase runs first, so the machine starts from the same
 /// rectangle the compositor's scripted move painted. It is recorded rather than
 /// recomputed because that move was a compositor decision, not a report.
-fn apply_report(buttons: u8, dx: i8, dy: i8) {
+fn apply_report(buttons: u8, dx: i8, dy: i8, live: bool) {
     // SAFETY: published during setup before any task ran.
     let info = unsafe { core::ptr::addr_of!(FB_INFO).read() };
+    // Captured outside the block because the window routing below needs the
+    // state from before this report to seed a client that has never seen one.
+    // SAFETY: owned here; the mouse syscall runs with interrupts masked.
+    let held_before = unsafe { (*core::ptr::addr_of!(INPUT)).held() };
     // SAFETY: owned here; the mouse syscall runs with interrupts masked.
     unsafe {
         let cursor = &mut *addr_of_mut!(CURSOR);
@@ -4604,6 +4649,11 @@ fn apply_report(buttons: u8, dx: i8, dy: i8) {
                     id,
                     zc_abi::window_rect_for(id, zc_abi::FRAME_INITIAL, info.width, info.height),
                 );
+            } else {
+                // Every window-client task is already in use. Mirror the
+                // compositor's fallback: the launcher switches to the next open
+                // window, so a press always has a visible effect.
+                let _ = wm.cycle();
             }
         }
     }
@@ -4611,7 +4661,7 @@ fn apply_report(buttons: u8, dx: i8, dy: i8) {
     // has acted: a drag that moves the window and a report that lands inside it
     // are the same report, so the local coordinate is against the rectangle the
     // compositor is about to paint, not the one it left.
-    route_window_pointer(buttons, dx, dy);
+    route_window_pointer(held_before, buttons, dx, dy, live);
 }
 
 /// Returns the pointer position the compositor should have painted.
