@@ -49,6 +49,14 @@ const MAX_WINDOWS: usize = zc_abi::wm::MAX_WINDOWS;
 /// because the window id is the task slot's offset from this one.
 const WINDOW_CLIENT_TASK: u64 = 8;
 
+/// Number of window-client tasks the kernel brings up.
+///
+/// Mirrors `zc_kernel::service::WINDOW_TASKS` for the same reason as
+/// [`WINDOW_CLIENT_TASK`]: the launcher must not add a window whose client does
+/// not exist. The desktop can lay out more task buttons than this, but only two
+/// clients are spawned today.
+const WINDOW_TASKS: u32 = 2;
+
 /// A window surface the compositor owns and delegates to a client.
 ///
 /// One slot per window id. A window that has not been launched yet keeps
@@ -194,11 +202,10 @@ pub unsafe extern "C" fn _start() -> ! {
     // scripted second frame places it.
     let mut wm = Wm::new(width, height, window_rect(FRAME_INITIAL, width, height));
 
-    // One slot per window id. Window 0 is launched now; a later window is
-    // launched only when a `Kind::Launched` action fires. The scripted --test
-    // image never presses the launcher, so its single-window proof keeps exactly
-    // one surface; a human on the default image can open the file manager by
-    // pressing the same launcher.
+    // One slot per window id. Window 0 is launched now. The human image's
+    // `show-files` feature launches window 1 before the first frame; proof
+    // builds launch a later window only when a `Kind::Launched` action fires,
+    // so their scripted single- or two-window frames stay exactly as recorded.
     let mut layers = [Layer::EMPTY; MAX_WINDOWS];
 
     // Launch window 0: create its surface, delegate a read/write capability, map
@@ -212,6 +219,29 @@ pub unsafe extern "C" fn _start() -> ! {
     if !await_ack(0) {
         log("compositor: client did not acknowledge\n");
         task_exit()
+    }
+
+    // How many clients still owe us a `WM_DONE`. Window 0 is live; the human
+    // image's auto-opened file manager adds one before the first frame, and a
+    // later launcher click adds one more.
+    let mut live: u32 = 1;
+
+    // The human image opens the file manager immediately instead of hiding it
+    // behind a launcher click. The kernel's own window machine is seeded with
+    // the same two windows at boot, and focus stays on the terminal so typing
+    // still reaches the shell. Proof builds do not enable this feature and keep
+    // their scripted single- or two-window frames unchanged.
+    #[cfg(feature = "show-files")]
+    {
+        if launch_next(&mut wm, &mut layers, width, height, format) {
+            log("compositor: window 1 launched\n");
+            if await_ack(1) {
+                live += 1;
+            }
+            let _ = wm.focus(0);
+        } else {
+            log("compositor: file manager launch failed\n");
+        }
     }
 
     // The pointer starts where the kernel's own cursor does, so the first frame
@@ -273,11 +303,6 @@ pub unsafe extern "C" fn _start() -> ! {
     let mut minimized = false;
     let mut restored = false;
     let mut closed = false;
-    // How many clients still owe us a `WM_DONE`. Window 0 is live; a launch adds
-    // one, and the compositor stops only once all of them have finished, so a
-    // second window's surface is destroyed (and its snapshot taken) before the
-    // final frame.
-    let mut live: u32 = 1;
     while let Some(event) = pointer.poll() {
         let cursor_before = cursor.rect();
         let windows_before = windows_union(&wm);
@@ -484,7 +509,7 @@ pub unsafe extern "C" fn _start() -> ! {
 /// come, so the caller treats it as fatal.
 fn launch_next(wm: &mut Wm, layers: &mut [Layer; MAX_WINDOWS], width: u32, height: u32, format: PixelFormat) -> bool {
     let id = wm.count() as u32;
-    if id as usize >= MAX_WINDOWS {
+    if id >= WINDOW_TASKS || id as usize >= MAX_WINDOWS {
         return false;
     }
     let rect = window_rect_for(id, FRAME_INITIAL, width, height);

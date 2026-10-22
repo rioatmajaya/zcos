@@ -17,6 +17,12 @@ zc-user = { path = "../zc-user" }
 zc-ui = { path = "../zc-ui" }
 zc-abi = { path = "../../libs/zc-abi" }
 
+[features]
+# Open the file manager as window 1 before the first frame. Only the
+# human-testable default image enables this; proof builds launch their second
+# window from the scripted launcher click instead, so their frames stay exact.
+show-files = ["zc-abi/show-files"]
+
 [lints]
 workspace = true
 

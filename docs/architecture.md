@@ -253,24 +253,27 @@ owns, and `wm_assign(window) = IPC_WM + 2*window` gives each window its own
 assignment channel while `wm_reply(kind, window)` routes the ack back to the
 right client.
 
-A second window opens from a launcher press, not a compile-time switch: `Wm`
-returns `Kind::Launched` when a press lands on the launcher button, and the
-compositor and the kernel each add the next window at the shared
-`window_rect_for` rectangle on their own copy of that report, so the placement
-stays a proof. The compositor composites every registered window generically (one
-`Layer` per window id, a bare-desktop paint whose taskbar button count follows
-`wm.count()`, and a z-order surface blit), so the scripted single-window proof
-still paints the frame whose checksum ADR 0036 recorded. The launcher gesture is
-a script ending (`script_variant`), so the automated launch belongs to the
-`--fm` image. The default image packs the same `fm.elf` and starts it as window
-1's client, and a person's launcher click reaches the same `Wm` path through live
-input. In both the default and `--fm` images window 1 is the file manager: a
-separate `zc-fm` binary builds a `zc-abi::fm::Fm` listing through `SYS_READDIR`,
-and the kernel's verifier rebuilds the same listing from its own mount table and
-compares every pixel — a generic `SurfaceModel` trait lets the terminal and the
-file manager share one placement/content loop, so the listing is proven, not
-trusted. The listing is also interactive: a click on a directory row enters it
-through the shared `Fm::click`, a second click on a selected file reads it
+A second window opens from a launcher press in the proof image: `Wm` returns
+`Kind::Launched` when a press lands on the launcher button, and the compositor
+and the kernel each add the next window at the shared `window_rect_for`
+rectangle on their own copy of that report, so the placement stays a proof. The
+compositor composites every registered window generically (one `Layer` per
+window id, a bare-desktop paint whose taskbar button count follows `wm.count()`,
+and a z-order surface blit), so the scripted single-window proof still paints
+the frame whose checksum ADR 0036 recorded. The launcher gesture is a script
+ending (`script_variant`), so the automated launch belongs to the `--fm` image.
+The human image instead enables the compositor's `show-files` feature: it packs
+the same `fm.elf`, launches window 1 before the first frame, and seeds the
+kernel's window machine with the same two windows while keeping the terminal
+focused. A person therefore sees both apps immediately; the task button is
+labelled `Files`, not `Terminal 2`. In both the default and `--fm` images window
+1 is the file manager: a separate `zc-fm` binary builds a `zc-abi::fm::Fm`
+listing through `SYS_READDIR`, and the kernel's verifier rebuilds the same
+listing from its own mount table and compares every pixel — a generic
+`SurfaceModel` trait lets the terminal and the file manager share one
+placement/content loop, so the listing is proven, not trusted. The listing is
+also interactive: a click on a directory row enters it through the shared
+`Fm::click`, a second click on a selected file reads it
 through a caller-supplied reader and opens a preview, and the `..` row returns
 to the directory. The `--fm` script opens `dev/`, walks back, and double-clicks
 `hello.txt`; `replay_launch` replays those clicks into the same state machine

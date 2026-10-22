@@ -150,9 +150,27 @@ changes, leaving the desktop below it untouched. Proof builds return the fixed
 checksums remain `0xd616ad79aaefb099`, `0x6d66e82d0f2d6fb8`, and
 `0x78ebd6d359914da7`. `tools/check-live-input.sh` now proves the panel advances
 while the desktop below stays stable, then proves typing changes that desktop.
-See [ADR 0046](docs/adr/0046-the-taskbar-clock-is-live.md).
+See [ADR 0046](docs/adr/0046-the-taskbar-clock-is-live.md). F8h-1c-6 makes the
+file manager visible without a hidden step: the default build enables
+`show-files`, so the compositor launches window 1 before the first frame, the
+kernel seeds the same two windows while keeping the terminal focused, and the
+task button reads `Files`. Proof builds leave the feature off and keep their
+three recorded checksums. See
+[ADR 0047](docs/adr/0047-the-default-desktop-opens-the-file-manager.md).
 
 ### Fixed
+
+- **The default desktop hid the file manager behind an undiscovered click**
+  (F8h-1c-6). A plain boot showed only the terminal, so a person could
+  reasonably conclude the file manager was never built even though `fm.elf` was
+  packed and running. The default build now opens window 1 before its first
+  frame, labels its task button `Files`, and keeps keyboard focus on the
+  terminal. `tools/check-live-input.sh` requires both
+  `compositor: window 1 launched` and `task 9: fm: listing ok`, so packing the
+  app without showing it fails. Proof images still omit `show-files` and keep
+  `0xd616ad79aaefb099`, `0x6d66e82d0f2d6fb8`, and
+  `0x78ebd6d359914da7`. See
+  [ADR 0047](docs/adr/0047-the-default-desktop-opens-the-file-manager.md).
 
 - **The image a person boots replayed the boot proof's script at them** (F8).
   Every build served the scripted mouse session (the window dragged, minimized,

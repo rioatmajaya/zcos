@@ -1,6 +1,6 @@
 # 0045 — The default image ships the apps a person can test
 
-- **Status:** accepted
+- **Status:** accepted, partly superseded by 0047
 - **Date:** 2026-10-22
 - **Affects:** `tools/build-efi.sh`, `tools/run-qemu.sh`,
   `tools/check-live-input.sh`, CI, README, F8h

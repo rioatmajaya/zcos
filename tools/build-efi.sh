@@ -5,9 +5,10 @@
 # Usage: tools/build-efi.sh [--test | --test-close | --fm]
 #   (no flag)      build build/zcos.img, the image a person boots: loader,
 #                  kernel, user tasks, and the file manager. The kernel has
-#                  fm-proof but no qemu-exit, so the desktop starts idle and a
-#                  launcher click opens the file-manager window. This is the
-#                  human-testable image; no extra run flag is needed.
+#                  fm-proof but no qemu-exit, and the compositor has show-files,
+#                  so the terminal and the file manager are both on screen from
+#                  the first frame. This is the human-testable image; no extra
+#                  run flag is needed.
 #   --test         build build/zcos-test.img with qemu-exit for
 #                  tools/run-qemu.sh --test. It keeps the single-window proof:
 #                  window 1 runs the idle win.elf client, so the scripted frame
@@ -37,11 +38,13 @@ esp_size_mib=4
 # `qemu-exit` belongs to both binaries; `close-proof` and `fm-proof` only to the
 # kernel, which owns the scripted session. `fm-proof` makes the kernel select
 # `fm.elf` as window 1's client and serve the launch suffix; the client itself is
-# the separate `zc-fm` binary. The default image includes `fm.elf` and starts it
-# as window 1's client; the scripted --test images deliberately keep `win.elf` so
-# their single-window frame remains byte-identical.
+# the separate `zc-fm` binary. The default image includes `fm.elf`, starts it as
+# window 1's client, and enables `show-files` so the compositor opens that window
+# before the first frame. The scripted --test images deliberately keep `win.elf`
+# and leave `show-files` off, so their single-window frame remains byte-identical.
 loader_features=""
-kernel_features="--features fm-proof"
+kernel_features="--features fm-proof,show-files"
+compositor_features="--features show-files"
 image=build/zcos.img
 include_fm=1
 
@@ -49,6 +52,7 @@ case "${1:-}" in
     --test)
         loader_features="--features qemu-exit"
         kernel_features="--features qemu-exit"
+        compositor_features=""
         # The scripted single-window proof gets its own image, like the close
         # and two-window proofs, so it can never leave a test kernel where the
         # next `tools/run-qemu.sh` expects the human-testable desktop.
@@ -58,6 +62,7 @@ case "${1:-}" in
     --test-close)
         loader_features="--features qemu-exit"
         kernel_features="--features qemu-exit,close-proof"
+        compositor_features=""
         # Its own image, so this CI-only variant can never overwrite the one a
         # person boots. Sharing a path meant the last build won: a CI close run
         # left `build/zcos.img` holding the close-proof kernel, and the next
@@ -68,6 +73,7 @@ case "${1:-}" in
     --fm)
         loader_features="--features qemu-exit"
         kernel_features="--features qemu-exit,fm-proof"
+        compositor_features=""
         # Its own image and its own CI log, for the same reason the close proof
         # has one: the shipped human image starts idle, and this one runs the
         # scripted two-window proof.
@@ -124,8 +130,9 @@ cargo build --manifest-path user/zc-consumer/Cargo.toml \
     --target "$none_target" --target-dir target --release
 cargo build --manifest-path user/zc-shell/Cargo.toml \
     --target "$none_target" --target-dir target --release
+# shellcheck disable=SC2086
 cargo build --manifest-path user/zcompositor/Cargo.toml \
-    --target "$none_target" --target-dir target --release
+    --target "$none_target" --target-dir target --release $compositor_features
 cargo build --manifest-path user/zc-blk/Cargo.toml \
     --target "$none_target" --target-dir target --release
 cargo build --manifest-path user/zc-kbd/Cargo.toml \

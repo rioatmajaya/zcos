@@ -3,8 +3,8 @@
 #
 # Usage: tools/run-qemu.sh [--test | --test-close | --fm]
 #   (no flag)      boot build/zcos.img interactively. This is the image a person
-#                  tests: an idle desktop with the terminal on screen and the
-#                  file manager one launcher click away.
+#                  tests: an idle desktop with both the terminal and the file
+#                  manager on screen from the first frame.
 #   --test         run headless with isa-debug-exit and return the emulator's
 #                  status, for automated boot checks. Requires an image built
 #                  with tools/build-efi.sh --test. Leaves the window on screen at

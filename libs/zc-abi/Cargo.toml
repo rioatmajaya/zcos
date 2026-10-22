@@ -6,5 +6,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Label the second task button "Files" for the human image. Proof builds leave
+# this off so their recorded frames keep the original "Terminal 2" label.
+show-files = []
+
 [lints]
 workspace = true

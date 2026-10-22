@@ -218,19 +218,21 @@ keyboard sessions (the window dragging itself, the terminal typing
 `help`/`cat`/`ls`) belong to the
 automated boot proofs and run **only in the CI builds** (`--test`,
 `--test-close`, and `--fm`), whose kernel arms them. The image you boot serves no
-script, so nothing else moves on its own — see
+script, so no proof input replays; the only startup action is the file manager
+opening before the first frame — see
 [ADR 0042](docs/adr/0042-the-proof-scripts-belong-to-the-test-build.md).
 
-The default image includes the file manager. Click the `ZC` launcher in the
-top-left taskbar to open it. A directory click enters that directory; a first
-click on a file selects it, and a second click opens a preview read through the
-VFS; `..` or Backspace walks back up. The same clicks are proved headlessly by
-`--fm`, but you can try them here without any extra flag — see
-[ADR 0045](docs/adr/0045-the-default-image-ships-the-apps-a-person-can-test.md).
+The default image opens with two windows: the terminal and **Files**. The file
+manager is already listing `/`; no launcher click is needed. A directory click
+enters that directory; a first click on a file selects it, and a second click
+opens a preview read through the VFS; `..` or Backspace walks back up. The same
+clicks are proved headlessly by `--fm`, but you can try them here without any
+extra flag — see
+[ADR 0047](docs/adr/0047-the-default-desktop-opens-the-file-manager.md).
 
-The terminal window is **on screen** and every task is running, so you can move
-the pointer, drag the window, click its decorations, type into the window, and
-use the serial shell on the QEMU terminal (`help`, `cat`, `ls`, `stat`, `write`,
+Both windows are **on screen** and every task is running, so you can move the
+pointer, drag a window, click its decorations, type into the terminal, and use
+the serial shell on the QEMU terminal (`help`, `cat`, `ls`, `stat`, `write`,
 `tmp`, `chmod`, `poweroff`, `exit` — listed in `tools/boot-script.txt`).
 
 A normal build never arms the task watchdog, so the machine stays up

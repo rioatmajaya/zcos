@@ -31,6 +31,11 @@ close-proof = []
 # frame is the single-window one and its checksum never moves; the `--fm` build
 # turns it on to prove two windows end to end.
 fm-proof = []
+# Start the human image with the file manager already open as window 1. The
+# compositor launches it before the first frame, and the kernel seeds its own
+# window machine with the same two windows and keeps the terminal focused.
+# Proof builds leave this off so their recorded frames stay byte-identical.
+show-files = ["zc-abi/show-files"]
 
 [lints]
 workspace = true

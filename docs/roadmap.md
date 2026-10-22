@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 7 grants`, `task 6: devmgr: blk published`, `dma: window coherent ok` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–7, F8e-1–4, F8h-0/0b/1a/1b/1c-1/1c-2/1c-3/1c-4/1c-5, F8h-2, live-input check, F8g-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: font vfs ok`; `compositor: font vfs ok`; `font: vfs ok`; `client: window painted`; `client: vfs ok`; `client: pointer ok`; `client: click ok`; `client: ls ok`; `wm: window mapped`; `wm: pointer routed`; `wm: click ok`; `wm: ls ok`; `task 2: data/`; `task 2: kbd`; `task 2: probe`; `win1 entry`; `task 9: client: window 1 idle`; `compositor: window 1 launched` (fm run); `task 9: fm: ready` (default/fm run); `fm: listing ok` (fm run); `task 9: fm: pointer ok` (fm run); `task 9: fm: open ok` (fm run); `task 9: fm: preview ok` (fm run); `fm: open ok` (fm run); `fm: preview ok` (fm run); `clock: rtc ok` (default run); `compositor: clock live` (default run); `compositor: clock tick` (default run); `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed` (close run); `compositor: window erased` (close run); `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui/session/vfs/fm host tests pass; `zc-storage` zcfs read_dir tests pass |
+| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–7, F8e-1–4, F8h-0/0b/1a/1b/1c-1/1c-2/1c-3/1c-4/1c-5/1c-6, F8h-2, live-input check, F8g-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: font vfs ok`; `compositor: font vfs ok`; `font: vfs ok`; `client: window painted`; `client: vfs ok`; `client: pointer ok`; `client: click ok`; `client: ls ok`; `wm: window mapped`; `wm: pointer routed`; `wm: click ok`; `wm: ls ok`; `task 2: data/`; `task 2: kbd`; `task 2: probe`; `win1 entry`; `task 9: client: window 1 idle`; `compositor: window 1 launched` (default/fm run); `task 9: fm: ready` (default/fm run); `task 9: fm: listing ok` (default/fm run); `fm: listing ok` (fm run); `task 9: fm: pointer ok` (fm run); `task 9: fm: open ok` (fm run); `task 9: fm: preview ok` (fm run); `fm: open ok` (fm run); `fm: preview ok` (fm run); `clock: rtc ok` (default run); `compositor: clock live` (default run); `compositor: clock tick` (default run); `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed` (close run); `compositor: window erased` (close run); `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui/session/vfs/fm host tests pass; `zc-storage` zcfs read_dir tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -913,6 +913,19 @@ full browser. Note them as follow-ups, do not build them here.
         now fails unless it logs `task 9: fm: ready`, so the human-testable
         image cannot silently omit the app. See
         [`adr/0045`](adr/0045-the-default-image-ships-the-apps-a-person-can-test.md).
+      - [x] F8h-1c-6: the default desktop opens the file manager. The plain
+        build enables a `show-files` feature in the compositor and the kernel;
+        the compositor launches window 1 before its first frame, while the
+        kernel seeds the same two windows in its own `Wm` and keeps window 0
+        focused so typing still reaches the terminal. The task button reads
+        `Files` instead of `Terminal 2`. The launch path is bounded to the two
+        window-client tasks, so a second launcher press cannot add a ghost
+        window. Proof builds leave the feature off and keep
+        `0xd616ad79aaefb099`, `0x6d66e82d0f2d6fb8`, and
+        `0x78ebd6d359914da7`. `tools/check-live-input.sh` now requires
+        `compositor: window 1 launched` and `task 9: fm: listing ok` on the
+        default image. See
+        [`adr/0047`](adr/0047-the-default-desktop-opens-the-file-manager.md).
       - [x] F8h-2: the taskbar clock tells the real time. `SYS_CLOCK` (38) returns
         one packed reading — hour, minute, second, plus a live bit — and the
         kernel reads the CMOS RTC through host-tested BCD/binary and 12/24-hour
@@ -1104,6 +1117,15 @@ full browser. Note them as follow-ups, do not build them here.
   navigation, and preview work; the default image is the same app through live
   input. See
   [`adr/0045`](adr/0045-the-default-image-ships-the-apps-a-person-can-test.md).
+- The default desktop opens the file manager (F8h-1c-6): a plain
+  `tools/build-efi.sh` boots with both `Terminal` and `Files` on screen from the
+  first frame. The log contains `compositor: window 1 launched` and
+  `task 9: fm: listing ok`, and `tools/check-live-input.sh` requires both, so a
+  build that merely packs `fm.elf` without opening it fails. The terminal keeps
+  keyboard focus. The `--test`, `--test-close`, and `--fm` images leave
+  `show-files` off and retain their recorded checksums; `--fm` still proves the
+  scripted launcher, navigation, and preview. See
+  [`adr/0047`](adr/0047-the-default-desktop-opens-the-file-manager.md).
 - The taskbar clock is live (F8h-2): the default image logs `clock: rtc ok`,
   `compositor: clock live`, and `compositor: clock tick`; its taskbar shows
   `HH:MM:SS`. `tools/check-live-input.sh` takes two idle dumps two seconds

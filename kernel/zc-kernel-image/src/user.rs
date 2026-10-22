@@ -2135,8 +2135,9 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             // Only the automated test builds serve it (see `scripted_session`):
             // `close-proof` serves the whole script and ends window 0's session;
             // `fm-proof` serves the launcher click that opens window 1; the plain
-            // `--test` build serves only the window-up prefix. The image a person
-            // boots serves none, so the desktop does not move on its own.
+            // `--test` build serves only the window-up prefix. The human image
+            // serves no script, but `show-files` opens the file manager before
+            // the first frame so the person sees the app without a hidden click.
             let step = if scripted_session() {
                 let variant =
                     script_variant(cfg!(feature = "close-proof"), cfg!(feature = "fm-proof"));
@@ -3106,9 +3107,29 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
         // The pointer starts at its fixed spot; the compositor and the frame
         // verifier both derive every later position from this one value.
         addr_of_mut!(CURSOR).write(zc_abi::cursor::Cursor::new(fb.width, fb.height));
-        // The window machine starts empty: it has no display size until the
-        // framebuffer is known, and its first real placement is the scripted
-        // second proof frame the compositor paints.
+        // The proof images start with an empty window machine: it has no
+        // display size until the framebuffer is known, and its first real
+        // placement is the scripted second proof frame the compositor paints.
+        //
+        // The human image instead starts with the terminal and the file manager
+        // already open. The compositor launches window 1 before its first frame;
+        // seeding the same two windows here keeps the authoritative machine in
+        // step, and focusing window 0 keeps typed input going to the terminal.
+        #[cfg(feature = "show-files")]
+        {
+            let mut wm = zc_abi::wm::Wm::new(
+                fb.width,
+                fb.height,
+                zc_abi::window_rect(zc_abi::FRAME_MOVED, fb.width, fb.height),
+            );
+            let _ = wm.add(
+                1,
+                zc_abi::window_rect_for(1, zc_abi::FRAME_INITIAL, fb.width, fb.height),
+            );
+            let _ = wm.focus(0);
+            addr_of_mut!(WM).write(wm);
+        }
+        #[cfg(not(feature = "show-files"))]
         addr_of_mut!(WM).write(zc_abi::wm::Wm::EMPTY);
     }
 
@@ -4574,7 +4595,11 @@ fn apply_report(buttons: u8, dx: i8, dy: i8) {
         // open the file manager with the same live report.
         if action.kind == zc_abi::wm::Kind::Launched {
             let id = wm.count() as u32;
-            if (id as usize) < zc_abi::wm::MAX_WINDOWS {
+            // Only the client tasks the kernel actually spawned can own a
+            // window. Without this bound, a second launcher press would add a
+            // ghost window on the kernel side that the compositor refuses to
+            // open, and the two input machines would disagree.
+            if (id as usize) < service::WINDOW_TASKS {
                 let _ = wm.add(
                     id,
                     zc_abi::window_rect_for(id, zc_abi::FRAME_INITIAL, info.width, info.height),

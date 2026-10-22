@@ -161,12 +161,14 @@ until grep -aq "compositor: cursor ok" "$tmp/serial.log" 2>/dev/null; do
 done
 sleep 2
 
-# The image a person boots must contain the apps the roadmap just added, not
-# only the ones a special CI image proves. `fm.elf` is packed into this image and
-# the kernel starts it as window 1's client; `fm: ready` is that task running.
-# The scripted `--fm` boot proves the launcher and the window itself; this check
-# makes sure the human-testable image is not missing the binary.
-for marker in "task 9: fm: ready"; do
+# The image a person boots must show the apps the roadmap just added, not only
+# the ones a special CI image proves. `fm.elf` is packed into this image and the
+# compositor opens it as window 1 before the first frame; `fm: ready` is that
+# task running, `window 1 launched` is the compositor actually opening it, and
+# `fm: listing ok` is the file manager painting its first directory. The
+# scripted `--fm` boot still proves the launcher, navigation, and preview; this
+# check makes sure the human-testable image neither omits nor hides the app.
+for marker in "task 9: fm: ready" "compositor: window 1 launched" "task 9: fm: listing ok"; do
     if ! grep -aq "$marker" "$tmp/serial.log"; then
         echo "error: the human-testable image is missing '$marker'" >&2
         echo "       it must include the file manager, not only the CI proof image" >&2

@@ -51,8 +51,9 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0042](0042-the-proof-scripts-belong-to-the-test-build.md) | The proof scripts belong to the test build | Accepted |
 | [0043](0043-the-file-manager-navigates-by-proof.md) | The file manager navigates by proof | Accepted, partly superseded by 0045 |
 | [0044](0044-the-file-manager-opens-a-file-by-proof.md) | The file manager opens a file by proof | Accepted, partly superseded by 0045 |
-| [0045](0045-the-default-image-ships-the-apps-a-person-can-test.md) | The default image ships the apps a person can test | Accepted |
+| [0045](0045-the-default-image-ships-the-apps-a-person-can-test.md) | The default image ships the apps a person can test | Accepted, partly superseded by 0047 |
 | [0046](0046-the-taskbar-clock-is-live.md) | The taskbar clock is live | Accepted |
+| [0047](0047-the-default-desktop-opens-the-file-manager.md) | The default desktop opens the file manager | Accepted |
 
 ## Adding a decision
 

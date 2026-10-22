@@ -386,8 +386,13 @@ pub const MAX_TASK_BUTTONS: usize = 4;
 /// Labels for the task buttons, in registration order.
 ///
 /// Fixed strings keep the panel deterministic for the frame checksum. They name
-/// the window's role, not its client binary: F8h-1b runs a second terminal,
-/// F8h-2 replaces it with the file manager and changes only this table.
+/// the window's role, not its client binary. The human image opens the file
+/// manager as window 1 and labels its button "Files"; proof builds keep the
+/// historical "Terminal 2" label so their recorded frames do not move.
+#[cfg(feature = "show-files")]
+const TASK_LABELS: [&str; MAX_TASK_BUTTONS] = ["Terminal", "Files", "App 3", "App 4"];
+/// Labels for the task buttons in proof frames.
+#[cfg(not(feature = "show-files"))]
 const TASK_LABELS: [&str; MAX_TASK_BUTTONS] = ["Terminal", "Terminal 2", "App 3", "App 4"];
 
 /// Returns the label for the task button at `index`.
