@@ -22,15 +22,15 @@
 #![allow(unsafe_code)]
 
 use zc_abi::{
-    Cursor, DamageList, FONT_LEN, FONT_PATH, FRAME_INITIAL, FRAME_MOVED, FramebufferInfo, Font,
-    IPC_WM, IPC_WM_REPLY, Kind, PixelFormat, Rect, SurfaceInfo, WM_ACK, WM_DONE, Wm, encode,
-    pixel_at, pixel_at_with_window_count, window_rect, window_rect_for, wm_assign, wm_reply_kind,
-    wm_reply_window,
+    CLOCK_LIVE, Clock, Cursor, DamageList, FONT_LEN, FONT_PATH, FRAME_INITIAL, FRAME_MOVED,
+    FramebufferInfo, Font, IPC_WM, IPC_WM_REPLY, Kind, PixelFormat, Rect, SurfaceInfo, WM_ACK,
+    WM_DONE, WM_TICK, Wm, encode, panel_height, pixel_at, pixel_at_with_window_count_clock,
+    window_rect, window_rect_for, wm_assign, wm_reply_kind, wm_reply_window,
 };
 use zc_ui::Pointer;
 use zc_user::{
-    cap_delegate, close, framebuffer_info, log, open, read, recv_from, send_to, surface_create,
-    surface_destroy, surface_map, task_exit, window_close,
+    cap_delegate, clock, close, framebuffer_info, log, open, read, recv_from, send_to,
+    surface_create, surface_destroy, surface_map, task_exit, window_close,
 };
 
 /// Damage rectangles the compositor tracks before collapsing to a full repaint.
@@ -119,6 +119,20 @@ fn load_font() -> Font<'static> {
     Font::embedded()
 }
 
+/// Reads the wall clock and whether it came from the RTC.
+///
+/// Proof builds return the fixed `12:00` reading with the live bit clear, so
+/// the taskbar renders exactly the label their checksums cover. A malformed
+/// word also falls back to the fixed reading rather than showing a bogus time.
+fn read_clock() -> (Clock, bool) {
+    let word = clock();
+    let live = word & CLOCK_LIVE != 0;
+    match Clock::from_word(word) {
+        Some(clock) => (clock, live),
+        None => (Clock::PROOF, false),
+    }
+}
+
 /// Task entry point; the kernel provides a fresh user stack.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
@@ -139,6 +153,15 @@ pub unsafe extern "C" fn _start() -> ! {
     // The canonical font, loaded once: every label below renders from the
     // initramfs asset the client and the kernel verifier load too.
     let font = load_font();
+    // The taskbar clock. The interactive image gets a live RTC reading and
+    // shows seconds; a scripted proof build gets the fixed `12:00` label, so
+    // its taskbar pixels stay exactly what the recorded checksum expects.
+    let (mut clock_value, clock_live) = read_clock();
+    if clock_live {
+        log("compositor: clock live\n");
+    } else {
+        log("compositor: clock fixed\n");
+    }
     if pixel_at(font, format, 0, 0, width, height, FRAME_INITIAL).is_none() {
         log("compositor: unsupported format\n");
         let _ = send_to(IPC_WM as u64, 0);
@@ -207,7 +230,8 @@ pub unsafe extern "C" fn _start() -> ! {
     // Frame 0: paint the whole desktop into the back buffer, overlay the
     // client's window, draw the pointer, and present it.
     composite(
-        back, &fb, format, font, width, height, surface.stride, &wm, &layers, cursor, full,
+        back, &fb, format, font, width, height, surface.stride, &wm, &layers, cursor, clock_value,
+        clock_live, full,
     );
     log("compositor: frame 0 painted\n");
     log("wm: window mapped\n");
@@ -225,7 +249,8 @@ pub unsafe extern "C" fn _start() -> ! {
     while index < damage.len() {
         let rect = damage.rects()[index];
         composite(
-            back, &fb, format, font, width, height, surface.stride, &wm, &layers, cursor, rect,
+            back, &fb, format, font, width, height, surface.stride, &wm, &layers, cursor,
+            clock_value, clock_live, rect,
         );
         index += 1;
     }
@@ -298,7 +323,8 @@ pub unsafe extern "C" fn _start() -> ! {
             rect = rect.union(windows_before).union(windows_after);
         }
         composite(
-            back, &fb, format, font, width, height, surface.stride, &wm, &layers, cursor, rect,
+            back, &fb, format, font, width, height, surface.stride, &wm, &layers, cursor,
+            clock_value, clock_live, rect,
         );
     }
     log("compositor: cursor moved\n");
@@ -324,10 +350,13 @@ pub unsafe extern "C" fn _start() -> ! {
     // re-composite its window at its current position and flush only that
     // rectangle. The pointer is foreground, so before each frame the compositor
     // drains any mouse report the kernel routed and moves the sprite with damage
-    // tracking; a `WM_MOUSE` nudge (or any client frame) carries the wakeup.
-    // `WM_DONE` means that client's session is over, whichever way it ended: the
-    // shell exited, or the close glyph ended it. Only when every launched client
-    // has finished does the compositor erase closed windows and stop.
+    // tracking; a `WM_MOUSE` nudge (or any client frame) carries the wakeup. A
+    // live `WM_TICK` asks it to re-read the wall clock and repaint only the
+    // taskbar. `WM_DONE` means that client's session is over, whichever way it
+    // ended: the shell exited, or the close glyph ended it. Only when every
+    // launched client has finished does the compositor erase closed windows and
+    // stop.
+    let mut clock_tick_logged = false;
     while live > 0 {
         let message = recv_from(IPC_WM_REPLY as u64);
         // Poll the pointer first: the kernel applies the same reports it serves
@@ -349,11 +378,41 @@ pub unsafe extern "C" fn _start() -> ! {
                 rect = rect.union(windows_before).union(windows_after);
             }
             composite(
-                back, &fb, format, font, width, height, surface.stride, &wm, &layers, cursor, rect,
+                back, &fb, format, font, width, height, surface.stride, &wm, &layers, cursor,
+                clock_value, clock_live, rect,
             );
         }
         let kind = wm_reply_kind(message);
         let from = wm_reply_window(message);
+        if kind == WM_TICK {
+            // Re-read the clock and repaint only the panel when the displayed
+            // second changed. The live image shows `HH:MM:SS`, so this is the
+            // path a person can watch advance without touching the machine.
+            let (next, live_reading) = read_clock();
+            if live_reading && next != clock_value {
+                clock_value = next;
+                composite(
+                    back,
+                    &fb,
+                    format,
+                    font,
+                    width,
+                    height,
+                    surface.stride,
+                    &wm,
+                    &layers,
+                    cursor,
+                    clock_value,
+                    clock_live,
+                    Rect::new(0, 0, width, panel_height(height)),
+                );
+                if !clock_tick_logged {
+                    log("compositor: clock tick\n");
+                    clock_tick_logged = true;
+                }
+            }
+            continue;
+        }
         if kind == WM_DONE {
             live -= 1;
             continue;
@@ -362,7 +421,8 @@ pub unsafe extern "C" fn _start() -> ! {
         // and flush. A `WM_MOUSE` nudge carries no window change of its own.
         let rect = wm.rect_of(from).unwrap_or(Rect::EMPTY);
         composite(
-            back, &fb, format, font, width, height, surface.stride, &wm, &layers, cursor, rect,
+            back, &fb, format, font, width, height, surface.stride, &wm, &layers, cursor,
+            clock_value, clock_live, rect,
         );
         if kind == WM_ACK {
             log("compositor: frame updated\n");
@@ -391,7 +451,7 @@ pub unsafe extern "C" fn _start() -> ! {
             let erased = wm.window_of(window_id).unwrap_or(Rect::EMPTY);
             composite(
                 back, &fb, format, font, width, height, surface.stride, &wm, &layers, cursor,
-                erased,
+                clock_value, clock_live, erased,
             );
             erased_any = true;
         }
@@ -521,6 +581,7 @@ fn paint_rect(
     height: u32,
     rect: Rect,
     windows: u32,
+    clock: &str,
 ) {
     let right = if rect.right() > width { width } else { rect.right() };
     let bottom = if rect.bottom() > height {
@@ -532,9 +593,17 @@ fn paint_rect(
     while y < bottom {
         let mut x = rect.x;
         while x < right {
-            if let Some(pixel) =
-                pixel_at_with_window_count(font, format, x, y, width, height, Rect::EMPTY, windows)
-            {
+            if let Some(pixel) = pixel_at_with_window_count_clock(
+                font,
+                format,
+                x,
+                y,
+                width,
+                height,
+                Rect::EMPTY,
+                windows,
+                clock,
+            ) {
                 // SAFETY: the kernel mapped `stride * height` pixels at `back`
                 // with user permissions and `rect` stays inside them.
                 unsafe {
@@ -690,13 +759,26 @@ fn composite(
     wm: &Wm,
     layers: &[Layer; MAX_WINDOWS],
     cursor: Cursor,
+    clock: Clock,
+    clock_live: bool,
     rect: Rect,
 ) {
     // The desktop (background + taskbar, one button per registered window) is
     // painted bare; every window's pixels are blitted over it in z-order, so a
     // window that moved leaves bare desktop where it used to be and its own
     // surface where it is now.
-    paint_rect(back, stride, format, font, width, height, rect, wm.count() as u32);
+    let label = clock.label(clock_live);
+    paint_rect(
+        back,
+        stride,
+        format,
+        font,
+        width,
+        height,
+        rect,
+        wm.count() as u32,
+        label.as_str(),
+    );
     // Bottom-first, the same order the painter lays the taskbar buttons out.
     let mut index = 0;
     while index < wm.z_len() {

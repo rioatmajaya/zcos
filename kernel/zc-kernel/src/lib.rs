@@ -28,6 +28,7 @@ pub mod mmio;
 pub mod pci;
 pub mod perms;
 pub mod ramfs;
+pub mod rtc;
 pub mod sched;
 pub mod service;
 pub mod surface;

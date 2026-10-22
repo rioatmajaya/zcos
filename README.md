@@ -127,9 +127,13 @@ the kernel replays the same script through the same state machine to verify the
 window — so dynamic client content stays a proof rather than a trusted claim.
 F8f adds the desktop chrome: a taskbar (launcher, focused task button, clock)
 and window decorations (minimize and close), deterministic and proven by the
-same checksum. F8d-3a makes the keyboard domain a persistent, supervised
-service: after its deliberate F6 fault `initd` revives it, and the revived run
-re-claims the sources and ports the fault revoked and serves input in an
+same checksum. F8h-2 makes that clock live: the kernel reads the CMOS RTC and
+serves it through `SYS_CLOCK`, the interactive taskbar shows `HH:MM:SS`, and a
+timer-driven `WM_TICK` repaints only the panel when the second changes. Proof
+builds keep the fixed `12:00` label and their checksums. F8d-3a makes the
+keyboard domain a persistent, supervised service: after its deliberate F6 fault
+`initd` revives it, and the revived run re-claims the sources and ports the
+fault revoked and serves input in an
 `irq_wait → drain → push` loop until `initd` stops it at shutdown, so a live
 driver no longer keeps the boot from finishing. F8d-3b wires that live keyboard
 to the window: the kernel routes PS/2 keyboard bytes to a per-window input
@@ -206,11 +210,15 @@ boot. The default build keeps `build/zcos.img` as the human-testable image.
 ### What an interactive boot shows
 
 `run-qemu.sh` starts an **idle desktop**: the window manager and the terminal sit
-still and respond only to your input. The scripted mouse and keyboard sessions
-(the window dragging itself, the terminal typing `help`/`cat`/`ls`) belong to the
+still and respond only to your input. The one thing that moves on its own is the
+taskbar clock, which shows live `HH:MM:SS` read from the CMOS RTC through
+[`SYS_CLOCK`](docs/specs/syscall-abi.md#clock) — see
+[ADR 0046](docs/adr/0046-the-taskbar-clock-is-live.md). The scripted mouse and
+keyboard sessions (the window dragging itself, the terminal typing
+`help`/`cat`/`ls`) belong to the
 automated boot proofs and run **only in the CI builds** (`--test`,
 `--test-close`, and `--fm`), whose kernel arms them. The image you boot serves no
-script, so nothing moves on its own — see
+script, so nothing else moves on its own — see
 [ADR 0042](docs/adr/0042-the-proof-scripts-belong-to-the-test-build.md).
 
 The default image includes the file manager. Click the `ZC` launcher in the
@@ -232,7 +240,8 @@ rather than hang it. See [ADR 0028](docs/adr/0028-boot-watchdog-only-in-test-bui
 Type `cat hello.txt` and press Enter, and the window reads that file back through
 the F7 VFS. That is not a scripted line — it is your keystrokes — and
 `tools/check-live-input.sh` proves it by typing into a running desktop and
-asserting the frame changed. Backspace works too.
+asserting the window changed, while comparing only the desktop below the live
+clock panel. Backspace works too.
 
 Type `poweroff` and the machine stops itself: it flushes `/data`, marks the
 volume clean through the ordinary unmount path, and writes ACPI S5 read from the

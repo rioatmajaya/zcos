@@ -237,6 +237,12 @@ jobs:
         ! grep -q "desktop checksum mismatch" build/boot.log
         ! grep -q "window placement mismatch" build/boot.log
         ! grep -q "fb: no window, placement skipped" build/boot.log
+        # The proof image keeps the fixed clock label (F8h-2, ADR 0046): the
+        # taskbar is byte-identical to the recorded frame, and a live reading
+        # here would silently change the checksum.
+        grep -q "clock: proof" build/boot.log
+        grep -q "compositor: clock fixed" build/boot.log
+        ! grep -q "compositor: clock tick" build/boot.log
         grep -q "fb: desktop checksum ok" build/boot.log
         grep -q "switches" build/boot.log
         grep -q "acpi: rsdp v2" build/boot.log
@@ -300,6 +306,9 @@ jobs:
         grep -q "task 3: compositor: font vfs ok" build/boot-close.log
         grep -q "font: vfs ok" build/boot-close.log
         ! grep -q "font embedded fallback" build/boot-close.log
+        grep -q "clock: proof" build/boot-close.log
+        grep -q "compositor: clock fixed" build/boot-close.log
+        ! grep -q "compositor: clock tick" build/boot-close.log
         grep -q "fb: desktop checksum ok" build/boot-close.log
         ! grep -q "cursor checksum mismatch" build/boot-close.log
         ! grep -q "desktop checksum mismatch" build/boot-close.log
@@ -348,6 +357,9 @@ jobs:
         # Both windows reach the content check: window 0 (terminal) and window 1
         # (file manager), so exactly two `wm: content ok` lines.
         test "$(grep -c 'wm: content ok' build/boot-fm.log)" -eq 2
+        grep -q "clock: proof" build/boot-fm.log
+        grep -q "compositor: clock fixed" build/boot-fm.log
+        ! grep -q "compositor: clock tick" build/boot-fm.log
         grep -q "fb: desktop checksum ok" build/boot-fm.log
         ! grep -q "fm window did not open hello.txt" build/boot-fm.log
         ! grep -q "fm window read no file" build/boot-fm.log

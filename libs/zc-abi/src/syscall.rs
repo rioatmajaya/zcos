@@ -173,6 +173,16 @@ pub const SYS_READDIR: u64 = 36;
 /// at spawn, so two instances of the same client binary need no compile-time
 /// configuration and cannot race for the same channel.
 pub const SYS_WINDOW_ID: u64 = 37;
+/// Reads the wall clock as one packed word: hour in bits 16..23, minute in
+/// 8..15, second in 0..7, and [`crate::CLOCK_LIVE`] set when the reading came
+/// from the RTC rather than the fixed proof clock.
+///
+/// The interactive image gets a live CMOS reading; `qemu-exit` proof builds
+/// return `12:00` with the source bit clear, so their taskbar pixels and frame
+/// checksums stay byte-identical. A caller decodes the word with
+/// [`crate::Clock::from_word`] and can test
+/// [`crate::CLOCK_LIVE`] to tell the two sources apart.
+pub const SYS_CLOCK: u64 = 38;
 
 /// Returned by `SYS_READDIR` when an entry was written into the buffer.
 pub const READDIR_ENTRY: u64 = 0;

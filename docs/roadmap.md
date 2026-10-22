@@ -42,7 +42,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 7 grants`, `task 6: devmgr: blk published`, `dma: window coherent ok` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7j done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch` |
-| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–7, F8e-1–4, F8h-0/0b/1a/1b/1c-1/1c-2/1c-3/1c-4/1c-5, live-input check, F8g-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: font vfs ok`; `compositor: font vfs ok`; `font: vfs ok`; `client: window painted`; `client: vfs ok`; `client: pointer ok`; `client: click ok`; `client: ls ok`; `wm: window mapped`; `wm: pointer routed`; `wm: click ok`; `wm: ls ok`; `task 2: data/`; `task 2: kbd`; `task 2: probe`; `win1 entry`; `task 9: client: window 1 idle`; `compositor: window 1 launched` (fm run); `task 9: fm: ready` (default/fm run); `fm: listing ok` (fm run); `task 9: fm: pointer ok` (fm run); `task 9: fm: open ok` (fm run); `task 9: fm: preview ok` (fm run); `fm: open ok` (fm run); `fm: preview ok` (fm run); `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed` (close run); `compositor: window erased` (close run); `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui/session/vfs/fm host tests pass; `zc-storage` zcfs read_dir tests pass |
+| **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–7, F8e-1–4, F8h-0/0b/1a/1b/1c-1/1c-2/1c-3/1c-4/1c-5, F8h-2, live-input check, F8g-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: font vfs ok`; `compositor: font vfs ok`; `font: vfs ok`; `client: window painted`; `client: vfs ok`; `client: pointer ok`; `client: click ok`; `client: ls ok`; `wm: window mapped`; `wm: pointer routed`; `wm: click ok`; `wm: ls ok`; `task 2: data/`; `task 2: kbd`; `task 2: probe`; `win1 entry`; `task 9: client: window 1 idle`; `compositor: window 1 launched` (fm run); `task 9: fm: ready` (default/fm run); `fm: listing ok` (fm run); `task 9: fm: pointer ok` (fm run); `task 9: fm: open ok` (fm run); `task 9: fm: preview ok` (fm run); `fm: open ok` (fm run); `fm: preview ok` (fm run); `clock: rtc ok` (default run); `compositor: clock live` (default run); `compositor: clock tick` (default run); `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed` (close run); `compositor: window erased` (close run); `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui/session/vfs/fm host tests pass; `zc-storage` zcfs read_dir tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
 `✅ done` means the pass criteria below run green in CI. `⚠️ partial` means
@@ -913,6 +913,19 @@ full browser. Note them as follow-ups, do not build them here.
         now fails unless it logs `task 9: fm: ready`, so the human-testable
         image cannot silently omit the app. See
         [`adr/0045`](adr/0045-the-default-image-ships-the-apps-a-person-can-test.md).
+      - [x] F8h-2: the taskbar clock tells the real time. `SYS_CLOCK` (38) returns
+        one packed reading — hour, minute, second, plus a live bit — and the
+        kernel reads the CMOS RTC through host-tested BCD/binary and 12/24-hour
+        decoding, rejecting torn or impossible readings. The default image
+        shows live `HH:MM:SS`; a timer nudge (`WM_TICK`) makes the compositor
+        re-read the clock and repaint only the 32px panel when the second
+        changes, so the desktop below it stays still. Proof builds substitute
+        `12:00` with the live bit clear and never receive a tick, so
+        `0xd616ad79aaefb099`, `0x6d66e82d0f2d6fb8`, and
+        `0x78ebd6d359914da7` are unchanged. `tools/check-live-input.sh` now
+        compares two idle dumps below the panel, requires the panel to advance,
+        and then requires typing to change the window. See
+        [`adr/0046`](adr/0046-the-taskbar-clock-is-live.md).
 - [ ] F8i: audio stack (virtio-snd first, then HD Audio) after the desktop is
       stable.
 - [ ] F8j: USB stack (xHCI) for keyboard, mouse, and mass storage.
@@ -1091,6 +1104,16 @@ full browser. Note them as follow-ups, do not build them here.
   navigation, and preview work; the default image is the same app through live
   input. See
   [`adr/0045`](adr/0045-the-default-image-ships-the-apps-a-person-can-test.md).
+- The taskbar clock is live (F8h-2): the default image logs `clock: rtc ok`,
+  `compositor: clock live`, and `compositor: clock tick`; its taskbar shows
+  `HH:MM:SS`. `tools/check-live-input.sh` takes two idle dumps two seconds
+  apart, proves the desktop below the 32px panel is byte-identical, and proves
+  the panel itself changed, so a frozen or absent clock fails. Typing must then
+  change the window below the panel. The proof images log `clock: proof` and
+  keep their exact `12:00` panel and all three recorded checksums. The kernel
+  tests cover BCD/binary, 12/24-hour, noon/midnight, and invalid fields; the
+  ABI tests cover word packing, the live bit, and label width. See
+  [`adr/0046`](adr/0046-the-taskbar-clock-is-live.md).
 - Clean shutdown: `power: halt clean`.
 - Audio plays a known tone and the driver reports no XRUN under a stress
   buffer: `snd: playback ok`.

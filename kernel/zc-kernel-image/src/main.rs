@@ -38,6 +38,7 @@ mod kbd;
 mod serial;
 mod idt;
 mod smp;
+mod time;
 mod user;
 mod zcfs_proxy;
 

@@ -282,6 +282,16 @@ interactive boot is not checksummed because it serves no script; the CI proof
 images keep the exact frames, and `tools/check-live-input.sh` separately asserts
 that the default image actually started `fm.elf`.
 
+The taskbar clock is the one part of the interactive desktop that moves without
+input. `SYS_CLOCK` (38) returns one packed hour/minute/second reading plus a live
+bit; the kernel reads the CMOS RTC through a host-tested decoder, and the
+compositor shows `HH:MM:SS`. The timer posts `WM_TICK`, and the compositor
+repaints only the 32px panel when the second changes, so the desktop below the
+panel remains stable. Proof builds return the fixed `12:00` with the live bit
+clear and are never nudged; `tools/check-live-input.sh` therefore compares idle
+frames below the panel and separately requires the panel to advance. See
+[ADR 0046](adr/0046-the-taskbar-clock-is-live.md).
+
 The window pixels remain proven, not trusted, but the proof splits by what is
 knowable. Outside the window the frame checksum recomputes `pixel_at` exactly.
 Inside the window the client's pixels are unknowable, so the checksum proves

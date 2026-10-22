@@ -18,20 +18,27 @@
 # How it decides
 # --------------
 # A screendump before and after typing is only meaningful if an untouched desktop
-# is itself stable. So the check runs a control first: two dumps taken with no
-# input must be byte-identical. Only then does a difference mean what it says.
+# is itself stable. The default image now has one deliberate exception: the
+# taskbar clock shows live `HH:MM:SS`, so the top panel must change while the
+# desktop below it stays still. The check runs a control first: two idle dumps
+# two seconds apart must agree below the 32px panel, and the panel must differ
+# (otherwise the clock is frozen). Only then does a difference below the panel
+# mean that typing reached the window.
 #
 # The check asserts:
 #   1. the human-testable image contains the file manager and starts its task,
-#   2. an idle desktop is stable (two idle dumps are identical),
-#   3. typing changes the frame (the window repainted on the keystrokes),
-#   4. the session is still healthy afterwards (no watchdog, no content or
+#   2. the live clock is actually live (`clock: rtc ok`, a clock tick marker,
+#      and panel pixels that change between two idle dumps),
+#   3. the desktop below the panel is stable while idle,
+#   4. typing changes the desktop below the panel (the window repainted),
+#   5. the session is still healthy afterwards (no watchdog, no content or
 #      checksum mismatch, still running).
 #
 # It deliberately does *not* assert the exact pixels of the typed line. That would
 # be a golden image: it would need editing for every future change to the
 # terminal's layout, and it would fail for reasons that have nothing to do with
-# whether input works. "Typing changed the screen" is the claim that was wrong.
+# whether input works. "Typing changed the screen" is the claim that was wrong,
+# and the clock only ever changes the panel it owns.
 
 set -eu
 
@@ -167,6 +174,39 @@ for marker in "task 9: fm: ready"; do
     fi
 done
 
+# The default image must prove the clock path, not only have a clock-shaped
+# label. A proof image is the one exception: it must keep the fixed reading so
+# its recorded checksum stays exact.
+if [ "$image" = "build/zcos.img" ]; then
+    clock=live
+    for marker in "clock: rtc ok" "compositor: clock live"; do
+        if ! grep -aq "$marker" "$tmp/serial.log"; then
+            echo "error: the live clock is missing '$marker'" >&2
+            exit 1
+        fi
+    done
+    # Wait for the first real tick instead of racing a fixed sleep. The timer
+    # nudges the compositor every ~250ms; the compositor logs this marker once,
+    # when the displayed second actually changes.
+    tick_waited=0
+    until grep -aq "compositor: clock tick" "$tmp/serial.log" 2>/dev/null; do
+        if [ "$tick_waited" -ge 10 ]; then
+            echo "error: the live clock never logged a tick" >&2
+            exit 1
+        fi
+        sleep 1
+        tick_waited=$((tick_waited + 1))
+    done
+else
+    clock=fixed
+    for marker in "clock: proof" "compositor: clock fixed"; do
+        if ! grep -aq "$marker" "$tmp/serial.log"; then
+            echo "error: the proof image is missing '$marker'" >&2
+            exit 1
+        fi
+    done
+fi
+
 shot() {
     rm -f "$tmp/frame.ppm"
     mon "screendump $tmp/frame.ppm" >/dev/null
@@ -181,16 +221,77 @@ shot() {
     done
 }
 
-echo "== control: two idle dumps must be identical =="
+# Compares two PPM dumps while ignoring the live taskbar clock.
+#
+# Usage: compare_frames idle|typed live|fixed a.ppm b.ppm
+#
+# `idle` requires the desktop below the 32px panel to be identical; when the
+# clock is live it also requires the panel to differ, otherwise the clock is
+# frozen. `typed` requires the desktop below the panel to differ. The panel is
+# never part of the typed comparison, so a ticking clock can neither hide nor
+# create a keyboard repaint.
+compare_frames() {
+    python3 - "$1" "$2" "$3" "$4" <<'PY'
+import sys
+
+mode, clock, first, second = sys.argv[1:]
+
+def read_ppm(path):
+    with open(path, "rb") as handle:
+        magic = handle.readline().strip()
+        if magic != b"P6":
+            sys.exit(f"{path}: not a binary PPM (got {magic!r})")
+        line = handle.readline()
+        while line.startswith(b"#"):
+            line = handle.readline()
+        width, height = map(int, line.split())
+        maximum = int(handle.readline())
+        if maximum != 255:
+            sys.exit(f"{path}: unsupported maximum {maximum}")
+        pixels = handle.read()
+    if len(pixels) != width * height * 3:
+        sys.exit(f"{path}: truncated pixel data")
+    return width, height, pixels
+
+aw, ah, a = read_ppm(first)
+bw, bh, b = read_ppm(second)
+if (aw, ah) != (bw, bh):
+    sys.exit(f"frame sizes differ: {aw}x{ah} vs {bw}x{bh}")
+
+panel_rows = min(32, ah)
+cut = panel_rows * aw * 3
+below_same = a[cut:] == b[cut:]
+panel_same = a[:cut] == b[:cut]
+
+if mode == "idle":
+    if not below_same:
+        sys.exit("idle desktop changed below the taskbar; something animates or drifts")
+    if clock == "live" and panel_same:
+        sys.exit("live clock panel did not change between idle dumps; the clock is frozen")
+elif mode == "typed":
+    if below_same:
+        sys.exit("typed input did not change the window below the taskbar")
+else:
+    sys.exit(f"unknown compare mode: {mode}")
+PY
+}
+
+echo "== control: idle desktop stable, live clock panel changing =="
 shot
 cp "$tmp/frame.ppm" "$tmp/idle_a.ppm"
+# Two seconds is enough for the displayed second to differ. The control does
+# not require the whole frame to match: the panel is the clock's own region.
+sleep 2
 shot
 cp "$tmp/frame.ppm" "$tmp/idle_b.ppm"
-if cmp -s "$tmp/idle_a.ppm" "$tmp/idle_b.ppm"; then
-    echo "   idle desktop is stable (good: a difference later means input caused it)"
+if compare_frames idle "$clock" "$tmp/idle_a.ppm" "$tmp/idle_b.ppm"; then
+    if [ "$clock" = "live" ]; then
+        echo "   desktop below the panel is stable; the clock panel advanced"
+    else
+        echo "   idle proof desktop is stable (good: a difference later means input caused it)"
+    fi
 else
-    echo "error: the idle desktop is not stable, so this check cannot conclude" >&2
-    echo "       anything: something animates or drifts on its own." >&2
+    echo "error: the idle control failed, so this check cannot conclude anything" >&2
     exit 1
 fi
 
@@ -204,13 +305,14 @@ done
 sleep 3
 
 shot
-if cmp -s "$tmp/idle_a.ppm" "$tmp/frame.ppm"; then
-    echo "error: the frame did not change after typing." >&2
-    echo "       The window did not repaint, so live keystrokes are NOT reaching" >&2
-    echo "       the client — which is exactly the claim this check exists for." >&2
+if compare_frames typed "$clock" "$tmp/idle_a.ppm" "$tmp/frame.ppm"; then
+    echo "   the window changed: typed input reached the client"
+else
+    echo "error: the window did not change after typing." >&2
+    echo "       Live keystrokes are NOT reaching the client — exactly the claim" >&2
+    echo "       this check exists for." >&2
     exit 1
 fi
-echo "   the frame changed: typed input reached the window"
 
 echo "== the session is still healthy =="
 for marker in "timed out" "mismatch" "error:"; do

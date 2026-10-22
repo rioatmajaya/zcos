@@ -52,6 +52,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0043](0043-the-file-manager-navigates-by-proof.md) | The file manager navigates by proof | Accepted, partly superseded by 0045 |
 | [0044](0044-the-file-manager-opens-a-file-by-proof.md) | The file manager opens a file by proof | Accepted, partly superseded by 0045 |
 | [0045](0045-the-default-image-ships-the-apps-a-person-can-test.md) | The default image ships the apps a person can test | Accepted |
+| [0046](0046-the-taskbar-clock-is-live.md) | The taskbar clock is live | Accepted |
 
 ## Adding a decision
 

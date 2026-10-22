@@ -50,7 +50,7 @@ other channel.
 | 3 | `IPC_FS_REPLY` | `zc-blk` → kernel proxy | reply word: `(seq << 32) \| status` |
 | 4 | `IPC_SUPERVISE` | kernel → `initd` | supervision event (below) |
 | 5 | `IPC_WM` (window 0) | compositor → window client | surface object id |
-| 6 | `IPC_WM_REPLY` | window client → compositor | `WM_ACK` or `WM_DONE`, window id in bits 32..47 |
+| 6 | `IPC_WM_REPLY` | window client / kernel → compositor | `WM_ACK`, `WM_DONE`, `WM_MOUSE`, or `WM_TICK`; window id in bits 32..47 |
 | 7 | `IPC_WM` (window 1) | compositor → window client | surface object id |
 
 Channels 2/3 carry only the opcode and sequence; the request arguments and
@@ -81,16 +81,19 @@ its own assignment channel: `wm_assign(window) = IPC_WM + 2*window`, so window 0
 listens on channel 5 and window 1 on channel 7, and two clients never race for
 one message. Replies share `IPC_WM_REPLY` (6) with the window id folded into
 bits 32..47 behind a `0x574D` magic (`wm_reply(kind, window)`), so the compositor
-routes an ack or done back to the client that sent it. Two sentinels are
+routes an ack or done back to the client that sent it. Four reply words are
 reserved:
 
 | Constant | Value | Meaning |
 |---|---|---|
 | `WM_ACK` | `0x574D_0000_0000_0001` | the client has repainted its surface |
 | `WM_DONE` | `0x574D_0000_0000_0002` | the client's session is over; composite the final frame and stop |
+| `WM_MOUSE` | `0x574D_0000_0000_0003` | the kernel has fresh pointer reports; drain `SYS_MOUSE_READ` |
+| `WM_TICK` | `0x574D_0000_0000_0004` | the wall clock may have advanced; refresh the taskbar panel |
 
-Both are distinct from every surface object id (`0x2000_0000 \| slot`) and from
-the factory (`0x2000_FFFF`), so a stray assignment can never be read as an ack.
+`WM_MOUSE` and `WM_TICK` name no window, so they carry id 0. All four are
+distinct from every surface object id (`0x2000_0000 \| slot`) and from the
+factory (`0x2000_FFFF`), so a stray assignment can never be read as an ack.
 The client maps the surface up front and every pre-handshake failure path sends
 object id `0`, so the compositor's blocking receive always resolves.
 

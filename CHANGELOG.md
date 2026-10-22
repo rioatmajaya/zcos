@@ -140,6 +140,17 @@ the close and `--fm` proofs keep their own paths and checksums;
 `tools/check-live-input.sh` now also fails unless the default image logs
 `task 9: fm: ready`. See
 [ADR 0045](docs/adr/0045-the-default-image-ships-the-apps-a-person-can-test.md).
+F8h-2 makes the taskbar clock live: `SYS_CLOCK` (38) returns a packed
+hour/minute/second reading plus a live bit, and the kernel reads the CMOS RTC
+through a pure, host-tested BCD/binary and 12/24-hour decoder. The interactive
+image shows `HH:MM:SS`; a new `WM_TICK` nudge from the timer makes the compositor
+re-read the clock and repaint only the 32px panel when the displayed second
+changes, leaving the desktop below it untouched. Proof builds return the fixed
+`12:00` with the live bit clear and are never nudged, so the three recorded
+checksums remain `0xd616ad79aaefb099`, `0x6d66e82d0f2d6fb8`, and
+`0x78ebd6d359914da7`. `tools/check-live-input.sh` now proves the panel advances
+while the desktop below stays stable, then proves typing changes that desktop.
+See [ADR 0046](docs/adr/0046-the-taskbar-clock-is-live.md).
 
 ### Fixed
 

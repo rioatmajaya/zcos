@@ -23,8 +23,8 @@ filesystem exchange page (see [`server-protocol.md`](server-protocol.md)).
 
 ## Syscall table
 
-Numbers are stable and never reused. `SYS_READDIR` (36) is the highest
-assigned number; 37 and above are rejected.
+Numbers are stable and never reused. `SYS_CLOCK` (38) is the highest
+assigned number; 39 and above are rejected.
 
 Two numbers are **declared but not yet implemented**: `SYS_YIELD` (0) and
 `SYS_MAP_FRAME` (4) are recognized by the dispatch table but have no handler, so
@@ -71,6 +71,23 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 35 | `SYS_WINDOW_READ` | — | packed `WindowEvent`, or `WINDOW_NO_EVENT` at end of session | `u64::MAX` |
 | 36 | `SYS_READDIR` | path ptr, length, entry index, `DirEntry` out ptr (`r10`) | 0 (`READDIR_ENTRY`) or 1 (`READDIR_END`) | `u64::MAX` |
 | 37 | `SYS_WINDOW_ID` | — | the caller's window id, or `u64::MAX` if it owns none | — |
+| 38 | `SYS_CLOCK` | — | packed hour/minute/second, plus `CLOCK_LIVE` when read from the RTC | — |
+
+### Clock
+
+`SYS_CLOCK` (38) returns one time-of-day reading packed into one word: hour in
+bits 16..23, minute in 8..15, and second in 0..7. Bit 63 is `CLOCK_LIVE`, set
+when the kernel read the CMOS RTC and clear when it substituted the fixed proof
+clock. `zc_abi::Clock::from_word` ignores the source bit;
+`zc_abi::CLOCK_LIVE` tests it.
+
+The interactive image reads the RTC, shows `HH:MM:SS`, and receives a
+`WM_TICK` from the timer so it can repaint the taskbar when the displayed second
+changes. A `qemu-exit` proof build returns `12:00` with the live bit clear and
+never receives a tick, so the proof frame's taskbar is exactly the fixed label
+its checksum was recorded with. A malformed or unavailable RTC falls back to
+that same fixed reading rather than inventing a time; the kernel logs
+`clock: rtc ok`, `clock: rtc unavailable`, or `clock: proof` once.
 
 ### Window identity
 

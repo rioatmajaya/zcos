@@ -11,6 +11,7 @@
 
 #![no_std]
 
+pub mod clock;
 pub mod cursor;
 pub mod desktop;
 pub mod fm;
@@ -39,6 +40,7 @@ pub use driver::{
     FS_STATUS_OK, FS_STATUS_TABLE_FULL, INFO_LEN, INFO_QUEUE0, INFO_QUEUE1, INFO_QUEUE2, INFO_VIRT,
     INPUT_RING_VIRT, IRQ_ANY, IRQ_KEYBOARD, IRQ_MOUSE, IRQ_SOURCES, PORT_BROKER_OBJECT, QUEUE_VIRT, port_cap,
 };
+pub use clock::{CLOCK_LIVE, Clock, ClockLabel};
 pub use fb::encode;
 pub use cursor::{
     BUTTON_LEFT, BUTTON_MIDDLE, BUTTON_RIGHT, Cursor, MOUSE_LAUNCH_SCRIPT, MOUSE_NO_REPORT,
@@ -48,14 +50,16 @@ pub use cursor::{
 pub use desktop::{
     DamageList, FRAME_INITIAL, FRAME_MOVED, HASH_OFFSET, HASH_PRIME, MAX_TASK_BUTTONS,
     PANEL_HEIGHT, Rect, TITLE_HEIGHT, color_at, color_at_with_window,
-    color_at_with_window_count, hash_step, launcher_button_rect, panel_color_at_count,
-    panel_height, pixel_at, pixel_at_with_window, pixel_at_with_window_count, task_button_rect,
-    task_button_rect_at, window_color_at, window_pixel_at, window_rect, window_rect_for,
+    color_at_with_window_count, color_at_with_window_count_clock, hash_step,
+    launcher_button_rect, panel_color_at_count, panel_color_at_count_clock, panel_height,
+    pixel_at, pixel_at_with_window, pixel_at_with_window_count,
+    pixel_at_with_window_count_clock, task_button_rect, task_button_rect_at, window_color_at,
+    window_pixel_at, window_rect, window_rect_for,
 };
 pub use font::{FONT_LEN, FONT_PATH, GLYPH_H, GLYPH_W, Font, glyph_bit, glyph_row, text_blend, text_width};
 pub use ipc::{
     IPC_CHANNELS, IPC_DATA, IPC_DISCOVERY, IPC_FS, IPC_FS_REPLY, IPC_SUPERVISE, IPC_WM,
-    IPC_WM_REPLY, MESSAGE_WORDS, Message, WM_ACK, WM_DONE, WM_MOUSE, wm_assign, wm_reply,
+    IPC_WM_REPLY, MESSAGE_WORDS, Message, WM_ACK, WM_DONE, WM_MOUSE, WM_TICK, wm_assign, wm_reply,
     wm_reply_kind, wm_reply_window,
 };
 pub use mmio::{
@@ -72,8 +76,9 @@ pub use surface::{
     SURFACE_SLOT_STRIDE, SURFACE_VIRT, SurfaceInfo, surface_cap,
 };
 pub use syscall::{
-    SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOSE, SYS_CREATE, SYS_FB_INFO, SYS_IRQ_CLAIM, SYS_IRQ_TEST,
-    SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_MOUNT, SYS_MMIO_MAP, SYS_MOUSE_READ, SYS_OPEN,
+    SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOCK, SYS_CLOSE, SYS_CREATE, SYS_FB_INFO, SYS_IRQ_CLAIM,
+    SYS_IRQ_TEST, SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_MOUNT, SYS_MMIO_MAP,
+    SYS_MOUSE_READ, SYS_OPEN,
     SYS_PORT_CLAIM,
     SYS_POWEROFF,
     SYS_READ,

@@ -344,8 +344,9 @@ const CLOCK_FG: (u8, u8, u8) = (170, 176, 186);
 
 /// The launcher button label.
 const LAUNCHER_LABEL: &str = "ZC";
-/// A fixed clock string. A live clock is a later step; a fixed value keeps the
-/// panel deterministic so the frame checksum covers it.
+/// The proof clock label. The interactive image passes the live `SYS_CLOCK`
+/// label instead; keeping the fixed fallback here means every existing proof
+/// frame still renders exactly the pixels it did before the clock was live.
 const CLOCK_LABEL: &str = "12:00";
 
 /// Vertical margin above and below the taskbar button band, clamped for short
@@ -434,7 +435,9 @@ pub const fn panel_color_at(font: Font<'_>, x: u32, y: u32, width: u32, height: 
 /// The launcher and clock never move; one task button is drawn per registered
 /// window, in registration order. `windows == 1` is pixel-identical to the
 /// single-window panel, so the existing proof frames are unchanged until a
-/// second window is actually added.
+/// second window is actually added. The clock label is the fixed proof label;
+/// the interactive compositor calls [`panel_color_at_count_clock`] with the
+/// live `SYS_CLOCK` label instead.
 #[must_use]
 pub const fn panel_color_at_count(
     font: Font<'_>,
@@ -443,6 +446,24 @@ pub const fn panel_color_at_count(
     width: u32,
     height: u32,
     windows: u32,
+) -> (u8, u8, u8) {
+    panel_color_at_count_clock(font, x, y, width, height, windows, CLOCK_LABEL)
+}
+
+/// Returns one taskbar pixel with an explicit clock label.
+///
+/// `clock` must be a short ASCII label (`HH:MM` or `HH:MM:SS`). The live image
+/// passes a label derived from `SYS_CLOCK`; proof builds keep the five-character
+/// `12:00` label so their recorded frame checksums do not move.
+#[must_use]
+pub const fn panel_color_at_count_clock(
+    font: Font<'_>,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    windows: u32,
+    clock: &str,
 ) -> (u8, u8, u8) {
     let panel = panel_height(height);
     if panel == 0 {
@@ -482,11 +503,11 @@ pub const fn panel_color_at_count(
         index += 1;
     }
     // Clock, right-aligned with an 8px margin.
-    let clock_w = text_width(CLOCK_LABEL);
+    let clock_w = text_width(clock);
     if width > clock_w + 8 {
         let clock_x = width - 8 - clock_w;
         if x >= clock_x && x < clock_x + clock_w {
-            return text_blend(font, CLOCK_LABEL, clock_x, ty, x, y, PANEL_BG, CLOCK_FG);
+            return text_blend(font, clock, clock_x, ty, x, y, PANEL_BG, CLOCK_FG);
         }
     }
     PANEL_BG
@@ -546,11 +567,31 @@ pub const fn color_at_with_window_count(
     window: Rect,
     windows: u32,
 ) -> (u8, u8, u8) {
+    color_at_with_window_count_clock(font, x, y, width, height, window, windows, CLOCK_LABEL)
+}
+
+/// Returns one desktop pixel with an explicit taskbar clock label.
+///
+/// This is the live-image counterpart of [`color_at_with_window_count`]: the
+/// gradient and window placeholder are identical, and only the taskbar label
+/// comes from the caller. The proof verifier keeps using the fixed-label
+/// wrapper, so its recomputation is unaffected by the passing wall clock.
+#[must_use]
+pub const fn color_at_with_window_count_clock(
+    font: Font<'_>,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    window: Rect,
+    windows: u32,
+    clock: &str,
+) -> (u8, u8, u8) {
     if window.contains(x, y) {
         return window_color_at(font, x - window.x, y - window.y, window.w, window.h);
     }
     if y < panel_height(height) {
-        return panel_color_at_count(font, x, y, width, height, windows);
+        return panel_color_at_count_clock(font, x, y, width, height, windows, clock);
     }
     // Background: a vertical/horizontal gradient, guarded for empty sizes.
     let r = if width == 0 {
@@ -609,6 +650,24 @@ pub const fn pixel_at_with_window_count(
     windows: u32,
 ) -> Option<u32> {
     let (r, g, b) = color_at_with_window_count(font, x, y, width, height, window, windows);
+    encode(format, r, g, b)
+}
+
+/// Encodes one desktop pixel with an explicit live taskbar clock label.
+#[must_use]
+pub const fn pixel_at_with_window_count_clock(
+    font: Font<'_>,
+    format: PixelFormat,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    window: Rect,
+    windows: u32,
+    clock: &str,
+) -> Option<u32> {
+    let (r, g, b) =
+        color_at_with_window_count_clock(font, x, y, width, height, window, windows, clock);
     encode(format, r, g, b)
 }
 
@@ -779,6 +838,94 @@ mod tests {
         assert!(saw_task, "task button not painted");
         assert!(saw_label, "button labels not painted");
         assert!(saw_bg, "panel background not painted");
+    }
+
+    #[test]
+    fn the_fixed_panel_is_the_explicit_proof_label() {
+        let (width, height) = (1280u32, 800u32);
+        let mut y = 0;
+        while y < panel_height(height) {
+            let mut x = 0;
+            while x < width {
+                assert_eq!(
+                    panel_color_at_count(Font::embedded(), x, y, width, height, 1),
+                    panel_color_at_count_clock(
+                        Font::embedded(),
+                        x,
+                        y,
+                        width,
+                        height,
+                        1,
+                        "12:00",
+                    )
+                );
+                x += 1;
+            }
+            y += 1;
+        }
+    }
+
+    #[test]
+    fn a_live_clock_changes_panel_pixels() {
+        let (width, height) = (1280u32, 800u32);
+        let mut changed = 0;
+        let mut y = 0;
+        while y < panel_height(height) {
+            let mut x = 0;
+            while x < width {
+                let fixed = panel_color_at_count(Font::embedded(), x, y, width, height, 1);
+                let live = panel_color_at_count_clock(
+                    Font::embedded(),
+                    x,
+                    y,
+                    width,
+                    height,
+                    1,
+                    "23:59:58",
+                );
+                if fixed != live {
+                    changed += 1;
+                }
+                x += 1;
+            }
+            y += 1;
+        }
+        assert!(changed > 0, "live clock label painted no pixels");
+    }
+
+    #[test]
+    fn a_live_clock_leaves_the_desktop_below_the_panel_alone() {
+        let (width, height) = (1280u32, 800u32);
+        let window = window_rect(FRAME_INITIAL, width, height);
+        let points = [
+            (0, panel_height(height)),
+            (width / 2, height / 2),
+            (width - 1, height - 1),
+            (10, 100),
+        ];
+        for (x, y) in points {
+            assert_eq!(
+                color_at_with_window_count(
+                    Font::embedded(),
+                    x,
+                    y,
+                    width,
+                    height,
+                    window,
+                    1
+                ),
+                color_at_with_window_count_clock(
+                    Font::embedded(),
+                    x,
+                    y,
+                    width,
+                    height,
+                    window,
+                    1,
+                    "23:59:58",
+                )
+            );
+        }
     }
 
     #[test]

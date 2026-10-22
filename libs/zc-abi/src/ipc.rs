@@ -85,8 +85,8 @@ pub const fn wm_reply_window(word: u64) -> u32 {
     ((word >> 32) & 0xffff) as u32
 }
 
-/// Returns the kind a reply word carries ([`WM_ACK`], [`WM_DONE`], or
-/// [`WM_MOUSE`]).
+/// Returns the kind a reply word carries ([`WM_ACK`], [`WM_DONE`], [`WM_MOUSE`],
+/// or [`WM_TICK`]).
 #[must_use]
 pub const fn wm_reply_kind(word: u64) -> u64 {
     word & 0xffff_0000_ffff_ffff
@@ -115,6 +115,15 @@ pub const WM_DONE: u64 = 0x574D_0000_0000_0002;
 /// report on receipt and moves the sprite, so the pointer tracks the hardware
 /// even when no window frame is in flight.
 pub const WM_MOUSE: u64 = 0x574D_0000_0000_0003;
+
+/// A kernel-to-compositor nudge that the wall clock may have advanced.
+///
+/// The interactive desktop shows a live `HH:MM:SS` taskbar clock, but a client
+/// may otherwise leave the compositor blocked in `recv_from` for seconds. The
+/// timer posts this word on the reply channel; the compositor reads `SYS_CLOCK`
+/// and repaints only the taskbar when the label changes. Scripted proof builds
+/// never receive it, because their taskbar must stay byte-identical.
+pub const WM_TICK: u64 = 0x574D_0000_0000_0004;
 
 /// A copied IPC message.
 ///
@@ -221,6 +230,10 @@ mod tests {
         assert_ne!(WM_MOUSE, WM_ACK);
         assert_ne!(WM_MOUSE, WM_DONE);
         assert_ne!(WM_MOUSE, u64::from(crate::surface::SURFACE_FACTORY));
+        assert_ne!(WM_TICK, WM_ACK);
+        assert_ne!(WM_TICK, WM_DONE);
+        assert_ne!(WM_TICK, WM_MOUSE);
+        assert_ne!(WM_TICK, u64::from(crate::surface::SURFACE_FACTORY));
     }
 
     #[test]
@@ -233,5 +246,6 @@ mod tests {
         assert_eq!(wm_reply_kind(wm_reply(WM_DONE, 3)), WM_DONE);
         // A nudge names no window but must still decode as itself.
         assert_eq!(wm_reply_kind(WM_MOUSE), WM_MOUSE);
+        assert_eq!(wm_reply_kind(WM_TICK), WM_TICK);
     }
 }

@@ -11,7 +11,8 @@ use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 
 use zc_abi::{
     BootInfo, IPC_SUPERVISE, IPC_WM_REPLY, MMIO_SLOT_STRIDE, MMIO_VIRT, SERVICE_KIND_EXIT,
-    SERVICE_KIND_FAULT, SURFACE_SLOT_STRIDE, SURFACE_VIRT, WM_MOUSE, service_cap, supervise_event,
+    SERVICE_KIND_FAULT, SURFACE_SLOT_STRIDE, SURFACE_VIRT, WM_MOUSE, WM_TICK, service_cap,
+    supervise_event,
 };
 use zc_kernel::capability::{Capability, CapabilityTable, Rights};
 use zc_kernel::gdt::{USER_CS, USER_RFLAGS, USER_SS};
@@ -1986,6 +1987,15 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             regs.set_result(window_of_task(tasks.current()).map_or(u64::MAX, u64::from));
             0
         }
+        Ok(Action::Clock) => {
+            // The wall clock is one packed word. Proof builds substitute the
+            // fixed label so their taskbar checksum stays byte-identical; the
+            // interactive image reads the CMOS RTC, and the live bit tells the
+            // compositor which form it is showing.
+            let (clock, live) = crate::time::wall_clock(scripted_session());
+            regs.set_result(clock.to_word(live));
+            0
+        }
         Ok(Action::WindowRead) => {
             // The stream belongs to the window's client: it is derived from the
             // focused window, and another task draining it would take events
@@ -2306,6 +2316,13 @@ pub unsafe extern "C" fn sched_tick(regs: *mut SyscallRegs, frame: *mut IrqFrame
     }
     if tasks.alive_count() == 0 {
         return;
+    }
+    // The interactive desktop's taskbar clock is live. A client repaint does
+    // not happen every second, so the timer nudges the compositor; scripted
+    // proof builds keep the fixed clock and are never nudged, leaving their
+    // transcripts and final frame exactly where they were.
+    if !scripted_session() && crate::apic::ticks() % CLOCK_NOTIFY_TICKS == 0 {
+        notify_clock(tasks);
     }
     // A tick that landed inside a handler interrupted ring 0, so this frame is
     // a kernel frame pointing into the handler's interrupt stack. Saving it
@@ -4420,6 +4437,36 @@ fn drain_domain_input() -> bool {
         push_window_input(&keyboard[..keys]);
     }
     frames > 0
+}
+
+/// How often the interactive image nudges the compositor to re-read the clock.
+///
+/// The APIC timer is calibrated to roughly one millisecond per tick. A quarter
+/// of a second is frequent enough that the displayed second never lags visibly,
+/// while the nudge is coalesced and skipped whenever the reply channel already
+/// holds a message, so a busy desktop cannot be flooded.
+const CLOCK_NOTIFY_TICKS: u64 = 250;
+
+/// Wakes the compositor so the live taskbar clock can advance.
+///
+/// The compositor otherwise blocks in `recv_from(IPC_WM_REPLY)` until a client
+/// paints or the pointer moves. A one-word `WM_TICK` makes it read `SYS_CLOCK`
+/// and repaint only the taskbar when the label changed. Like [`notify_mouse`],
+/// the message is only queued when the channel is empty; a tick that arrives
+/// while a client frame is pending is dropped, and the next one catches up.
+fn notify_clock(tasks: &mut TaskTable<TASK_COUNT>) {
+    // SAFETY: channel 6 is always in range; the compositor owns it.
+    unsafe {
+        if let Some(endpoint) = endpoint_for(IPC_WM_REPLY as u64) {
+            if endpoint.len() == 0 {
+                if let Some(message) = zc_abi::Message::from_words(&[WM_TICK]) {
+                    if endpoint.send(message).is_ok() {
+                        tasks.unblock_all();
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Wakes the compositor because fresh mouse movement is waiting.

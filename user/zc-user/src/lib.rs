@@ -13,7 +13,7 @@ use core::arch::asm;
 pub use zc_abi::{
     DIRENT_LEN, DirEntry, FS_ID_ZCFS, FS_OP_STOP, IPC_FS, IPC_SUPERVISE, IPC_WM, IPC_WM_REPLY,
     KIND_CHR, KIND_DIR, KIND_FILE, READDIR_END, READDIR_ENTRY, SERVICE_KIND_EXIT,
-    SERVICE_KIND_FAULT, SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOSE,
+    SERVICE_KIND_FAULT, SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOCK, SYS_CLOSE,
     SYS_CREATE, SYS_FB_INFO, SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME,
     SYS_MMIO_MAP, SYS_MOUNT, SYS_MOUSE_READ, SYS_OPEN, SYS_PORT_CLAIM, SYS_POWEROFF, SYS_READ,
     SYS_READDIR, SYS_RECV,
@@ -265,6 +265,17 @@ pub fn window_read() -> u64 {
 #[inline(always)]
 pub fn window_id() -> u64 {
     syscall0(SYS_WINDOW_ID)
+}
+
+/// Reads the wall clock as one packed word.
+///
+/// Decode it with [`zc_abi::Clock::from_word`]; bit [`zc_abi::CLOCK_LIVE`] is
+/// set when the kernel read the RTC rather than substituting the fixed proof
+/// clock. A scripted boot test therefore sees `12:00` with the bit clear and
+/// its taskbar checksum does not move.
+#[inline(always)]
+pub fn clock() -> u64 {
+    syscall0(SYS_CLOCK)
 }
 
 /// Ends `window`'s input session, so that client blocked in [`window_read`]
