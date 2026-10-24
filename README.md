@@ -288,6 +288,8 @@ without ever giving it back to the shell.
 
 ## Documentation
 
+- [Parity map](docs/parity-with-zcos.md) — the current tree against the mature
+  ZCOS reference: layer-by-layer gaps, constraints, and a core-first work order.
 - [Architecture](docs/architecture.md) — trust boundaries, boot protocol, and
   the address-space / authority model.
 - [Interface specifications](docs/specs/README.md) — the frozen syscall, IPC,

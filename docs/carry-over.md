@@ -9,9 +9,10 @@ not scale ([ADR 0014](adr/0014-linux-driver-domain.md)).
 
 The prototype is postponed, not abandoned. This note records what is worth
 carrying into the open-source tree and in what order, so months of work are not
-repeated. Nothing here is a copy-paste: the two trees have different syscall
-numbers, capability models, and IPC, so every item below needs an **ABI shim**
-or a port, not a plain move.
+repeated. The detailed current-vs-reference matrix and core-first work order
+live in [parity-with-zcos.md](parity-with-zcos.md). Nothing here is a
+copy-paste: the two trees have different syscall numbers, capability models, and
+IPC, so every item below needs an **ABI shim** or a port, not a plain move.
 
 ## Worth carrying
 
