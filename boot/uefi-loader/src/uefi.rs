@@ -219,7 +219,8 @@ pub type GetMemoryMap = unsafe extern "efiapi" fn(
 ///
 /// Allocates 4 KiB pages but does **not** guarantee any alignment beyond the
 /// page size, so callers needing a 2 MiB-aligned region must over-allocate and
-/// align up.
+/// align up. `address` is an in/out parameter when the allocation type is an
+/// upper bound.
 pub type AllocatePages = unsafe extern "efiapi" fn(u32, u32, usize, *mut u64) -> EfiStatus;
 
 /// `EFI_BOOT_SERVICES.AllocatePool`.
@@ -353,8 +354,12 @@ pub struct BootServices {
 /// `ExitBootServices`.
 pub const EFI_LOADER_DATA: u32 = 2;
 
-/// `AllocateAnyPages` allocation type.
-pub const ALLOCATE_ANY_PAGES: u32 = 0;
+/// `AllocateMaxAddress` allocation type.
+///
+/// The loader uses this for every page allocation so the kernel, which starts
+/// on a 0–4 GiB identity map, can always dereference what it is handed.
+/// (`AllocateAnyPages` is 0, `AllocateAddress` is 2.)
+pub const ALLOCATE_MAX_ADDRESS: u32 = 1;
 
 /// `EFI_FILE_MODE_READ`.
 pub const EFI_FILE_MODE_READ: u64 = 0x0000_0000_0000_0001;
@@ -639,5 +644,12 @@ mod tests {
         assert!(!is_error(EFI_SUCCESS));
         assert!(is_error(EFI_BUFFER_TOO_SMALL));
         assert!(is_error(EFI_INVALID_PARAMETER));
+    }
+
+    #[test]
+    fn allocation_types_match_the_specification() {
+        // AllocateAnyPages = 0, AllocateMaxAddress = 1, AllocateAddress = 2.
+        // The loader depends on 1: passing 2 would request an exact address.
+        assert_eq!(ALLOCATE_MAX_ADDRESS, 1);
     }
 }

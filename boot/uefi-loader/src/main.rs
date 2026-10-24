@@ -2,9 +2,11 @@
 //!
 //! The loader intentionally starts without a third-party runtime so its UEFI
 //! boundary remains explicit. On the `x86_64-unknown-uefi` target it disables
-//! the firmware watchdog, discovers the GOP framebuffer, captures the memory
-//! map, locates the ACPI RSDP, and assembles a [`zc_abi::BootInfo`]. It stops
-//! before `ExitBootServices`, which the next increment performs.
+//! the firmware watchdog, discovers the GOP framebuffer, captures the final
+//! memory map, locates the ACPI RSDP, and assembles a [`zc_abi::BootInfo`]. It
+//! then leaves boot services, installs its own page tables and GDT, and jumps
+//! to the kernel. Every loader-owned range the kernel reads stays below the
+//! 4 GiB identity-map limit (ADR 0049).
 //!
 //! On the host the crate builds as an ordinary test binary so the UEFI struct
 //! layouts and the memory-map conversion can be checked without firmware.

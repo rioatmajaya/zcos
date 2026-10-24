@@ -274,9 +274,17 @@ impl FramebufferInfo {
     };
 
     /// Returns whether this descriptor names a usable linear framebuffer.
+    ///
+    /// Geometry is part of the check: a zero-sized framebuffer, or one whose
+    /// stride cannot hold a scan line, is not drawable even if the firmware
+    /// supplied an address.
     #[must_use]
     pub const fn is_available(self) -> bool {
-        self.address != 0 && !matches!(self.pixel_format, PixelFormat::Unavailable)
+        self.address != 0
+            && self.width != 0
+            && self.height != 0
+            && self.stride >= self.width
+            && !matches!(self.pixel_format, PixelFormat::Unavailable)
     }
 }
 
@@ -392,6 +400,44 @@ mod tests {
         assert_eq!(MemoryKind::from_efi_type(u32::MAX), MemoryKind::Unknown);
         assert!(MemoryKind::from_efi_type(7).is_usable());
         assert!(!MemoryKind::from_efi_type(0).is_usable());
+    }
+
+    #[test]
+    fn framebuffer_geometry_is_part_of_availability() {
+        let usable = FramebufferInfo {
+            address: 0x1000,
+            width: 640,
+            height: 480,
+            stride: 640,
+            pixel_format: PixelFormat::Rgbx8888,
+        };
+        assert!(usable.is_available());
+
+        assert!(!FramebufferInfo {
+            width: 0,
+            ..usable
+        }
+        .is_available());
+        assert!(!FramebufferInfo {
+            height: 0,
+            ..usable
+        }
+        .is_available());
+        assert!(!FramebufferInfo {
+            stride: usable.width - 1,
+            ..usable
+        }
+        .is_available());
+        assert!(!FramebufferInfo {
+            address: 0,
+            ..usable
+        }
+        .is_available());
+        assert!(!FramebufferInfo {
+            pixel_format: PixelFormat::Unavailable,
+            ..usable
+        }
+        .is_available());
     }
 
     #[test]

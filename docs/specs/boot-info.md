@@ -16,6 +16,18 @@ its own virtual layout.
 Any change to `BootInfo` or its meaning increments `BOOT_PROTOCOL_VERSION`, so
 a loader and kernel built apart cannot silently disagree.
 
+Every loader-owned range referenced here — the `BootInfo` page, the memory-map
+array, the initramfs, the kernel stack, the kernel image, and the initial page
+tables — lies below the loader's **4 GiB identity limit**. The loader allocates
+with `AllocateMaxAddress` and rejects a range that crosses the limit, because
+the kernel starts on the loader's page tables. `framebuffer.address` and `rsdp`
+follow the same rule; the loader reports the framebuffer as unavailable and
+drops the RSDP when either falls outside it (ADR 0049).
+
+`memory_map_len` always describes the array the kernel receives. If
+`ExitBootServices` rejects a stale map key, the loader re-reads the map and
+rewrites the length before retrying, so a retry cannot leave a stale count.
+
 ## `BootInfo` (80 bytes, `#[repr(C)]`)
 
 | Offset | Size | Field | Notes |
@@ -70,7 +82,9 @@ Only `Usable` regions may be handed out by the frame allocator
 `PixelFormat` (raw `u32`): `Bgrx8888` = 0, `Rgbx8888` = 1, `Bitmask` = 2,
 `Unavailable` = `u32::MAX`. `from_gop` maps a UEFI GOP value to the on-memory
 encoding (GOP names the channel order, so GOP 0 → `Rgbx8888`). A framebuffer is
-usable when `address != 0` and the format is not `Unavailable`.
+usable when `address != 0`, `width != 0`, `height != 0`, `stride >= width`, the
+whole scan-line span lies below the identity limit, and the format is not
+`Unavailable`.
 
 ## Validation
 
@@ -89,8 +103,12 @@ physical ranges are mapped and non-overlapping.
 
 The loader establishes a **0–4 GiB identity map** (2 MiB huge pages) plus a
 higher-half mapping for the kernel; physical frame addresses from the allocator
-are therefore directly readable below 4 GiB. Each ring-3 task then sees the
-fixed per-task windows listed in
+are therefore directly readable below 4 GiB. The loader only hands over ranges
+below that boundary and publishes the memory map captured by the last
+`GetMemoryMap`, so the kernel can walk `memory_map`, `initramfs`, and `rsdp`
+before it builds its own tables. A firmware allocation above 4 GiB fails the
+boot instead of producing a pointer the kernel cannot dereference. Each ring-3
+task then sees the fixed per-task windows listed in
 [`syscall-abi.md`](syscall-abi.md#fixed-per-task-virtual-windows). The
 framebuffer is remapped for tasks at `0x10_00000` (`FB_VIRT`); the kernel's own
 copy of `FramebufferInfo` keeps the physical address for the frame verifier.

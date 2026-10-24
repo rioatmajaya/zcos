@@ -109,6 +109,9 @@ cargo test --workspace
       loader's FAT volume.
 - [x] Identity + higher-half page tables, 64-bit GDT, jump to the kernel entry
       with `BootInfo` in `rdi`.
+- [x] Loader-owned ranges stay below the 4 GiB identity map; the memory map is
+      page-backed and published from the final `GetMemoryMap`; oversized kernel
+      and initramfs images fail loudly instead of truncating (ADR 0049).
 - [x] Kernel rejects a wrong sentinel or unsupported protocol version.
 
 **Pass criteria.** The CI boot job greps the serial log for `ZC OS UEFI

@@ -18,7 +18,7 @@ use zc_elf::{self, ElfImage};
 use crate::memmap;
 use crate::serial;
 use crate::uefi::{
-    self, ACPI_20_TABLE_GUID, ACPI_TABLE_GUID, ALLOCATE_ANY_PAGES, BootServices,
+    self, ACPI_20_TABLE_GUID, ACPI_TABLE_GUID, ALLOCATE_MAX_ADDRESS, BootServices,
     EFI_BUFFER_TOO_SMALL, EFI_FILE_MODE_READ, EFI_INVALID_PARAMETER, EFI_LOADER_DATA, FileProtocol,
     GRAPHICS_OUTPUT_PROTOCOL_GUID, GraphicsOutputProtocol, LOADED_IMAGE_PROTOCOL_GUID,
     LoadedImageProtocol, MemoryDescriptor, SIMPLE_FILE_SYSTEM_PROTOCOL_GUID,
@@ -34,6 +34,9 @@ const PAGE_2MIB: u64 = 2 * 1024 * 1024;
 
 /// Highest physical address the loader's identity map covers.
 const IDENTITY_LIMIT: u64 = 0x1_0000_0000;
+
+/// The boot ABI structure must fit in the single page reserved for it.
+const _: () = assert!(size_of::<BootInfo>() <= PAGE_SIZE as usize);
 
 /// Pages reserved for reading the kernel ELF (1 MiB).
 const KERNEL_BUFFER_PAGES: usize = 256;
@@ -125,8 +128,16 @@ pub unsafe extern "efiapi" fn efi_main(
         fatal("cannot allocate memory-map buffers");
     };
 
-    let Some(kernel_bytes) = read_file(image_handle, boot_services, &KERNEL_PATH, KERNEL_BUFFER_PAGES) else {
-        fatal("cannot read \\EFI\\BOOT\\KERNEL.ELF");
+    let kernel_bytes = match read_file(
+        image_handle,
+        boot_services,
+        &KERNEL_PATH,
+        KERNEL_BUFFER_PAGES,
+    ) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => fatal("missing \\EFI\\BOOT\\KERNEL.ELF"),
+        Err(ReadFileError::TooLarge) => fatal("\\EFI\\BOOT\\KERNEL.ELF exceeds the 1 MiB buffer"),
+        Err(ReadFileError::Io) => fatal("cannot read \\EFI\\BOOT\\KERNEL.ELF"),
     };
     let image = match zc_elf::parse(kernel_bytes) {
         Ok(image) => image,
@@ -163,19 +174,26 @@ pub unsafe extern "efiapi" fn efi_main(
     // The initramfs is optional: an image without one still boots, and the
     // kernel reports its absence. A present archive rides in loader-owned
     // pages that survive ExitBootServices.
-    let initramfs = read_file(
+    let initramfs = match read_file(
         image_handle,
         boot_services,
         &INITRAMFS_PATH,
         INITRAMFS_BUFFER_PAGES,
-    );
-    match initramfs {
-        Some(bytes) => report(
-            &mut console,
-            format_args!("initramfs: {} bytes\n", bytes.len()),
-        ),
-        None => report(&mut console, format_args!("initramfs absent\n")),
-    }
+    ) {
+        Ok(Some(bytes)) => {
+            report(
+                &mut console,
+                format_args!("initramfs: {} bytes\n", bytes.len()),
+            );
+            Some(bytes)
+        }
+        Ok(None) => {
+            report(&mut console, format_args!("initramfs absent\n"));
+            None
+        }
+        Err(ReadFileError::TooLarge) => fatal("initramfs exceeds the 1 MiB buffer"),
+        Err(ReadFileError::Io) => fatal("cannot read initramfs"),
+    };
 
     let Some(page_tables) = PageTables::build(boot_services, kernel_physical, &image) else {
         fatal("cannot build page tables");
@@ -223,11 +241,12 @@ pub unsafe extern "efiapi" fn efi_main(
     ));
 
     // The firmware IDT and GDT live in memory that ExitBootServices releases,
-    // so install our own GDT and keep interrupts off across the transition.
-    load_gdt();
+    // so mask interrupts before installing our own GDT; a firmware interrupt
+    // must not arrive between `lgdt` and the CS reload.
     disable_interrupts();
+    load_gdt();
 
-    exit_boot_services(boot_services, image_handle, &mut map_buffers);
+    exit_boot_services(boot_services, image_handle, &mut map_buffers, boot_info);
 
     serial::write_str("boot services exited; entering kernel\n");
 
@@ -268,7 +287,7 @@ fn discover_framebuffer(boot_services: &BootServices) -> FramebufferInfo {
     // SAFETY: `info` is non-null and owned by the mode.
     let info = unsafe { &*mode.info };
 
-    FramebufferInfo {
+    let framebuffer = FramebufferInfo {
         address: mode.frame_buffer_base,
         width: info.horizontal_resolution,
         height: info.vertical_resolution,
@@ -276,6 +295,32 @@ fn discover_framebuffer(boot_services: &BootServices) -> FramebufferInfo {
         // scan lines; use it directly so a stride-padded mode maps correctly.
         stride: info.pixels_per_scan_line,
         pixel_format: PixelFormat::from_gop(info.pixel_format).unwrap_or(PixelFormat::Unavailable),
+    };
+    if !framebuffer.is_available() || !framebuffer_is_mapped(framebuffer, mode.frame_buffer_size) {
+        return FramebufferInfo::UNAVAILABLE;
+    }
+    framebuffer
+}
+
+/// Returns whether the whole framebuffer lies inside the identity map.
+///
+/// The kernel draws through the loader's page tables, so a framebuffer above
+/// [`IDENTITY_LIMIT`] would fault on the first pixel even though GOP advertises
+/// it. Trust the larger of the computed span and the aperture GOP reports.
+fn framebuffer_is_mapped(framebuffer: FramebufferInfo, reported_size: usize) -> bool {
+    if framebuffer.address == 0 || framebuffer.address >= IDENTITY_LIMIT {
+        return false;
+    }
+    let computed = u64::from(framebuffer.stride)
+        .checked_mul(u64::from(framebuffer.height))
+        .and_then(|pixels| pixels.checked_mul(4));
+    let Some(computed) = computed else {
+        return false;
+    };
+    let size = computed.max(reported_size as u64);
+    match framebuffer.address.checked_add(size) {
+        Some(end) => end <= IDENTITY_LIMIT,
+        None => false,
     }
 }
 
@@ -306,27 +351,42 @@ fn paint_framebuffer(framebuffer: FramebufferInfo) {
     }
 }
 
+/// Why a file could not be handed to the kernel.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReadFileError {
+    /// The file is larger than the loader-owned buffer.
+    TooLarge,
+    /// The firmware reported an I/O error.
+    Io,
+}
+
 /// Reads a file from the volume the loader was booted from.
 ///
 /// Returns a slice over a loader-owned buffer of `pages` 4 KiB pages. The
 /// buffer is never freed, so the slice stays valid for the rest of the boot.
-/// A missing file is `None`; callers decide whether that is fatal.
+/// A missing file is `Ok(None)`; a file that does not fit or an I/O failure is
+/// an error, never a silent truncation.
 fn read_file(
     image_handle: EfiHandle,
     boot_services: &BootServices,
     path: &[u16],
     pages: usize,
-) -> Option<&'static [u8]> {
+) -> Result<Option<&'static [u8]>, ReadFileError> {
     // SAFETY: `image_handle` is the handle firmware passed to `efi_main`.
-    let loaded = unsafe { open_protocol::<LoadedImageProtocol>(
-        boot_services,
-        image_handle,
-        &LOADED_IMAGE_PROTOCOL_GUID,
-    ) }?;
+    let loaded = unsafe {
+        open_protocol::<LoadedImageProtocol>(
+            boot_services,
+            image_handle,
+            &LOADED_IMAGE_PROTOCOL_GUID,
+        )
+    };
+    let Some(loaded) = loaded else {
+        return Ok(None);
+    };
     // SAFETY: `loaded` is a valid Loaded Image Protocol instance.
     let device = unsafe { (*loaded).device_handle };
     if device.is_null() {
-        return None;
+        return Ok(None);
     }
 
     // SAFETY: `device` came from the Loaded Image Protocol.
@@ -336,13 +396,16 @@ fn read_file(
             device,
             &SIMPLE_FILE_SYSTEM_PROTOCOL_GUID,
         )
-    }?;
+    };
+    let Some(filesystem) = filesystem else {
+        return Ok(None);
+    };
 
     let mut root: *mut FileProtocol = ptr::null_mut();
     // SAFETY: `filesystem` is a valid Simple File System Protocol instance.
     let status = unsafe { ((*filesystem).open_volume)(filesystem, &mut root) };
     if uefi::is_error(status) || root.is_null() {
-        return None;
+        return Ok(None);
     }
 
     let mut file: *mut FileProtocol = ptr::null_mut();
@@ -359,11 +422,18 @@ fn read_file(
     if uefi::is_error(status) || file.is_null() {
         // SAFETY: `root` is still open here.
         unsafe { ((*root).close)(root) };
-        return None;
+        return Ok(None);
     }
 
-    let buffer = allocate_pages(boot_services, pages);
-    let total = buffer.and_then(|base| read_all(file, base, pages));
+    let Some(base) = allocate_pages(boot_services, pages) else {
+        // SAFETY: both handles were opened above and are no longer needed.
+        unsafe {
+            ((*file).close)(file);
+            ((*root).close)(root);
+        }
+        return Err(ReadFileError::Io);
+    };
+    let total = read_all(file, base, pages);
 
     // SAFETY: both handles were opened above and are no longer needed.
     unsafe {
@@ -371,33 +441,59 @@ fn read_file(
         ((*root).close)(root);
     }
 
-    let base = buffer?;
     let total = total?;
-    // SAFETY: `base` is a loader-owned allocation that is never freed.
-    Some(unsafe { core::slice::from_raw_parts(base as *const u8, total) })
+    // SAFETY: `base` is a loader-owned allocation that is never freed, and
+    // `total` is the number of bytes actually read into it.
+    Ok(Some(unsafe {
+        core::slice::from_raw_parts(base as *const u8, total)
+    }))
 }
 
 /// Reads `file` until end of file into `base`, returning the byte count.
 ///
-/// The buffer holds `pages` 4 KiB pages; longer files are truncated to the
-/// buffer so a corrupt filesystem cannot overrun the loader.
-fn read_all(file: *mut FileProtocol, base: u64, pages: usize) -> Option<usize> {
-    let capacity = pages * PAGE_SIZE as usize;
+/// The buffer holds `pages` 4 KiB pages. A file that exactly fills the buffer
+/// is accepted; one that has more bytes is rejected instead of truncated.
+fn read_all(file: *mut FileProtocol, base: u64, pages: usize) -> Result<usize, ReadFileError> {
+    let capacity = pages
+        .checked_mul(PAGE_SIZE as usize)
+        .ok_or(ReadFileError::TooLarge)?;
     let mut total = 0usize;
-    loop {
-        let mut chunk = capacity.checked_sub(total)?;
+
+    while total < capacity {
+        let remaining = capacity - total;
+        let mut chunk = remaining;
         // SAFETY: `file` is an open handle and `base + total` has room for
         // `chunk` bytes inside the buffer.
         let status = unsafe {
             ((*file).read)(file, &mut chunk, (base + total as u64) as *mut c_void)
         };
         if uefi::is_error(status) {
-            return None;
+            return Err(ReadFileError::Io);
         }
         if chunk == 0 {
-            return Some(total);
+            return Ok(total);
+        }
+        if chunk > remaining {
+            return Err(ReadFileError::Io);
         }
         total += chunk;
+    }
+
+    // The buffer is full. One more byte distinguishes an exact-size file from
+    // an overlong one; either way the file handle is no longer used.
+    let mut probe = [0u8; 1];
+    let mut probe_len = 1usize;
+    // SAFETY: `file` is an open handle and `probe` has room for one byte.
+    let status = unsafe {
+        ((*file).read)(file, &mut probe_len, probe.as_mut_ptr().cast::<c_void>())
+    };
+    if uefi::is_error(status) {
+        return Err(ReadFileError::Io);
+    }
+    if probe_len == 0 {
+        Ok(total)
+    } else {
+        Err(ReadFileError::TooLarge)
     }
 }
 
@@ -421,14 +517,33 @@ unsafe fn open_protocol<T>(
     Some(interface.cast::<T>())
 }
 
-/// Allocates `pages` 4 KiB pages of loader-owned memory.
+/// Allocates `pages` 4 KiB pages below the loader's identity limit.
+///
+/// The kernel starts on the loader's page tables and can only dereference
+/// physical memory below [`IDENTITY_LIMIT`]. `AllocateMaxAddress` asks firmware
+/// to stay below that boundary; the explicit end check catches firmware that
+/// returns a range crossing it anyway.
 fn allocate_pages(boot_services: &BootServices, pages: usize) -> Option<u64> {
-    let mut address = 0u64;
-    // SAFETY: standard boot-services allocation; `address` is written on success.
+    if pages == 0 {
+        return None;
+    }
+    let mut address = IDENTITY_LIMIT - PAGE_SIZE;
+    // SAFETY: standard boot-services allocation; `address` is both the upper
+    // bound on input and the allocated base on output.
     let status = unsafe {
-        (boot_services.allocate_pages)(ALLOCATE_ANY_PAGES, EFI_LOADER_DATA, pages, &mut address)
+        (boot_services.allocate_pages)(
+            ALLOCATE_MAX_ADDRESS,
+            EFI_LOADER_DATA,
+            pages,
+            &mut address,
+        )
     };
     if uefi::is_error(status) || address == 0 {
+        return None;
+    }
+
+    let end = address.checked_add((pages as u64).checked_mul(PAGE_SIZE)?)?;
+    if address >= IDENTITY_LIMIT || end > IDENTITY_LIMIT {
         return None;
     }
     Some(address)
@@ -477,16 +592,13 @@ fn copy_segments(bytes: &[u8], image: &ElfImage, frame: u64) -> bool {
 /// Allocates storage for the boot ABI structure.
 ///
 /// It must not live on the loader's stack: that stack belongs to firmware and
-/// may be reclaimed by `ExitBootServices`.
+/// may be reclaimed by `ExitBootServices`. A page-backed allocation is used
+/// instead of `AllocatePool` because only `AllocateMaxAddress` lets the loader
+/// keep the structure inside the kernel's identity map.
 fn allocate_boot_info(boot_services: &BootServices) -> Option<*mut BootInfo> {
-    let mut raw: *mut c_void = ptr::null_mut();
-    // SAFETY: standard pool allocation; `raw` is written on success.
-    let status =
-        unsafe { (boot_services.allocate_pool)(EFI_LOADER_DATA, size_of::<BootInfo>(), &mut raw) };
-    if uefi::is_error(status) || raw.is_null() {
-        return None;
-    }
-    Some(raw.cast::<BootInfo>())
+    let base = allocate_pages(boot_services, 1)?;
+    // SAFETY: one page is at least as large as the asserted BootInfo layout.
+    Some(base as *mut BootInfo)
 }
 
 /// The page tables the kernel starts with.
@@ -610,16 +722,24 @@ fn disable_interrupts() {
 }
 
 /// Leaves boot services, retrying once if the firmware rejects the map key.
+///
+/// On success the memory-map length in `boot_info` is rewritten from the final
+/// refresh: a retry can add a descriptor, and the kernel must see the count
+/// that matches the array it is handed.
 fn exit_boot_services(
     boot_services: &BootServices,
     image_handle: EfiHandle,
     map_buffers: &mut MemoryMapBuffers,
+    boot_info: *mut BootInfo,
 ) {
     for attempt in 0..2 {
         // SAFETY: `image_handle` is the image being started and the key comes
         // from the most recent GetMemoryMap.
         let status = unsafe { (boot_services.exit_boot_services)(image_handle, map_buffers.map_key) };
         if !uefi::is_error(status) {
+            // SAFETY: `boot_info` is loader-owned, lies below the identity
+            // limit, and stays writable after boot services end.
+            unsafe { (*boot_info).memory_map_len = map_buffers.region_count as u64 };
             return;
         }
         if attempt == 1 {
@@ -663,6 +783,8 @@ struct MemoryMapBuffers {
     internal: *mut MemoryRegion,
     internal_capacity: usize,
     map_key: usize,
+    /// Regions converted by the most recent [`Self::refresh`].
+    region_count: usize,
 }
 
 impl MemoryMapBuffers {
@@ -694,34 +816,26 @@ impl MemoryMapBuffers {
         }
         // Leave room for descriptors added by the allocations still to come.
         map_size = map_size
-            .saturating_add(desc_size.saturating_mul(4))
+            .saturating_add(desc_size.saturating_mul(16))
             .saturating_add(256);
 
-        let mut raw: *mut c_void = ptr::null_mut();
-        // SAFETY: standard pool allocation; `raw` is written on success.
-        let status =
-            unsafe { (boot_services.allocate_pool)(EFI_LOADER_DATA, map_size, &mut raw) };
-        if uefi::is_error(status) || raw.is_null() {
-            return None;
-        }
+        let page_bytes = PAGE_SIZE as usize;
+        let raw_pages = map_size.div_ceil(page_bytes);
+        let raw_base = allocate_pages(boot_services, raw_pages)?;
+        let raw_size = raw_pages.checked_mul(page_bytes)?;
 
-        let capacity = map_size / desc_size + 4;
-        let internal_bytes = capacity.saturating_mul(size_of::<MemoryRegion>());
-        let mut internal: *mut c_void = ptr::null_mut();
-        // SAFETY: standard pool allocation; `internal` is written on success.
-        let status = unsafe {
-            (boot_services.allocate_pool)(EFI_LOADER_DATA, internal_bytes, &mut internal)
-        };
-        if uefi::is_error(status) || internal.is_null() {
-            return None;
-        }
+        let capacity = raw_size.checked_div(desc_size)?.checked_add(4)?;
+        let internal_bytes = capacity.checked_mul(size_of::<MemoryRegion>())?;
+        let internal_pages = internal_bytes.div_ceil(page_bytes);
+        let internal_base = allocate_pages(boot_services, internal_pages)?;
 
         Some(Self {
-            raw: raw.cast::<MemoryDescriptor>(),
-            raw_size: map_size,
-            internal: internal.cast::<MemoryRegion>(),
+            raw: raw_base as *mut MemoryDescriptor,
+            raw_size,
+            internal: internal_base as *mut MemoryRegion,
             internal_capacity: capacity,
             map_key,
+            region_count: 0,
         })
     }
 
@@ -735,7 +849,8 @@ impl MemoryMapBuffers {
         let mut desc_size = 0usize;
         let mut desc_version = 0u32;
 
-        // SAFETY: `self.raw` points to `self.raw_size` bytes of pool memory.
+        // SAFETY: `self.raw` points to `self.raw_size` bytes of loader-owned
+        // page-backed memory.
         let status = unsafe {
             (boot_services.get_memory_map)(
                 &mut map_size,
@@ -745,7 +860,7 @@ impl MemoryMapBuffers {
                 &mut desc_version,
             )
         };
-        if uefi::is_error(status) || desc_size == 0 {
+        if uefi::is_error(status) || desc_size == 0 || map_size > self.raw_size {
             return None;
         }
 
@@ -766,6 +881,7 @@ impl MemoryMapBuffers {
         }
 
         self.map_key = map_key;
+        self.region_count = written;
         Some((written, map_key, usable))
     }
 
@@ -791,6 +907,9 @@ fn find_rsdp(system_table: &SystemTable) -> u64 {
     let mut fallback = 0u64;
     for entry in entries {
         let address = entry.vendor_table as u64;
+        if !rsdp_is_mapped(address) {
+            continue;
+        }
         if entry.vendor_guid == ACPI_20_TABLE_GUID && rsdp_is_valid(address) {
             return address;
         }
@@ -799,6 +918,11 @@ fn find_rsdp(system_table: &SystemTable) -> u64 {
         }
     }
     fallback
+}
+
+/// Returns whether the whole 20-byte RSDP lies inside the identity map.
+fn rsdp_is_mapped(address: u64) -> bool {
+    matches!(address.checked_add(20), Some(end) if end <= IDENTITY_LIMIT)
 }
 
 /// Validates the RSDP signature and its 20-byte checksum.
