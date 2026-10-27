@@ -26,7 +26,7 @@ use zc_kernel::syscall::{Action, dispatch};
 use zc_kernel::task::{EXIT_TO_KERNEL, IrqFrame, SyscallRegs, TaskTable};
 use zc_kernel::trap::has_error_code;
 use zc_kernel::vfs::{DescriptorTable, MountTable, VfsError};
-use zc_kernel::vm::VirtAddr;
+use zc_kernel::vm::{VirtAddr, is_user_entry};
 
 /// Tasks the setup brings up, in task-index order.
 ///
@@ -663,12 +663,7 @@ pub unsafe extern "C" fn user_exception_entry(
 
     // Revoke everything this domain held before the scheduler picks a
     // replacement that has no right to inherit any of it.
-    // SAFETY: owned here; traps cannot nest.
-    let released = unsafe { (&mut *addr_of_mut!(IRQS)).release_task(me as u32) };
-    if released > 0 {
-        revoke_keyboard(me as u32);
-    }
-    crate::gdt::revoke_task_ports(me);
+    revoke_task_resources(me);
 
     // The stub passed writable pointers for both save areas; the raw CPU
     // frame sits past the register save block.
@@ -762,13 +757,11 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
     crate::zcfs_proxy::begin_syscall(tasks.current() as u32);
     match dispatch(regs.number()) {
         Ok(Action::TaskExit) => {
-            // Leaving the domain must give up its interrupt sources and its
-            // ring page, or the hardware keeps raising interrupts that
-            // nobody drains.
+            // Leaving the domain must give up its runtime authority, or the
+            // hardware keeps raising interrupts that nobody drains and the
+            // slot could hand a region or surface to its next occupant.
             let me = tasks.current() as u32;
-            if unsafe { (&mut *addr_of_mut!(IRQS)).release_task(me) > 0 } {
-                revoke_keyboard(me);
-            }
+            revoke_task_resources(me as usize);
             // Notify the supervisor before the slot is removed: `exit_current`
             // unblocks every task, so the event must already be queued when
             // `initd` wakes. A task that is not a supervised service posts
@@ -1513,7 +1506,15 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                     return 0;
                 }
                 let minted = zc_abi::port_cap(start, len);
-                let _ = tables[target].insert(Capability::new(minted, requested));
+                if tables[target]
+                    .insert(Capability::new(minted, requested))
+                    .is_err()
+                {
+                    // The target cannot hold the grant, so the delegation must
+                    // fail instead of reporting a capability it never stored.
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
                 let _ = crate::serial::print(format_args!(
                     "cap: task {me} delegated {minted:#x} to task {target}\n",
                 ));
@@ -1545,7 +1546,16 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                     return 0;
                 };
                 let minted = zc_abi::mmio_cap(slot);
-                let _ = tables[target].insert(Capability::new(minted, requested));
+                if tables[target]
+                    .insert(Capability::new(minted, requested))
+                    .is_err()
+                {
+                    // Roll the region back: a slot nobody can name would leak
+                    // a whole MMIO window and shrink the table for good.
+                    let _ = regions.remove(slot);
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
                 let _ = crate::serial::print(format_args!(
                     "mmio: task {me} delegated {minted:#x} ({base:#x}+{len:#x}) to task {target}\n",
                 ));
@@ -1662,10 +1672,9 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 rsp,
                 ss: u64::from(USER_SS),
             };
-            // A revived domain must not inherit open files from before the
-            // fault. SAFETY: the slot is not running, so nothing can touch its
-            // table while it is reset here.
-            unsafe { (*addr_of_mut!(FDS))[entry.task] = DescriptorTable::new() };
+            // The fault/stop path already dropped the dead domain's files and
+            // runtime objects; a revived slot inherits no open descriptor, no
+            // region, and no surface (ADR 0050).
             match tasks.respawn(entry.task, SyscallRegs::EMPTY, init_frame) {
                 Ok(()) => {
                     let _ = crate::serial::print(format_args!(
@@ -1697,16 +1706,10 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             }
             // A service already down is a no-op, so stop is idempotent too.
             if tasks.is_alive(entry.task) {
-                // Give up the domain's hardware authority before the slot
+                // Give up the domain's runtime authority before the slot
                 // dies, exactly as the fault path does: a stale TSS bitmap
-                // entry would otherwise outlive the task.
-                // SAFETY: owned here; traps cannot nest.
-                let released =
-                    unsafe { (&mut *addr_of_mut!(IRQS)).release_task(entry.task as u32) };
-                if released > 0 {
-                    revoke_keyboard(entry.task as u32);
-                }
-                crate::gdt::revoke_task_ports(entry.task);
+                // entry, region, or surface would otherwise outlive the task.
+                revoke_task_resources(entry.task);
                 let _ = tasks.kill(entry.task);
                 let _ = crate::serial::print(format_args!(
                     "task {me}: service {} stopped, task {} killed\n",
@@ -3839,7 +3842,9 @@ fn check_user_range(pt: u64, ptr: u64, len: u64) -> Option<()> {
         // SAFETY: `pt` is the running task's table; the index stays inside
         // it because the range passed the window check above.
         let entry = unsafe { table_entry(pt, page_index(page)) };
-        if entry & 1 == 0 {
+        // A supervisor-only page inside the user window must never become a
+        // kernel pointer just because it is present (ADR 0050).
+        if !is_user_entry(entry) {
             return None;
         }
         if page == last {
@@ -4042,6 +4047,77 @@ fn grant_input_ring(task: u32) -> bool {
         }
     }
     true
+}
+
+/// Takes back every resource a task acquired at runtime.
+///
+/// Called on fault, exit, and service stop, before the slot can be reused.
+/// Interrupt claims, the keyboard ring, and I/O ports are released first;
+/// then the runtime-minted objects follow: brokered MMIO regions, pixel
+/// surfaces, the window links that name them, the capability copies that
+/// grant access to them, and the open-descriptor table. The spawn-time
+/// capability grants stay, because a revived service keeps its address space
+/// and its provisioned authority. See `docs/adr/0050`.
+fn revoke_task_resources(task: usize) {
+    let task_u32 = task as u32;
+    // SAFETY: owned here; traps cannot nest while a handler runs.
+    let released = unsafe { (&mut *addr_of_mut!(IRQS)).release_task(task_u32) };
+    if released > 0 {
+        revoke_keyboard(task_u32);
+    }
+    crate::gdt::revoke_task_ports(task);
+
+    // SAFETY: owned here; traps cannot nest. Each table borrow ends before the
+    // next one starts, and the raw statics never alias.
+    unsafe {
+        let caps = &mut *addr_of_mut!(CAPS);
+        let regions = &mut *addr_of_mut!(MMIO_REGIONS);
+        let mut revoked_caps = 0;
+        let removed_regions = regions.remove_owner(task as u8, |slot| {
+            let object = zc_abi::mmio_cap(slot);
+            for table in caps.iter_mut() {
+                revoked_caps += table.remove_object(object);
+            }
+        });
+
+        let surfaces = &mut *addr_of_mut!(SURFACES);
+        let alloc = crate::frames();
+        let removed_surfaces = surfaces.remove_owner(
+            task as u8,
+            |slot, _surface| {
+                // A window link names the slot, so it must be cleared before a
+                // later surface can reuse that number.
+                let links = &mut *addr_of_mut!(WINDOW_SURFACES);
+                for link in links.iter_mut() {
+                    if *link == Some(slot) {
+                        *link = None;
+                    }
+                }
+                let object = zc_abi::surface_cap(slot);
+                for table in caps.iter_mut() {
+                    revoked_caps += table.remove_object(object);
+                }
+            },
+            |frame| {
+                let _ = alloc.free(PhysFrame::from_address(frame));
+            },
+        );
+
+        if removed_regions > 0 || removed_surfaces > 0 {
+            let _ = crate::serial::print(format_args!(
+                "revoke: task {task} released {removed_regions} mmio region(s), \
+                 {removed_surfaces} surface(s), {revoked_caps} capability copy/copies\n",
+            ));
+        }
+
+        // A dead domain must not leave open descriptors behind: the next
+        // occupant of the slot starts with none.
+        (*addr_of_mut!(FDS))[task] = DescriptorTable::new();
+    }
+
+    // A replay log or an in-flight filesystem request from the dead life must
+    // not leak into the next occupant of this slot.
+    crate::zcfs_proxy::forget_task(task_u32);
 }
 
 /// Takes the keyboard grant away from a domain that exits.

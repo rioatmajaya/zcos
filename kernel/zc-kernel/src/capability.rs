@@ -172,6 +172,26 @@ impl<const N: usize> CapabilityTable<N> {
         Ok(capability)
     }
 
+    /// Removes every capability on `object`, returning how many were removed.
+    ///
+    /// Used when the kernel tears down the object itself: both the owner's
+    /// grant and every delegated copy must disappear before the slot can be
+    /// reused, or a stale object id would name a resource it never held.
+    pub fn remove_object(&mut self, object: u32) -> usize {
+        let mut removed = 0;
+        for slot in &mut self.slots {
+            if slot
+                .capability
+                .is_some_and(|capability| capability.object == object)
+            {
+                slot.capability = None;
+                slot.generation = next_generation(slot.generation);
+                removed += 1;
+            }
+        }
+        removed
+    }
+
     /// Returns whether this table holds a capability on `object` with at
     /// least `rights`.
     ///
@@ -338,6 +358,26 @@ mod tests {
         // protecting the slot index.
         table.remove(grant).unwrap();
         assert!(!table.holds_object(7, Rights::READ));
+    }
+
+    #[test]
+    fn remove_object_revokes_every_copy_and_keeps_the_rest() {
+        let mut owner = CapabilityTable::<4>::new();
+        let mut peer = CapabilityTable::<4>::new();
+        let source = owner.insert(Capability::new(7, RWG)).unwrap();
+        let keep = owner.insert(Capability::new(8, Rights::READ)).unwrap();
+        owner
+            .delegate(source, &mut peer, Rights::READ)
+            .unwrap();
+
+        assert_eq!(owner.remove_object(7), 1);
+        assert_eq!(peer.remove_object(7), 1);
+        assert_eq!(owner.remove_object(7), 0);
+        assert!(!owner.holds_object(7, Rights::READ));
+        assert!(!peer.holds_object(7, Rights::READ));
+        // The unrelated capability is untouched, and its handle still works.
+        assert!(owner.holds_object(8, Rights::READ));
+        assert_eq!(owner.get(keep).unwrap().object(), 8);
     }
 
     #[test]

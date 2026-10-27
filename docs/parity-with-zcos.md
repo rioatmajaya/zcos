@@ -357,8 +357,11 @@ versioned and tested; every firmware-specific workaround is explained.
 
 - Audit address spaces, scheduling, IPC, capabilities, traps, timers, and power
   against `docs/specs/`.
-- Replace the fixed 10-slot task table with a process lifecycle — create, run,
-  exit, wait, reclaim — or document a bounded capacity with a concrete reason.
+- Document the fixed 10-slot task table and its revocation contract
+  ([ADR 0050](adr/0050-the-microkernel-revokes-runtime-resources.md)). The
+  bounded capacity stays for this step; a real create/wait/reap lifecycle is
+  core-system work, because each slot's address space and grants are
+  provisioned at boot and the slot index is a stable identity.
 - Give services a discovery and delegation path so a new service does not
   require a new kernel constant or an edit to `service.rs`.
 - Keep the syscall surface minimal; each new call gets a spec, host tests, and a
@@ -490,9 +493,10 @@ trustworthy core.
 1. **Licence / direct reuse.** Is the current repository staying public? If yes,
    parity must remain independent. If direct reuse is wanted, make the
    repository private or clarify the reference licence first.
-2. **Process model.** Expand the fixed table to a larger fixed capacity, or build
-   a real spawn/exit/reap model? This is a microkernel and core-system question;
-   settle it in steps 2–3, before the GUI depends on more tasks.
+2. **Process model.** The fixed table is documented as a bounded capacity in
+   [ADR 0050](adr/0050-the-microkernel-revokes-runtime-resources.md). Decide in
+   the core-system step whether to grow it or build a real spawn/exit/reap
+   model before the GUI depends on more tasks.
 3. **VFS boundary.** Keep the kernel VFS with `zc-storage` parsers, or move it to
    a service? Do not change this without a measured reason; the current model is
    working and proved.
@@ -510,10 +514,13 @@ trustworthy core.
    records the identity-map rule, and [`specs/boot-info.md`](specs/boot-info.md)
    now states the final-map and address-range guarantees. The three proof
    checksums still hold.
-3. Start at step 2: audit the microkernel and write an ADR before changing the
-   task or service lifecycle.
-4. Do not start the app catalog, widget toolkit, or host runner yet.
-5. Keep `build/zcos.img` human-testable and keep the three proof images locked.
+3. Step 2 (microkernel) is audited: [ADR 0050](adr/0050-the-microkernel-revokes-runtime-resources.md)
+   records the bounded table and the end-of-life revocation path, and the
+   kernel now enforces both. The three proof checksums still hold.
+4. Start at step 3: the core system (`initd` catalog, service registry, boot
+   manifest, ordered shutdown).
+5. Do not start the app catalog, widget toolkit, or host runner yet.
+6. Keep `build/zcos.img` human-testable and keep the three proof images locked.
 
 ## 10. Evidence index
 

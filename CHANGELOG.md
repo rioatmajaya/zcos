@@ -171,6 +171,23 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Fixed
 
+- **A faulting or stopped service kept its runtime authority** (F4). Fault,
+  exit, and service stop released IRQ claims, the keyboard ring, and I/O ports,
+  but left brokered MMIO regions, pixel surfaces, window links, and the
+  capability copies naming them in place. Repeated restarts could exhaust
+  `MMIO_SLOTS` or `SURFACE_SLOTS`, and a reused slot could be reached through an
+  old object id. One revocation path now drops all of them, frees surface
+  frames, resets the descriptor table, and forgets the task's filesystem
+  replay log and any in-flight request it owned; spawn-time grants and the
+  address space stay so a revived service keeps its identity. User buffers
+  must now be present **and** user-accessible, and a broker delegation whose
+  capability insert fails reports failure instead of leaking the object. The
+  boot logs the path when the device manager exits: `revoke: task 6 released 1
+  mmio region(s), 0 surface(s), 1 capability copy/copies`, and the three proof
+  checksums remain `0xd616ad79aaefb099`, `0x6d66e82d0f2d6fb8`, and
+  `0x78ebd6d359914da7`. See
+  [ADR 0050](docs/adr/0050-the-microkernel-revokes-runtime-resources.md).
+
 - **The default desktop hid the file manager behind an undiscovered click**
   (F8h-1c-6). A plain boot showed only the terminal, so a person could
   reasonably conclude the file manager was never built even though `fm.elf` was

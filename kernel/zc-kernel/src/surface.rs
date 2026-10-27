@@ -156,6 +156,35 @@ impl SurfaceTable {
         self.slots.get_mut(slot as usize)?.take()
     }
 
+    /// Removes every surface owned by `owner`, returning how many were removed.
+    ///
+    /// `on_remove` sees each slot and surface before its frames are handed to
+    /// `free_frame`, so the caller can clear a window link while the slot
+    /// still means the same surface. Freeing here keeps a faulting task from
+    /// leaking frames the allocator can never recover.
+    pub fn remove_owner(
+        &mut self,
+        owner: u8,
+        mut on_remove: impl FnMut(u32, Surface),
+        mut free_frame: impl FnMut(u64),
+    ) -> usize {
+        let mut removed = 0;
+        for index in 0..self.slots.len() {
+            let Some(surface) = self.slots[index].filter(|surface| surface.owner == owner) else {
+                continue;
+            };
+            self.slots[index] = None;
+            on_remove(index as u32, surface);
+            let mut frame = 0;
+            while frame < usize::from(surface.pages) {
+                free_frame(surface.frames[frame]);
+                frame += 1;
+            }
+            removed += 1;
+        }
+        removed
+    }
+
     /// Returns the number of live surfaces.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -255,6 +284,57 @@ mod tests {
         assert!(table.is_empty());
         assert!(table.get(0).is_none());
         assert!(table.remove(0).is_none());
+    }
+
+    #[test]
+    fn remove_owner_frees_only_that_owners_surfaces() {
+        let mut table = SurfaceTable::new();
+        let frames = Frames::new(16);
+        let first = table
+            .create(32, 32, 0, 3, || frames.allocate(), |f| frames.free(f))
+            .expect("slot");
+        let second = table
+            .create(32, 32, 0, 4, || frames.allocate(), |f| frames.free(f))
+            .expect("slot");
+        let third = table
+            .create(64, 32, 0, 3, || frames.allocate(), |f| frames.free(f))
+            .expect("slot");
+
+        let mut seen = [None; 2];
+        let mut index = 0;
+        let removed = table.remove_owner(
+            3,
+            |slot, surface| {
+                seen[index] = Some((slot, surface.pages));
+                index += 1;
+            },
+            |f| frames.free(f),
+        );
+        assert_eq!(removed, 2);
+        assert_eq!(seen, [Some((first, 1)), Some((third, 2))]);
+        // One page for `first`, two for `third`; the other owner's surface
+        // keeps its frame.
+        assert_eq!(frames.freed_count.get(), 3);
+        assert_eq!(table.len(), 1);
+        assert!(table.get(second).is_some());
+        assert!(table.get(first).is_none());
+        assert!(table.get(third).is_none());
+    }
+
+    #[test]
+    fn remove_owner_is_a_no_op_for_an_unknown_owner() {
+        let mut table = SurfaceTable::new();
+        let frames = Frames::new(4);
+        table
+            .create(16, 16, 0, 3, || frames.allocate(), |f| frames.free(f))
+            .expect("slot");
+        let removed = table.remove_owner(
+            4,
+            |_, _| panic!("nothing to remove"),
+            |_| panic!("nothing to free"),
+        );
+        assert_eq!(removed, 0);
+        assert_eq!(table.len(), 1);
     }
 
     #[test]

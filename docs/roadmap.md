@@ -188,6 +188,12 @@ scheduler heartbeat per AP.
       rights.
 - [x] Runtime capability delegation (`SYS_CAP_DELEGATE`) with a
       non-amplifying subset check.
+- [x] End-of-life revocation of runtime resources: fault, exit, and service
+      stop release MMIO regions, surfaces, window links, and the capability
+      copies naming them, and drop open descriptors
+      ([ADR 0050](adr/0050-the-microkernel-revokes-runtime-resources.md)).
+- [x] The bounded 10-slot task table is documented as a capacity, not a
+      process model ([ADR 0050](adr/0050-the-microkernel-revokes-runtime-resources.md)).
 - [ ] *(follow-up, not required for F4 to pass)* POSIX-style process model
       (fork/exec/wait) or a documented ZC-native equivalent.
 - [ ] *(follow-up)* Signals or an event-notification mechanism.

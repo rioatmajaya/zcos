@@ -67,6 +67,24 @@ impl MmioRegions {
         self.slots.get_mut(slot as usize)?.take()
     }
 
+    /// Removes every region owned by `owner`, returning how many were removed.
+    ///
+    /// `on_remove` sees each slot as it is taken, so the caller can revoke the
+    /// capability object that names the same slot. A domain that faults or
+    /// stops must not leave a region behind: a slot reused by the next
+    /// delegation would otherwise describe memory the old domain discovered.
+    pub fn remove_owner(&mut self, owner: u8, mut on_remove: impl FnMut(u32)) -> usize {
+        let mut removed = 0;
+        for index in 0..self.slots.len() {
+            if self.slots[index].is_some_and(|region| region.owner == owner) {
+                self.slots[index] = None;
+                on_remove(index as u32);
+                removed += 1;
+            }
+        }
+        removed
+    }
+
     /// Returns the number of live regions.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -131,6 +149,36 @@ mod tests {
         }
         assert_eq!(table.insert(0x9000_0000, 0x1000, 6), None);
         assert_eq!(table.len(), MMIO_SLOTS);
+    }
+
+    #[test]
+    fn remove_owner_takes_only_that_owners_regions() {
+        let mut table = MmioRegions::new();
+        let first = table.insert(0x8000_0000, 0x1000, 6).expect("slot");
+        let second = table.insert(0x8100_0000, 0x2000, 4).expect("slot");
+        let third = table.insert(0x8200_0000, 0x3000, 6).expect("slot");
+
+        let mut seen = [u32::MAX; 2];
+        let mut index = 0;
+        let removed = table.remove_owner(6, |slot| {
+            seen[index] = slot;
+            index += 1;
+        });
+        assert_eq!(removed, 2);
+        assert_eq!(seen, [first, third]);
+        assert!(table.get(first).is_none());
+        assert!(table.get(third).is_none());
+        assert_eq!(table.get(second).expect("still owned").owner, 4);
+        assert_eq!(table.len(), 1);
+    }
+
+    #[test]
+    fn remove_owner_is_a_no_op_for_an_unknown_owner() {
+        let mut table = MmioRegions::new();
+        table.insert(0x8000_0000, 0x1000, 6).expect("slot");
+        let removed = table.remove_owner(7, |_| panic!("nothing to remove"));
+        assert_eq!(removed, 0);
+        assert_eq!(table.len(), 1);
     }
 
     #[test]

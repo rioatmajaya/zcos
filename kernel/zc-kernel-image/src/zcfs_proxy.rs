@@ -170,6 +170,22 @@ pub fn begin_syscall(task: u32) {
     }
 }
 
+/// Forgets a task's replay log and releases a request it still owned.
+///
+/// Called when the task dies. Without this the next occupant of the slot
+/// would replay answers from the previous life, and an in-flight request whose
+/// caller is gone would keep the bridge tagged busy because no live task can
+/// ever match it. A reply the dead caller already caused is still dropped by
+/// the sequence check in [`poll`], so clearing here cannot misattribute one.
+pub fn forget_task(task: u32) {
+    *log_for(task) = TaskLog::NEW;
+    if INFLIGHT_SEQ.load(Ordering::Relaxed) != 0
+        && INFLIGHT_TASK.load(Ordering::Relaxed) == task
+    {
+        clear_inflight();
+    }
+}
+
 /// Borrows one task's replay log.
 fn log_for(task: u32) -> &'static mut TaskLog {
     let index = (task as usize).min(MAX_TASKS - 1);

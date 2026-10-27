@@ -158,6 +158,17 @@ impl PageFlags {
     }
 }
 
+/// Returns whether a page-table entry is present **and** user-accessible.
+///
+/// The kernel's user-buffer validator uses this instead of a bare present-bit
+/// test, so a supervisor-only page that happens to lie inside the user window
+/// can never become a kernel-readable pointer.
+#[must_use]
+pub const fn is_user_entry(entry: u64) -> bool {
+    let required = PageFlags::PRESENT.union(PageFlags::USER).bits();
+    entry & required == required
+}
+
 /// Why a mapping request was rejected.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MapError {
@@ -260,6 +271,20 @@ mod tests {
         let nx = PageFlags::PRESENT.union(PageFlags::NO_EXECUTE);
         assert!(nx.contains(PageFlags::NO_EXECUTE));
         assert!(!flags.contains(PageFlags::USER));
+    }
+
+    #[test]
+    fn user_entries_require_both_present_and_user_bits() {
+        let user = PageFlags::PRESENT
+            .union(PageFlags::WRITABLE)
+            .union(PageFlags::USER);
+        assert!(is_user_entry(user.entry(PhysAddr::new(0x3000))));
+        // Present but supervisor-only is the case the old check missed.
+        let supervisor = PageFlags::PRESENT.union(PageFlags::WRITABLE);
+        assert!(!is_user_entry(supervisor.entry(PhysAddr::new(0x3000))));
+        // User bit without present is not a usable page either.
+        assert!(!is_user_entry(PageFlags::USER.entry(PhysAddr::new(0x3000))));
+        assert!(!is_user_entry(0));
     }
 
     #[test]
