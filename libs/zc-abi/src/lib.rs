@@ -67,8 +67,8 @@ pub use mmio::{
     MMIO_VIRT, MmioInfo, mmio_cap,
 };
 pub use service::{
-    SERVICE_KIND_EXIT, SERVICE_KIND_FAULT, service_cap, supervise_event, supervise_kind,
-    supervise_service,
+    BLK_SERVICE, KBD_SERVICE, SERVICE_CATALOG, SERVICE_KIND_EXIT, SERVICE_KIND_FAULT, ServiceSpec,
+    service_cap, supervise_event, supervise_kind, supervise_service,
 };
 pub use session::{replay_launch, replay_pointer};
 pub use surface::{

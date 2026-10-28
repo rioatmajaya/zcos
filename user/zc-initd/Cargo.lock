@@ -6,13 +6,20 @@ version = 4
 name = "initd"
 version = "0.1.0"
 dependencies = [
- "zc-abi",
+ "zc-supervise",
  "zc-user",
 ]
 
 [[package]]
 name = "zc-abi"
 version = "0.1.0"
+
+[[package]]
+name = "zc-supervise"
+version = "0.1.0"
+dependencies = [
+ "zc-abi",
+]
 
 [[package]]
 name = "zc-user"

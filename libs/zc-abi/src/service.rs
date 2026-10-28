@@ -6,6 +6,42 @@
 //! kernel posts one word per event, encoded here. Authority over a service is
 //! a capability in its own namespace (see [`service_cap`]), separate from IRQ
 //! sources and I/O port ranges.
+//!
+//! [`SERVICE_CATALOG`] is the one list of supervised services shared by the
+//! kernel, the supervisor, and the tests. The kernel maps an entry to its task
+//! slot and provisions the capability; `initd` reads the name and id when it
+//! logs or acts on an event. Adding a service starts here, not with a new
+//! constant in each binary.
+
+/// Identifier of the block driver service.
+pub const BLK_SERVICE: u32 = 0;
+
+/// Identifier of the keyboard driver service.
+pub const KBD_SERVICE: u32 = 1;
+
+/// One supervised service, named at the ABI boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ServiceSpec {
+    /// Stable service id used by the supervision events and capability.
+    pub id: u32,
+    /// Short name for logs and diagnostics.
+    pub name: &'static str,
+}
+
+/// Supervised services in boot order.
+///
+/// The order is the order the boot brings them up. A shutdown walks it in
+/// reverse, so a service that consumes another stops before its provider.
+pub const SERVICE_CATALOG: [ServiceSpec; 2] = [
+    ServiceSpec {
+        id: BLK_SERVICE,
+        name: "blk",
+    },
+    ServiceSpec {
+        id: KBD_SERVICE,
+        name: "kbd",
+    },
+];
 
 /// Capability object id granting authority over one supervised service.
 ///
@@ -70,6 +106,23 @@ mod tests {
         // Distinct ids name distinct objects.
         assert_ne!(service_cap(0), service_cap(1));
         assert_eq!(service_cap(0), 0x4000_0000);
+    }
+
+    #[test]
+    fn the_catalog_names_each_service_once_in_boot_order() {
+        assert_eq!(SERVICE_CATALOG.len(), 2);
+        assert_eq!(SERVICE_CATALOG[0].id, BLK_SERVICE);
+        assert_eq!(SERVICE_CATALOG[0].name, "blk");
+        assert_eq!(SERVICE_CATALOG[1].id, KBD_SERVICE);
+        assert_eq!(SERVICE_CATALOG[1].name, "kbd");
+
+        for (index, service) in SERVICE_CATALOG.iter().enumerate() {
+            assert_ne!(service.name, "");
+            for other in &SERVICE_CATALOG[index + 1..] {
+                assert_ne!(service.id, other.id, "duplicate service id");
+                assert_ne!(service.name, other.name, "duplicate service name");
+            }
+        }
     }
 
     #[test]

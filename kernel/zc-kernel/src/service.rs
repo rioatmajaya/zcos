@@ -18,6 +18,11 @@
 
 use crate::perms::Identity;
 
+// The ids and the user-visible names live in the one ABI catalog so the
+// supervisor and the kernel cannot drift; this module adds the task slot that
+// only the kernel knows.
+pub use zc_abi::{BLK_SERVICE, KBD_SERVICE};
+
 /// Task index of the producer bring-up task.
 pub const PRODUCER_TASK: usize = 0;
 /// Task index of the consumer bring-up task.
@@ -80,12 +85,6 @@ pub const OWNERS: [Identity; TASK_COUNT] = [
     USER_IDENTITY, // window client 1
 ];
 
-/// Identifier of the block driver service.
-pub const BLK_SERVICE: u32 = 0;
-
-/// Identifier of the keyboard driver service.
-pub const KBD_SERVICE: u32 = 1;
-
 /// One supervised service domain.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Service {
@@ -105,16 +104,21 @@ pub struct Service {
 /// persistent driver — the supervisor revives it after that fault and stops it
 /// at the end of the boot, so a domain that stays alive no longer keeps the
 /// boot from finishing.
-pub const SERVICES: [Service; 2] = [
+///
+/// The id and name of each entry come from [`zc_abi::SERVICE_CATALOG`]; only
+/// the task slot is chosen here. The array length follows the catalog, so
+/// adding a service without a slot is a compile error rather than a silent
+/// mismatch.
+pub const SERVICES: [Service; zc_abi::SERVICE_CATALOG.len()] = [
     Service {
-        id: BLK_SERVICE,
+        id: zc_abi::SERVICE_CATALOG[0].id,
         task: BLK_TASK,
-        name: "blk",
+        name: zc_abi::SERVICE_CATALOG[0].name,
     },
     Service {
-        id: KBD_SERVICE,
+        id: zc_abi::SERVICE_CATALOG[1].id,
         task: KBD_TASK,
-        name: "kbd",
+        name: zc_abi::SERVICE_CATALOG[1].name,
     },
 ];
 
@@ -172,6 +176,15 @@ mod tests {
         assert_eq!(kbd.task, KBD_TASK);
         assert_eq!(kbd.name, "kbd");
         assert_eq!(for_task(KBD_TASK), Some(kbd));
+    }
+
+    #[test]
+    fn the_table_matches_the_abi_catalog_in_boot_order() {
+        assert_eq!(SERVICES.len(), zc_abi::SERVICE_CATALOG.len());
+        for (entry, spec) in SERVICES.iter().zip(zc_abi::SERVICE_CATALOG.iter()) {
+            assert_eq!(entry.id, spec.id);
+            assert_eq!(entry.name, spec.name);
+        }
     }
 
     #[test]

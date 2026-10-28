@@ -25,6 +25,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "zc-supervise"
+version = "0.1.0"
+dependencies = [
+ "zc-abi",
+]
+
+[[package]]
 name = "zc-uefi-loader"
 version = "0.1.0"
 dependencies = [

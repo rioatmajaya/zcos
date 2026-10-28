@@ -14,7 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 zc-user = { path = "../zc-user" }
-zc-abi = { path = "../../libs/zc-abi" }
+zc-supervise = { path = "../../libs/zc-supervise" }
 
 [lints]
 workspace = true

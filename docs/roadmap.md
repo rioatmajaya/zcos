@@ -345,7 +345,11 @@ VFS → write path → journaling → `fsck`**.
       removes a supervised slot. The block domain faults on purpose after its
       probes, `initd` restarts it, and it resumes filesystem serving from
       persisted `.bss` state (see
-      [ADR 0010](adr/0010-userspace-service-supervision.md)).
+      [ADR 0010](adr/0010-userspace-service-supervision.md)). The core-system
+      step then moves the ids and names into `zc_abi::SERVICE_CATALOG`, puts a
+      per-service restart budget and reverse-order shutdown in the host-tested
+      `zc-supervise` crate, and reduces `initd` to a data-driven loop (see
+      [ADR 0051](adr/0051-one-service-catalog-and-ordered-shutdown.md)).
 - [x] F7g: crash consistency. `Volume::mount_into` replays the log and then
       **clamps `head_seq` to the last record that actually replayed**, reporting
       it through `was_recovered()`. A superblock can claim a record a crash never

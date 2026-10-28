@@ -376,14 +376,18 @@ agree.
 
 **Goal.** The smallest complete userspace that can own the machine.
 
-- `initd`: service catalog, dependencies, start/stop/restart, restart budget,
-  ordered shutdown.
+- `initd`: one ABI service catalog, per-service restart budget, and ordered
+  shutdown are done ([ADR 0051](adr/0051-one-service-catalog-and-ordered-shutdown.md)).
+  Explicit dependencies, health, and readiness are still open.
 - Device manager, VFS boundary, logging, time, and a minimal identity/session
   boundary.
 - One service registry: name, endpoint, capabilities, health, and restart
-  policy.
+  policy. The catalog now supplies name, id, boot order, and restart policy; it
+  does not discover or load a service, and it has no endpoint or health data.
 - One boot manifest that names services and order; no magic indices spread
-  across compositor, shell, and tests.
+  across compositor, shell, and tests. The compile-time catalog is the registry
+  until a parser and reload path exist, so a new service still needs a fixed
+  slot and an image.
 - Keep the kernel VFS decision explicit; do not move it to a service without a
   measured reason.
 
@@ -517,8 +521,11 @@ trustworthy core.
 3. Step 2 (microkernel) is audited: [ADR 0050](adr/0050-the-microkernel-revokes-runtime-resources.md)
    records the bounded table and the end-of-life revocation path, and the
    kernel now enforces both. The three proof checksums still hold.
-4. Start at step 3: the core system (`initd` catalog, service registry, boot
-   manifest, ordered shutdown).
+4. Step 3 (core system) has started: [ADR 0051](adr/0051-one-service-catalog-and-ordered-shutdown.md)
+   makes the ABI catalog the one service list, surfaces a bounded per-service
+   restart budget, and shuts live services down in reverse boot order. The
+   compile-time catalog is still the registry; discovery, endpoints, health, and
+   a parsed boot manifest remain. The three proof checksums still hold.
 5. Do not start the app catalog, widget toolkit, or host runner yet.
 6. Keep `build/zcos.img` human-testable and keep the three proof images locked.
 

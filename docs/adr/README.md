@@ -57,6 +57,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0048](0048-live-clicks-survive-the-kernel.md) | A live click survives the kernel | Accepted |
 | [0049](0049-the-loader-stays-inside-its-identity-map.md) | The loader stays inside its identity map | Accepted |
 | [0050](0050-the-microkernel-revokes-runtime-resources.md) | The microkernel revokes runtime resources at end of life | Accepted |
+| [0051](0051-one-service-catalog-and-ordered-shutdown.md) | One service catalog, a bounded restart budget, and ordered shutdown | Accepted |
 
 ## Adding a decision
 

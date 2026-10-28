@@ -3,74 +3,90 @@
 //! The kernel performs the mechanisms a service lifecycle needs — reviving a
 //! dead task slot and killing a live one — but the decision of *whether* to
 //! restart belongs here. `initd` blocks on the supervision channel, and the
-//! kernel posts one event whenever a supervised service faults or exits. On a
-//! fault it revives the service; on a clean exit it records the stop and ends,
-//! which lets the boot finish once every task has exited.
+//! kernel posts one event whenever a supervised service faults or exits.
 //!
-//! Two services are supervised: the block driver, which faults deliberately
-//! after its bring-up and proves a supervisor can revive a service without the
-//! kernel choosing for it; and the keyboard driver, which is persistent from
-//! F8d-3a. The keyboard domain keeps serving after its own boot fault, so the
-//! supervisor stops it when the block driver stops — otherwise a live driver
-//! would keep the boot from ever finishing.
+//! The service list, its boot order, and the user-visible names come from
+//! [`zc_supervise`] (the ABI catalog); this loop only applies policy. A fault
+//! consumes one restart from a per-service budget, so a crash loop cannot keep
+//! the boot alive forever. A clean exit is final: the service is recorded as
+//! stopped and every service still running is stopped in reverse boot order,
+//! dependents before providers, so no live driver outlives the boot.
+//!
+//! The block driver faults deliberately after its bring-up, proving that a
+//! supervisor — not the kernel — decides to revive a service. The keyboard
+//! driver is persistent from F8d-3a, so shutting it down last is what lets the
+//! boot finish once every task has exited.
 
 #![no_std]
 #![no_main]
 #![allow(unsafe_code)]
 
+use zc_supervise::{RestartBudget, ServiceSpec, shutdown_order, spec};
 use zc_user::{
-    IPC_SUPERVISE, SERVICE_KIND_FAULT, log, recv_from, service_start, service_status, service_stop,
-    supervise_kind, supervise_service, task_exit,
+    IPC_SUPERVISE, SERVICE_KIND_EXIT, SERVICE_KIND_FAULT, log, log_parts, recv_from, service_start,
+    service_status, service_stop, supervise_kind, supervise_service, task_exit,
 };
-
-/// Service id of the block driver, mirroring `zc-kernel::service::BLK_SERVICE`.
-const BLK_SERVICE: u64 = 0;
-
-/// Service id of the keyboard driver, mirroring `zc-kernel::service::KBD_SERVICE`.
-const KBD_SERVICE: u64 = 1;
 
 /// Task entry point; the kernel provides a fresh user stack.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
     log("initd starting\n");
+    let mut budget = RestartBudget::new();
     loop {
         let event = recv_from(IPC_SUPERVISE as u64);
-        let service = u64::from(supervise_service(event));
+        let id = supervise_service(event);
         let kind = supervise_kind(event);
 
-        if kind == SERVICE_KIND_FAULT {
-            if service == BLK_SERVICE {
-                if service_status(BLK_SERVICE) == 0 {
-                    log("initd: blk down\n");
-                }
-                if service_start(BLK_SERVICE) == 0 {
-                    log("initd: restarted blk\n");
-                } else {
-                    log("initd: restart failed\n");
-                }
-            } else if service == KBD_SERVICE {
-                if service_status(KBD_SERVICE) == 0 {
-                    log("initd: kbd down\n");
-                }
-                if service_start(KBD_SERVICE) == 0 {
-                    log("initd: restarted kbd\n");
-                } else {
-                    log("initd: restart failed\n");
-                }
+        // A malformed event naming no catalog service must not end the boot.
+        let Some(service) = spec(id) else {
+            log("initd: unknown service\n");
+            continue;
+        };
+
+        match kind {
+            SERVICE_KIND_FAULT => restart(service, &mut budget),
+            SERVICE_KIND_EXIT => {
+                log_parts(&["initd: ", service.name, " stopped\n"]);
+                stop_live_services();
+                task_exit()
             }
+            _ => {
+                log("initd: unknown event\n");
+            }
+        }
+    }
+}
+
+/// Revives `service` after a fault, or gives up when its budget is spent.
+///
+/// The status check only feeds the "down" diagnostic; `service_start` is
+/// idempotent, so an already-live service is never reset by a duplicate event.
+fn restart(service: ServiceSpec, budget: &mut RestartBudget) {
+    if !budget.record(service.id) {
+        log_parts(&["initd: ", service.name, " restart budget spent\n"]);
+        return;
+    }
+    if service_status(u64::from(service.id)) == 0 {
+        log_parts(&["initd: ", service.name, " down\n"]);
+    }
+    if service_start(u64::from(service.id)) == 0 {
+        log_parts(&["initd: restarted ", service.name, "\n"]);
+    } else {
+        log("initd: restart failed\n");
+    }
+}
+
+/// Stops every service still running, dependents before their providers.
+///
+/// The service whose exit started the shutdown is already gone, so the status
+/// check skips it instead of stopping it twice.
+fn stop_live_services() {
+    for service in shutdown_order() {
+        if service_status(u64::from(service.id)) != 1 {
             continue;
         }
-
-        // A clean exit is final: the block driver stopped after the shell
-        // asked it to. The keyboard driver is persistent, so stop it now —
-        // otherwise a live driver would keep the boot from finishing — then
-        // end supervision so the boot ends once no task is left.
-        if service == BLK_SERVICE {
-            log("initd: blk stopped\n");
-            if service_stop(KBD_SERVICE) == 0 {
-                log("initd: kbd stopped\n");
-            }
-            task_exit()
+        if service_stop(u64::from(service.id)) == 0 {
+            log_parts(&["initd: ", service.name, " stopped\n"]);
         }
     }
 }

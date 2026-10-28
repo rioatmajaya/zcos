@@ -328,6 +328,23 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **The service list lives in one place, restarts have a budget, and shutdown
+  is ordered** (F7f, core system): service ids and names were duplicated in the
+  kernel table and in `initd`, and shutdown hard-coded "when the block driver
+  exits, stop the keyboard driver". `zc_abi::SERVICE_CATALOG` is now the single
+  list — id, name, and boot order — and the kernel table pairs each entry with
+  its task slot. A new host-tested `zc-supervise` crate owns the
+  restart budget (three per service per boot) and yields the catalog in reverse
+  for shutdown, so `initd` is a thin loop that logs catalog names through one
+  `SYS_LOG_WRITE`. Unknown service ids and event kinds are logged and ignored.
+  A clean exit from any supervised service stops the survivors in reverse boot
+  order and ends supervision, instead of special-casing the block driver. The
+  boot still logs `initd: blk down`, `initd: restarted blk`, `initd: blk
+  stopped`, and `initd: kbd stopped`, and the three checksums remain
+  `0xd616ad79aaefb099`, `0x6d66e82d0f2d6fb8`, and `0x78ebd6d359914da7`. A boot
+  manifest file is deferred until a parser and reload path exist; the
+  compile-time catalog is the registry. See
+  [ADR 0051](docs/adr/0051-one-service-catalog-and-ordered-shutdown.md).
 - **A filesystem served over IPC can list** (F8h-0b): `FS_OP_LIST` (10) carries
   the directory in the node field and the entry index in the offset field; the
   reply payload is one `DirEntry`, or empty at the end, so the exchange carries

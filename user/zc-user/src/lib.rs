@@ -171,6 +171,31 @@ pub fn log(message: &str) -> u64 {
     syscall2(SYS_LOG_WRITE, message.as_ptr() as u64, message.len() as u64)
 }
 
+/// Writes several string pieces as one log line.
+///
+/// The pieces are joined in a fixed stack buffer and handed to the kernel in a
+/// single `SYS_LOG_WRITE`, so a line built from a catalog name and a suffix
+/// cannot be interleaved with another task's output. Text beyond
+/// [`LOG_LINE_MAX`] bytes is dropped; boot diagnostics are far shorter.
+#[inline(always)]
+pub fn log_parts(parts: &[&str]) -> u64 {
+    let mut buffer = [0u8; LOG_LINE_MAX];
+    let mut len = 0;
+    for part in parts {
+        let room = LOG_LINE_MAX - len;
+        let take = part.len().min(room);
+        buffer[len..len + take].copy_from_slice(&part.as_bytes()[..take]);
+        len += take;
+        if len == LOG_LINE_MAX {
+            break;
+        }
+    }
+    syscall2(SYS_LOG_WRITE, buffer.as_ptr() as u64, len as u64)
+}
+
+/// Longest line [`log_parts`] will assemble.
+pub const LOG_LINE_MAX: usize = 128;
+
 /// Opens a filesystem path, returning a descriptor or `u64::MAX`.
 #[inline(always)]
 pub fn open(path: &str) -> u64 {
