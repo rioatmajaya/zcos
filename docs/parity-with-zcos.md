@@ -190,12 +190,13 @@ The current tree has:
 - kernel-owned VFS, device, input, and display mechanisms;
 - ring-3 domains for virtual block, PS/2 input, PCI discovery, the compositor,
   the shell, and `initd`;
-- exactly two supervised services (`blk`, `kbd`) in the fixed task table.
+- exactly two supervised services (`blk`, `kbd`) in the fixed task table, named
+  once in `zc_abi::SERVICE_CATALOG` and applied by the data-driven `initd`.
 
 | Capability | Reference | Current | Status and gap |
 |---|---|---|---|
-| Service catalog | 19 endpoints, driver catalog, loader sandbox | 2 supervised services + fixed roles | ❌ Most service roles are absent. |
-| Discovery / loading | service discovery by name, driver match rules, dynamic spawn | fixed task indices, compile-time binaries, `SYS_SERVICE_START`/`STOP` | 🟡 Lifecycle policy exists; discovery and packaging do not. |
+| Service catalog | 19 endpoints, driver catalog, loader sandbox | 2 supervised services in one ABI catalog with boot order | ❌ Most service roles are absent, and the catalog is compile-time only. |
+| Discovery / loading | service discovery by name, driver match rules, dynamic spawn | fixed task indices, compile-time binaries, `SYS_SERVICE_START`/`STOP` | 🟡 Lifecycle policy exists with a bounded restart budget; discovery and packaging do not. |
 | Logging | `logd` | kernel and task serial logs | 🟡 No persistent or user-visible log service. |
 | Clipboard | `clipboardd` | none | ❌ |
 | Process/session manager | `procmgr`, sessions, job control | fixed slots | ❌ |

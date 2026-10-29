@@ -333,9 +333,9 @@ all three proof checksums remain `0xd616ad79aaefb099`,
   kernel table and in `initd`, and shutdown hard-coded "when the block driver
   exits, stop the keyboard driver". `zc_abi::SERVICE_CATALOG` is now the single
   list — id, name, and boot order — and the kernel table pairs each entry with
-  its task slot. A new host-tested `zc-supervise` crate owns the
-  restart budget (three per service per boot) and yields the catalog in reverse
-  for shutdown, so `initd` is a thin loop that logs catalog names through one
+  its task slot. A new host-tested `zc-supervise` crate owns the restart budget
+  (three per service per boot) and yields the catalog in reverse for shutdown,
+  so `initd` is a thin loop that logs catalog names through one
   `SYS_LOG_WRITE`. Unknown service ids and event kinds are logged and ignored.
   A clean exit from any supervised service stops the survivors in reverse boot
   order and ends supervision, instead of special-casing the block driver. The
