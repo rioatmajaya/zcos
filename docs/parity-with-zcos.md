@@ -383,7 +383,9 @@ agree.
 - Device manager, VFS boundary, logging, time, and a minimal identity/session
   boundary.
 - One service registry: name, endpoint, capabilities, health, and restart
-  policy. The catalog now supplies name, id, boot order, and restart policy; it
+  policy. The catalog now supplies name, id, boot order, and restart policy, and
+  the shell can observe state through a read-only grant
+  ([ADR 0052](adr/0052-service-state-is-observable-without-control.md)). It
   does not discover or load a service, and it has no endpoint or health data.
 - One boot manifest that names services and order; no magic indices spread
   across compositor, shell, and tests. The compile-time catalog is the registry
@@ -401,7 +403,8 @@ repeatable.
 **Goal.** A shell that can bring up, inspect, and shut down the system.
 
 - Complete the command set for files, mounts, processes, services, devices,
-  logs, time, and power.
+  logs, time, and power. `svc` now inspects the service catalog with a
+  read-only grant; processes, devices, logs, and time have no command yet.
 - Add pipelines, redirection, background jobs, history, completion, and scripts
   only as far as the core services can support them.
 - Share one command layer between the serial shell and the window terminal.
@@ -525,6 +528,8 @@ trustworthy core.
 4. Step 3 (core system) has started: [ADR 0051](adr/0051-one-service-catalog-and-ordered-shutdown.md)
    makes the ABI catalog the one service list, surfaces a bounded per-service
    restart budget, and shuts live services down in reverse boot order. The
+   shell can inspect that catalog through a read-only grant
+   ([ADR 0052](adr/0052-service-state-is-observable-without-control.md)). The
    compile-time catalog is still the registry; discovery, endpoints, health, and
    a parsed boot manifest remain. The three proof checksums still hold.
 5. Do not start the app catalog, widget toolkit, or host runner yet.

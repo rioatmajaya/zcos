@@ -349,7 +349,10 @@ VFS → write path → journaling → `fsck`**.
       step then moves the ids and names into `zc_abi::SERVICE_CATALOG`, puts a
       per-service restart budget and reverse-order shutdown in the host-tested
       `zc-supervise` crate, and reduces `initd` to a data-driven loop (see
-      [ADR 0051](adr/0051-one-service-catalog-and-ordered-shutdown.md)).
+      [ADR 0051](adr/0051-one-service-catalog-and-ordered-shutdown.md)). The
+      shell's `svc` command then reports each catalog entry's state through a
+      read-only grant, so the registry is visible without granting control (see
+      [ADR 0052](adr/0052-service-state-is-observable-without-control.md)).
 - [x] F7g: crash consistency. `Volume::mount_into` replays the log and then
       **clamps `head_seq` to the last record that actually replayed**, reporting
       it through `was_recovered()`. A superblock can claim a record a crash never

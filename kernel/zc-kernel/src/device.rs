@@ -173,6 +173,17 @@ pub const fn service_grant(id: u32) -> Capability {
     Capability::new(service_cap(id), Rights::READ.union(Rights::WRITE))
 }
 
+/// Capability object granting read-only observation of one supervised service.
+///
+/// `READ` alone authorizes [`zc_abi::SYS_SERVICE_STATUS`]; a domain holding it
+/// can report whether a service is up but cannot start, stop, or restart the
+/// domain by naming its id. This is the grant a diagnostic role gets, so
+/// observation never implies control.
+#[must_use]
+pub const fn service_status_grant(id: u32) -> Capability {
+    Capability::new(service_cap(id), Rights::READ)
+}
+
 /// Port grants the block driver holds at spawn: none.
 ///
 /// Its BAR window arrives at runtime, delegated by the manager over
@@ -189,6 +200,12 @@ pub const BLK_SETUP_GRANTS: usize = 0;
 /// checks this grant before touching the slot, so a task without it cannot
 /// start or stop a domain.
 pub const INITD_SETUP_GRANTS: usize = 2;
+
+/// Service status grants the shell holds at spawn.
+///
+/// One `READ` grant per catalog service, so the `svc` command can report
+/// whether a service is up without gaining the right to start or stop it.
+pub const SHELL_SETUP_GRANTS: usize = 2;
 
 /// Port and memory grants the device manager holds at spawn.
 ///
@@ -377,5 +394,16 @@ mod tests {
         assert!(service.rights().contains(Rights::WRITE));
         // One grant per supervised service: block and keyboard.
         assert_eq!(INITD_SETUP_GRANTS, 2);
+        assert_eq!(INITD_SETUP_GRANTS, zc_abi::SERVICE_CATALOG.len());
+    }
+
+    #[test]
+    fn status_observation_never_carries_control() {
+        let status = service_status_grant(zc_abi::BLK_SERVICE);
+        assert_eq!(status.object(), service_cap(zc_abi::BLK_SERVICE));
+        assert!(status.rights().contains(Rights::READ));
+        // A diagnostic role must not be able to start or stop the service.
+        assert!(!status.rights().contains(Rights::WRITE));
+        assert_eq!(SHELL_SETUP_GRANTS, zc_abi::SERVICE_CATALOG.len());
     }
 }

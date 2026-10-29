@@ -3454,12 +3454,16 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
         // The supervisor controls both services: the block driver and the
         // keyboard driver. Their authority is provisioned as data, so the
         // lifecycle syscalls check a grant instead of trusting the service id
-        // the caller names.
-        let _ = caps[INITD_INDEX].insert(device::service_grant(service::BLK_SERVICE));
-        let _ = caps[INITD_INDEX].insert(device::service_grant(service::KBD_SERVICE));
+        // the caller names. The shell gets a read-only grant per service so
+        // `svc` can report state without gaining control.
+        for spec in zc_abi::SERVICE_CATALOG {
+            let _ = caps[INITD_INDEX].insert(device::service_grant(spec.id));
+            let _ = caps[service::SHELL_TASK].insert(device::service_status_grant(spec.id));
+        }
         let _ = crate::serial::print(format_args!(
-            "service: 2 roles, {} grants (initd -> blk, kbd)\n",
-            device::INITD_SETUP_GRANTS,
+            "service: {} roles, {} grants (initd -> blk, kbd; shell -> status)\n",
+            zc_abi::SERVICE_CATALOG.len(),
+            device::INITD_SETUP_GRANTS + device::SHELL_SETUP_GRANTS,
         ));
         // The display task alone may mint surfaces. The factory is a distinct
         // object id, so a surface capability can never be mistaken for it, and

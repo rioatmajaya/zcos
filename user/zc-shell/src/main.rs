@@ -2,8 +2,13 @@
 //!
 //! Reads keystrokes with blocking serial reads, edits a single line with
 //! backspace support, and runs `help`, `echo`, `cat`, `ls`, `stat`, `write`,
-//! `tmp`, `persist`, `chmod`, `mount`, `umount`, and `exit`. Output goes through
-//! the log syscall, so the transcript appears in the kernel serial log.
+//! `tmp`, `persist`, `chmod`, `mount`, `umount`, `svc`, and `exit`. Output goes
+//! through the log syscall, so the transcript appears in the kernel serial log.
+//!
+//! `svc` walks `zc_abi::SERVICE_CATALOG` and asks the kernel for each
+//! service's state, so the registry is visible to a person instead of only in
+//! the boot log. The shell holds a read-only grant per service: it can report
+//! state but cannot start or stop a domain.
 //!
 //! `persist` is the durability proof: it writes the zcfs volume through the
 //! VFS, unmounts and remounts it, and reads its own bytes back. The remount
@@ -22,8 +27,8 @@
 
 use zc_user::{
     DIRENT_LEN, DirEntry, FS_ID_ZCFS, FS_OP_STOP, IPC_FS, KIND_CHR, KIND_DIR, READDIR_END,
-    READDIR_ENTRY, Stat, chmod, close, create, log, mount, open, poweroff, read, readdir, send_to,
-    serial_read, stat, task_exit, umount, write,
+    READDIR_ENTRY, SERVICE_CATALOG, Stat, chmod, close, create, log, log_parts, mount, open,
+    poweroff, read, readdir, send_to, serial_read, service_status, stat, task_exit, umount, write,
 };
 
 /// Contents `persist` writes and expects to read back.
@@ -214,7 +219,7 @@ fn run(line: &[u8]) -> bool {
     }
     match argv[0] {
         b"help" => {
-            log("Commands: help echo cat ls stat write tmp persist chmod mount umount poweroff exit\n");
+            log("Commands: help echo cat ls stat write tmp persist chmod mount umount svc poweroff exit\n");
         }
         b"echo" => {
             for index in 1..count {
@@ -461,6 +466,18 @@ fn run(line: &[u8]) -> bool {
                 return false;
             }
             log("vfs: persistence ok\n");
+        }
+        b"svc" => {
+            // The catalog is the only list of service identity; the shell
+            // never spells a service name or id itself.
+            for service in SERVICE_CATALOG {
+                let state = if service_status(u64::from(service.id)) == 1 {
+                    "up"
+                } else {
+                    "down"
+                };
+                log_parts(&["svc: ", service.name, " ", state, "\n"]);
+            }
         }
         b"exit" => {
             log("shell exiting\n");

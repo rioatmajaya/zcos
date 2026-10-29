@@ -16,4 +16,5 @@ cat /tmp/scratch
 chmod /tmp/scratch 0644
 cat /tmp/scratch
 stat /dev/blk
+svc
 exit

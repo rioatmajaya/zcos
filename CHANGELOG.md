@@ -328,6 +328,17 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **The shell can list service state without gaining control** (F7f, core
+  system): `svc` walks `zc_abi::SERVICE_CATALOG` and asks the kernel for each
+  service, printing `svc: blk up` and `svc: kbd up`. The shell receives one
+  read-only grant per catalog service, so it can report state but cannot start
+  or stop a domain; `initd` keeps the combined read/write grant. Kernel
+  provisioning now loops over the catalog instead of naming the two ids, and
+  host tests tie both grant counts to the catalog length. The boot script runs
+  `svc` before `exit`, the CI transcript checks both lines, and the three
+  checksums remain `0xd616ad79aaefb099`, `0x6d66e82d0f2d6fb8`, and
+  `0x78ebd6d359914da7`. See
+  [ADR 0052](docs/adr/0052-service-state-is-observable-without-control.md).
 - **The service list lives in one place, restarts have a budget, and shutdown
   is ordered** (F7f, core system): service ids and names were duplicated in the
   kernel table and in `initd`, and shutdown hard-coded "when the block driver
