@@ -353,6 +353,10 @@ VFS → write path → journaling → `fsck`**.
       shell's `svc` command then reports each catalog entry's state through a
       read-only grant, so the registry is visible without granting control (see
       [ADR 0052](adr/0052-service-state-is-observable-without-control.md)).
+      `SYS_GETID` then lets a domain read the identity it was spawned with —
+      `initd` proves it is root, the shell proves it is not — without a setuid
+      path (see
+      [ADR 0053](adr/0053-identity-is-readable-but-not-settable.md)).
 - [x] F7g: crash consistency. `Volume::mount_into` replays the log and then
       **clamps `head_seq` to the last record that actually replayed**, reporting
       it through `was_recovered()`. A superblock can claim a record a crash never

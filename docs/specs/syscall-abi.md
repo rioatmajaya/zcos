@@ -23,8 +23,8 @@ filesystem exchange page (see [`server-protocol.md`](server-protocol.md)).
 
 ## Syscall table
 
-Numbers are stable and never reused. `SYS_CLOCK` (38) is the highest
-assigned number; 39 and above are rejected.
+Numbers are stable and never reused. `SYS_GETID` (39) is the highest
+assigned number; 40 and above are rejected.
 
 Two numbers are **declared but not yet implemented**: `SYS_YIELD` (0) and
 `SYS_MAP_FRAME` (4) are recognized by the dispatch table but have no handler, so
@@ -72,6 +72,7 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 36 | `SYS_READDIR` | path ptr, length, entry index, `DirEntry` out ptr (`r10`) | 0 (`READDIR_ENTRY`) or 1 (`READDIR_END`) | `u64::MAX` |
 | 37 | `SYS_WINDOW_ID` | — | the caller's window id, or `u64::MAX` if it owns none | — |
 | 38 | `SYS_CLOCK` | — | packed hour/minute/second, plus `CLOCK_LIVE` when read from the RTC | — |
+| 39 | `SYS_GETID` | — | user id in the high 32 bits and group id in the low 32 bits | — |
 
 ### Clock
 
@@ -88,6 +89,16 @@ never receives a tick, so the proof frame's taskbar is exactly the fixed label
 its checksum was recorded with. A malformed or unavailable RTC falls back to
 that same fixed reading rather than inventing a time; the kernel logs
 `clock: rtc ok`, `clock: rtc unavailable`, or `clock: proof` once.
+
+### Identity
+
+`SYS_GETID` (39) returns the caller's user and group ids packed into one word:
+the high 32 bits are the user id, the low 32 bits the group id. `zc_abi`
+provides `identity_word`, `identity_uid`, and `identity_gid`. The identity is
+set at spawn from the kernel's owner table and kept across a service revive; a
+task can learn who it is but cannot change it. `initd` runs as the only root
+task and logs `initd: root identity`, while the shell runs as uid 1 and prints
+`uid=1 gid=1` through its `id` command.
 
 ### Window identity
 

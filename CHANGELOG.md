@@ -328,6 +328,15 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **A task can read its own identity, but not change it** (F7f, core system):
+  `SYS_GETID` (39) returns the spawn-time user and group ids packed into one
+  word, answered from the same owner record the VFS permission check uses. The
+  shell's `id` command prints `uid=1 gid=1`, and `initd` proves it is the only
+  root task with `initd: root identity`. There is no setuid or login call:
+  identity remains spawn-time data, so the getter cannot become an escalation
+  path. The three checksums remain `0xd616ad79aaefb099`, `0x6d66e82d0f2d6fb8`,
+  and `0x78ebd6d359914da7`. See
+  [ADR 0053](docs/adr/0053-identity-is-readable-but-not-settable.md).
 - **The shell can list service state without gaining control** (F7f, core
   system): `svc` walks `zc_abi::SERVICE_CATALOG` and asks the kernel for each
   service, printing `svc: blk up` and `svc: kbd up`. The shell receives one

@@ -183,6 +183,32 @@ pub const SYS_WINDOW_ID: u64 = 37;
 /// [`crate::Clock::from_word`] and can test
 /// [`crate::CLOCK_LIVE`] to tell the two sources apart.
 pub const SYS_CLOCK: u64 = 38;
+/// Returns the calling task's user and group ids packed into one word.
+///
+/// The high 32 bits are the user id and the low 32 bits the group id; see
+/// [`identity_word`], [`identity_uid`], and [`identity_gid`]. The identity is
+/// fixed at spawn by the kernel's owner table, so a task can learn who it is
+/// but cannot change it. The shell prints the word through its `id` command;
+/// `initd` checks that it is root at boot.
+pub const SYS_GETID: u64 = 39;
+
+/// Packs a user and group id into the one word [`SYS_GETID`] returns.
+#[must_use]
+pub const fn identity_word(uid: u32, gid: u32) -> u64 {
+    ((uid as u64) << 32) | (gid as u64)
+}
+
+/// Extracts the user id from an [`identity_word`].
+#[must_use]
+pub const fn identity_uid(word: u64) -> u32 {
+    (word >> 32) as u32
+}
+
+/// Extracts the group id from an [`identity_word`].
+#[must_use]
+pub const fn identity_gid(word: u64) -> u32 {
+    word as u32
+}
 
 /// Returned by `SYS_READDIR` when an entry was written into the buffer.
 pub const READDIR_ENTRY: u64 = 0;
@@ -282,8 +308,27 @@ mod tests {
         assert_eq!(SYS_WINDOW_READ, 35);
         assert_eq!(SYS_READDIR, 36);
         assert_eq!(SYS_WINDOW_ID, 37);
+        assert_eq!(SYS_CLOCK, 38);
+        assert_eq!(SYS_GETID, 39);
         assert_eq!(READDIR_ENTRY, 0);
         assert_eq!(READDIR_END, 1);
+    }
+
+    #[test]
+    fn identity_word_round_trips_both_ids() {
+        let root = identity_word(0, 0);
+        assert_eq!(identity_uid(root), 0);
+        assert_eq!(identity_gid(root), 0);
+
+        let user = identity_word(1, 1);
+        assert_eq!(identity_uid(user), 1);
+        assert_eq!(identity_gid(user), 1);
+        assert_ne!(user, root);
+
+        // The halves are independent, so a uid cannot be read as a gid.
+        let mixed = identity_word(7, 9);
+        assert_eq!(identity_uid(mixed), 7);
+        assert_eq!(identity_gid(mixed), 9);
     }
 
     #[test]

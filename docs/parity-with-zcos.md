@@ -147,7 +147,7 @@ the 2026-10-20 changelog records the Linux entries being removed.
 | Foreign filesystems | ZCFS / RAMFS / ISO9660 are the documented set | FAT32 read-only, ext2 read-only, zcfs read-write | 🟡 Current has more read-only formats but no ISO9660; both are narrower than a daily-driver rootfs. |
 | Block layer | AHCI, ATA, NVMe, virtio-blk; block service | virtio-blk only; four-slot write-back cache | 🟡 Only one transport is proven. AHCI/NVMe are required for hardware parity. |
 | VFS placement | userspace `vfs` service; kernel keeps mechanisms | kernel VFS + `FileSystem` trait; storage parsers in `zc-storage` | 🟡 A deliberate difference. Keep it until a service split is justified by a measured need. |
-| Permissions | authentication/session plus service policy | uid/gid, POSIX mode classes, root bypass, per-descriptor cached stat | 🟡 File permissions are strong; owners are runtime-only and authentication is absent. |
+| Permissions | authentication/session plus service policy | uid/gid, POSIX mode classes, root bypass, per-descriptor cached stat; `SYS_GETID` reads the spawn-time identity | 🟡 File permissions are strong; owners are runtime-only and authentication is absent. |
 | Installer / update slots | `zinstall`, signed updates, A/B slot promotion | none | ❌ Later phase. |
 
 ### 4.4 Drivers and hardware
@@ -381,7 +381,9 @@ agree.
   shutdown are done ([ADR 0051](adr/0051-one-service-catalog-and-ordered-shutdown.md)).
   Explicit dependencies, health, and readiness are still open.
 - Device manager, VFS boundary, logging, time, and a minimal identity/session
-  boundary.
+  boundary. Identity is now readable through `SYS_GETID`
+  ([ADR 0053](adr/0053-identity-is-readable-but-not-settable.md)); a logging
+  service, authentication, and sessions are still absent.
 - One service registry: name, endpoint, capabilities, health, and restart
   policy. The catalog now supplies name, id, boot order, and restart policy, and
   the shell can observe state through a read-only grant
@@ -529,7 +531,9 @@ trustworthy core.
    makes the ABI catalog the one service list, surfaces a bounded per-service
    restart budget, and shuts live services down in reverse boot order. The
    shell can inspect that catalog through a read-only grant
-   ([ADR 0052](adr/0052-service-state-is-observable-without-control.md)). The
+   ([ADR 0052](adr/0052-service-state-is-observable-without-control.md)), and a
+   task can read its own spawn-time identity
+   ([ADR 0053](adr/0053-identity-is-readable-but-not-settable.md)). The
    compile-time catalog is still the registry; discovery, endpoints, health, and
    a parsed boot manifest remain. The three proof checksums still hold.
 5. Do not start the app catalog, widget toolkit, or host runner yet.

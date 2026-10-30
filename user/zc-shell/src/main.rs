@@ -2,8 +2,13 @@
 //!
 //! Reads keystrokes with blocking serial reads, edits a single line with
 //! backspace support, and runs `help`, `echo`, `cat`, `ls`, `stat`, `write`,
-//! `tmp`, `persist`, `chmod`, `mount`, `umount`, `svc`, and `exit`. Output goes
-//! through the log syscall, so the transcript appears in the kernel serial log.
+//! `tmp`, `persist`, `chmod`, `mount`, `umount`, `id`, `svc`, and `exit`.
+//! Output goes through the log syscall, so the transcript appears in the kernel
+//! serial log.
+//!
+//! `id` asks the kernel for this task's user and group ids. The shell runs as
+//! an unprivileged user, so `id` is the observable side of the same owner
+//! record the VFS permission checks use.
 //!
 //! `svc` walks `zc_abi::SERVICE_CATALOG` and asks the kernel for each
 //! service's state, so the registry is visible to a person instead of only in
@@ -27,8 +32,9 @@
 
 use zc_user::{
     DIRENT_LEN, DirEntry, FS_ID_ZCFS, FS_OP_STOP, IPC_FS, KIND_CHR, KIND_DIR, READDIR_END,
-    READDIR_ENTRY, SERVICE_CATALOG, Stat, chmod, close, create, log, log_parts, mount, open,
-    poweroff, read, readdir, send_to, serial_read, service_status, stat, task_exit, umount, write,
+    READDIR_ENTRY, SERVICE_CATALOG, Stat, chmod, close, create, getid, identity_gid, identity_uid,
+    log, log_parts, mount, open, poweroff, read, readdir, send_to, serial_read, service_status,
+    stat, task_exit, umount, write,
 };
 
 /// Contents `persist` writes and expects to read back.
@@ -219,7 +225,7 @@ fn run(line: &[u8]) -> bool {
     }
     match argv[0] {
         b"help" => {
-            log("Commands: help echo cat ls stat write tmp persist chmod mount umount svc poweroff exit\n");
+            log("Commands: help echo cat ls stat write tmp persist chmod mount umount id svc poweroff exit\n");
         }
         b"echo" => {
             for index in 1..count {
@@ -466,6 +472,15 @@ fn run(line: &[u8]) -> bool {
                 return false;
             }
             log("vfs: persistence ok\n");
+        }
+        b"id" => {
+            let word = getid();
+            out_bytes(b"uid=");
+            out_u64(u64::from(identity_uid(word)));
+            out_bytes(b" gid=");
+            out_u64(u64::from(identity_gid(word)));
+            out_bytes(b"\n");
+            out_flush();
         }
         b"svc" => {
             // The catalog is the only list of service identity; the shell

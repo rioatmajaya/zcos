@@ -23,14 +23,23 @@
 
 use zc_supervise::{RestartBudget, ServiceSpec, shutdown_order, spec};
 use zc_user::{
-    IPC_SUPERVISE, SERVICE_KIND_EXIT, SERVICE_KIND_FAULT, log, log_parts, recv_from, service_start,
-    service_status, service_stop, supervise_kind, supervise_service, task_exit,
+    IPC_SUPERVISE, SERVICE_KIND_EXIT, SERVICE_KIND_FAULT, getid, identity_uid, log, log_parts,
+    recv_from, service_start, service_status, service_stop, supervise_kind, supervise_service,
+    task_exit,
 };
 
 /// Task entry point; the kernel provides a fresh user stack.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
     log("initd starting\n");
+    // The supervisor is the only root task (see `zc_kernel::service::OWNERS`).
+    // If spawn ever changed that, the identity the VFS treats as privileged
+    // would silently move, so the boot says which one it actually got.
+    if identity_uid(getid()) == 0 {
+        log("initd: root identity\n");
+    } else {
+        log("initd: not root\n");
+    }
     let mut budget = RestartBudget::new();
     loop {
         let event = recv_from(IPC_SUPERVISE as u64);

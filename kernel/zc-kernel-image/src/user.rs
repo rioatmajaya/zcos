@@ -1999,6 +1999,13 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             regs.set_result(clock.to_word(live));
             0
         }
+        Ok(Action::GetId) => {
+            // The identity is fixed at spawn and kept across a revive, so the
+            // answer is the task's own owner record, not a caller argument.
+            let owner = tasks.current_owner();
+            regs.set_result(zc_abi::identity_word(owner.uid, owner.gid));
+            0
+        }
         Ok(Action::WindowRead) => {
             // The stream belongs to the window's client: it is derived from the
             // focused window, and another task draining it would take events
