@@ -10,10 +10,10 @@ use zc_abi::{
     SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOCK, SYS_CLOSE, SYS_CREATE, SYS_FB_INFO, SYS_GETID,
     SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_MMIO_MAP, SYS_MOUNT,
     SYS_MOUSE_READ, SYS_OPEN, SYS_PORT_CLAIM, SYS_POWEROFF, SYS_READ, SYS_READDIR, SYS_RECV,
-    SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START, SYS_SERVICE_STATUS,
-    SYS_SERVICE_STOP, SYS_STAT, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP,
-    SYS_TASK_EXIT, SYS_TERM_READ, SYS_UMOUNT, SYS_WINDOW_CLOSE, SYS_WINDOW_ID, SYS_WINDOW_READ,
-    SYS_WRITE, SYS_YIELD, SyscallError,
+    SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_READY, SYS_SERVICE_START,
+    SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY,
+    SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TERM_READ, SYS_UMOUNT, SYS_WINDOW_CLOSE, SYS_WINDOW_ID,
+    SYS_WINDOW_READ, SYS_WRITE, SYS_YIELD, SyscallError,
 };
 
 /// The kernel operation a syscall number requests.
@@ -102,6 +102,8 @@ pub enum Action {
     Clock,
     /// Read the caller's user and group ids.
     GetId,
+    /// Declare the running service ready to serve.
+    ServiceReady,
 }
 
 /// Maps a raw syscall number to its [`Action`].
@@ -150,6 +152,7 @@ pub const fn dispatch(number: u64) -> Result<Action, SyscallError> {
         SYS_WINDOW_ID => Ok(Action::WindowId),
         SYS_CLOCK => Ok(Action::Clock),
         SYS_GETID => Ok(Action::GetId),
+        SYS_SERVICE_READY => Ok(Action::ServiceReady),
         _ => Err(SyscallError::InvalidNumber),
     }
 }
@@ -200,12 +203,13 @@ mod tests {
         assert_eq!(dispatch(SYS_READDIR), Ok(Action::ReadDir));
         assert_eq!(dispatch(SYS_CLOCK), Ok(Action::Clock));
         assert_eq!(dispatch(SYS_GETID), Ok(Action::GetId));
+        assert_eq!(dispatch(SYS_SERVICE_READY), Ok(Action::ServiceReady));
     }
 
     #[test]
     fn unknown_numbers_are_rejected() {
-        // The last assigned number is SYS_GETID (39), so probe past it.
-        assert_eq!(dispatch(40), Err(SyscallError::InvalidNumber));
+        // The last assigned number is SYS_SERVICE_READY (40), so probe past it.
+        assert_eq!(dispatch(41), Err(SyscallError::InvalidNumber));
         assert_eq!(
             dispatch(u64::MAX),
             Err(SyscallError::InvalidNumber)

@@ -36,11 +36,12 @@ than bypassed.
 | 1 | 5 | `kbd` | `service_cap(1)` = `0x4000_0001` |
 
 `SYS_SERVICE_START` (revive), `SYS_SERVICE_STOP` (kill, revoking IRQ/port
-authority), and `SYS_SERVICE_STATUS` (up/down) act on a service id and require
-the caller to hold that service's capability. The kernel performs the
-mechanism; the **policy** of whether to restart lives in `initd`, which blocks
-on `IPC_SUPERVISE` and reacts to events (see
-[`ipc-abi.md`](ipc-abi.md#supervision-events-channel-4)).
+authority), and `SYS_SERVICE_STATUS` (liveness plus readiness) act on a service
+id and require the caller to hold that service's capability. A service declares
+itself ready with `SYS_SERVICE_READY`, which takes no service id: a task can
+only report on itself. The kernel performs the mechanism; the **policy** of
+whether to restart lives in `initd`, which blocks on `IPC_SUPERVISE` and reacts
+to events (see [`ipc-abi.md`](ipc-abi.md#supervision-events-channel-4)).
 
 ## Driver-domain contract
 

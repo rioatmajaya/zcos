@@ -108,8 +108,8 @@ jobs:
         grep -q "task 2: tmp: ok" build/boot.log
         grep -q "task 2: /dev/blk: char device" build/boot.log
         grep -q "task 2: uid=1 gid=1" build/boot.log
-        grep -q "task 2: svc: blk up" build/boot.log
-        grep -q "task 2: svc: kbd up" build/boot.log
+        grep -q "task 2: svc: blk up ready" build/boot.log
+        grep -q "task 2: svc: kbd up ready" build/boot.log
         grep -q "task 2: /tmp/scratch: file, 8 bytes, mode 0644, uid 1 gid 1" build/boot.log
         grep -q "task 2: chmod: ok" build/boot.log
         grep -q "audit: task 2 denied read /tmp/scratch" build/boot.log

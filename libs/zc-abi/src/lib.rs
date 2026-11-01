@@ -67,8 +67,9 @@ pub use mmio::{
     MMIO_VIRT, MmioInfo, mmio_cap,
 };
 pub use service::{
-    BLK_SERVICE, KBD_SERVICE, SERVICE_CATALOG, SERVICE_KIND_EXIT, SERVICE_KIND_FAULT, ServiceSpec,
-    service_cap, supervise_event, supervise_kind, supervise_service,
+    BLK_SERVICE, KBD_SERVICE, SERVICE_CATALOG, SERVICE_KIND_EXIT, SERVICE_KIND_FAULT,
+    SERVICE_STATE_READY, SERVICE_STATE_UP, ServiceSpec, service_cap, service_is_ready,
+    service_is_up, service_state, supervise_event, supervise_kind, supervise_service,
 };
 pub use session::{replay_launch, replay_pointer};
 pub use surface::{
@@ -85,10 +86,10 @@ pub use syscall::{
     SYS_READDIR,
     READDIR_END,
     READDIR_ENTRY,
-    SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_START,
-    SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY,
-    SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TERM_READ, SYS_UMOUNT, SYS_WINDOW_CLOSE,
-    SYS_WINDOW_ID, SYS_WINDOW_READ, SYS_WRITE, SYS_YIELD, SyscallError,
+    SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_READY,
+    SYS_SERVICE_START, SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT, SYS_SURFACE_CREATE,
+    SYS_SURFACE_DESTROY, SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TERM_READ, SYS_UMOUNT,
+    SYS_WINDOW_CLOSE, SYS_WINDOW_ID, SYS_WINDOW_READ, SYS_WRITE, SYS_YIELD, SyscallError,
     identity_gid, identity_uid, identity_word,
 };
 pub use terminal::{

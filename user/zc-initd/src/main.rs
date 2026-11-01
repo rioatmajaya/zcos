@@ -24,8 +24,8 @@
 use zc_supervise::{RestartBudget, ServiceSpec, shutdown_order, spec};
 use zc_user::{
     IPC_SUPERVISE, SERVICE_KIND_EXIT, SERVICE_KIND_FAULT, getid, identity_uid, log, log_parts,
-    recv_from, service_start, service_status, service_stop, supervise_kind, supervise_service,
-    task_exit,
+    recv_from, service_is_up, service_start, service_status, service_stop, supervise_kind,
+    supervise_service, task_exit,
 };
 
 /// Task entry point; the kernel provides a fresh user stack.
@@ -75,7 +75,7 @@ fn restart(service: ServiceSpec, budget: &mut RestartBudget) {
         log_parts(&["initd: ", service.name, " restart budget spent\n"]);
         return;
     }
-    if service_status(u64::from(service.id)) == 0 {
+    if !service_is_up(service_status(u64::from(service.id))) {
         log_parts(&["initd: ", service.name, " down\n"]);
     }
     if service_start(u64::from(service.id)) == 0 {
@@ -91,7 +91,7 @@ fn restart(service: ServiceSpec, budget: &mut RestartBudget) {
 /// check skips it instead of stopping it twice.
 fn stop_live_services() {
     for service in shutdown_order() {
-        if service_status(u64::from(service.id)) != 1 {
+        if !service_is_up(service_status(u64::from(service.id))) {
             continue;
         }
         if service_stop(u64::from(service.id)) == 0 {

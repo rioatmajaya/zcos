@@ -328,6 +328,17 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **A service reports ready separately from alive** (F7f, core system):
+  `SYS_SERVICE_STATUS` now returns a state word with `SERVICE_STATE_UP` and
+  `SERVICE_STATE_READY`, and `SYS_SERVICE_READY` (40) lets a supervised service
+  declare that its bring-up finished. The kernel clears readiness on spawn,
+  revive, and fault restart, so a restarted driver has to declare it again once
+  it re-enters its serving loop; `zc-blk` does so after the volume is mounted
+  and `zc-kbd` after the input lines are re-claimed. The shell's `svc` prints
+  `up ready`, `up starting`, or `down`, and `initd` reads the word through
+  `service_is_up` instead of comparing it to `1`. The three checksums remain
+  `0xd616ad79aaefb099`, `0x6d66e82d0f2d6fb8`, and `0x78ebd6d359914da7`. See
+  [ADR 0054](docs/adr/0054-liveness-and-readiness-are-separate.md).
 - **A task can read its own identity, but not change it** (F7f, core system):
   `SYS_GETID` (39) returns the spawn-time user and group ids packed into one
   word, answered from the same owner record the VFS permission check uses. The

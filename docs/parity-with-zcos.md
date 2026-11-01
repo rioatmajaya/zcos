@@ -133,7 +133,7 @@ the 2026-10-20 changelog records the Linux entries being removed.
 | IPC | synchronous endpoints, shared memory, notifications, poll | channels, blocking send/receive, shared exchange page, `SYS_SEND_TO`/`SYS_RECV_FROM` | 🟡 Enough for current services; no general shared-memory API or notification object. |
 | Capabilities | `libcap` rights over process/thread/endpoint/shm/IRQ/I/O/block; SOF manifests; signed policy | generation-safe tables, explicit rights, delegation, per-task I/O bitmap, port/IRQ claims | 🟡 Current delegation is strong, but there is no signed object or policy layer. |
 | Process model | `fork`/`exec`/`spawn`/`wait`, signals, process registry, sessions | fixed 10 task slots; `SYS_TASK_EXIT`, service revive, no fork/exec/wait | ❌ This is the single largest architectural blocker for real apps. The launcher cannot become a real app launcher while only two client slots exist. |
-| Syscall surface | about 70+ calls, including process, signal, network, library, Linux compatibility | 39 calls (`SYS_YIELD` through `SYS_CLOCK`) | 🟡 The current ABI is coherent; it is simply much smaller. Add calls only with specs and tests. |
+| Syscall surface | about 70+ calls, including process, signal, network, library, Linux compatibility | 41 numbers, highest `SYS_SERVICE_READY` (40), two reserved but unimplemented | 🟡 The current ABI is coherent; it is simply much smaller. Add calls only with specs and tests. |
 | Fault isolation | ring-3 faults kill only the domain; init supervises services | same principle; `initd` supervises `blk` and `kbd` | 🟡 The mechanism is at parity; the service catalog is much smaller. |
 | Linux personality | kernel-level POSIX translator for static x86_64 ELF (`busybox`, `tcc`), sockets `ENOSYS` | none | ⛔ Do not copy the kernel placement. If needed later, build a userspace personality domain. |
 | Linux driver strategy | many hand-written drivers, some in ring 0 | ring-3 driver domains with brokered authority | ✅ Keep the current boundary. Do not regress to ring-0 drivers for feature speed. |
@@ -379,7 +379,9 @@ agree.
 
 - `initd`: one ABI service catalog, per-service restart budget, and ordered
   shutdown are done ([ADR 0051](adr/0051-one-service-catalog-and-ordered-shutdown.md)).
-  Explicit dependencies, health, and readiness are still open.
+  Liveness and readiness are now separate
+  ([ADR 0054](adr/0054-liveness-and-readiness-are-separate.md)); explicit
+  dependencies and failure-rate health are still open.
 - Device manager, VFS boundary, logging, time, and a minimal identity/session
   boundary. Identity is now readable through `SYS_GETID`
   ([ADR 0053](adr/0053-identity-is-readable-but-not-settable.md)); a logging
@@ -387,8 +389,10 @@ agree.
 - One service registry: name, endpoint, capabilities, health, and restart
   policy. The catalog now supplies name, id, boot order, and restart policy, and
   the shell can observe state through a read-only grant
-  ([ADR 0052](adr/0052-service-state-is-observable-without-control.md)). It
-  does not discover or load a service, and it has no endpoint or health data.
+  ([ADR 0052](adr/0052-service-state-is-observable-without-control.md)) and
+  reports liveness and self-declared readiness
+  ([ADR 0054](adr/0054-liveness-and-readiness-are-separate.md)). It does not
+  discover or load a service, and it has no endpoint or failure-rate data.
 - One boot manifest that names services and order; no magic indices spread
   across compositor, shell, and tests. The compile-time catalog is the registry
   until a parser and reload path exist, so a new service still needs a fixed
@@ -533,9 +537,12 @@ trustworthy core.
    shell can inspect that catalog through a read-only grant
    ([ADR 0052](adr/0052-service-state-is-observable-without-control.md)), and a
    task can read its own spawn-time identity
-   ([ADR 0053](adr/0053-identity-is-readable-but-not-settable.md)). The
-   compile-time catalog is still the registry; discovery, endpoints, health, and
-   a parsed boot manifest remain. The three proof checksums still hold.
+   ([ADR 0053](adr/0053-identity-is-readable-but-not-settable.md)). Service
+   status now separates liveness from self-declared readiness
+   ([ADR 0054](adr/0054-liveness-and-readiness-are-separate.md)). The
+   compile-time catalog is still the registry; discovery, endpoints,
+   failure-rate health, and a parsed boot manifest remain. The three proof
+   checksums still hold.
 5. Do not start the app catalog, widget toolkit, or host runner yet.
 6. Keep `build/zcos.img` human-testable and keep the three proof images locked.
 

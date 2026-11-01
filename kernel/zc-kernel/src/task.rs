@@ -156,6 +156,11 @@ pub struct Task {
     frame: IrqFrame,
     alive: bool,
     blocked: bool,
+    /// Whether the task has declared itself ready to serve.
+    ///
+    /// Spawn and revive clear it: readiness describes a running service's
+    /// bring-up, so it is never inherited across a restart.
+    ready: bool,
     /// Page-table root the task runs under; loaded into CR3 on switch.
     cr3: u64,
     /// User and group the task runs as, for VFS permission checks.
@@ -185,6 +190,12 @@ impl Task {
     #[must_use]
     pub const fn is_blocked(self) -> bool {
         self.blocked
+    }
+
+    /// Returns whether the task has declared itself ready to serve.
+    #[must_use]
+    pub const fn is_ready(self) -> bool {
+        self.ready
     }
 
     /// Returns the page-table root the task runs under.
@@ -250,6 +261,7 @@ impl<const N: usize> TaskTable<N> {
             frame,
             alive: true,
             blocked: false,
+            ready: false,
             cr3,
             owner,
         });
@@ -321,6 +333,29 @@ impl<const N: usize> TaskTable<N> {
         matches!(self.tasks.get(index), Some(Some(task)) if task.alive)
     }
 
+    /// Returns whether the task at `index` is alive and has declared readiness.
+    ///
+    /// A dead slot is never ready, even if it was serving before it died.
+    #[must_use]
+    pub fn is_ready(&self, index: usize) -> bool {
+        matches!(self.tasks.get(index), Some(Some(task)) if task.alive && task.ready)
+    }
+
+    /// Marks the running task ready to serve.
+    ///
+    /// Returns `false` when there is no live running task. Readiness is a
+    /// per-spawn fact, so the caller cannot mark another slot: only the task
+    /// itself can say it finished its bring-up.
+    pub fn mark_current_ready(&mut self) -> bool {
+        match self.tasks[self.current].as_mut() {
+            Some(task) if task.alive => {
+                task.ready = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Returns whether any task other than `index` is alive and runnable.
     ///
     /// A blocked peer cannot make progress, so a task that would otherwise
@@ -356,6 +391,7 @@ impl<const N: usize> TaskTable<N> {
         task.frame = frame;
         task.alive = true;
         task.blocked = false;
+        task.ready = false;
         Ok(())
     }
 
@@ -370,6 +406,7 @@ impl<const N: usize> TaskTable<N> {
         };
         task.alive = false;
         task.blocked = false;
+        task.ready = false;
         Ok(())
     }
 
@@ -436,6 +473,7 @@ impl<const N: usize> TaskTable<N> {
         if let Some(task) = self.tasks[self.current].as_mut() {
             task.alive = false;
             task.blocked = false;
+            task.ready = false;
         }
         self.unblock_all();
         let next = self.next_runnable(self.current)?;
@@ -462,6 +500,7 @@ impl<const N: usize> TaskTable<N> {
             task.frame = init_frame;
             task.alive = true;
             task.blocked = false;
+            task.ready = false;
         }
         self.unblock_all();
         let next = self.next_runnable(self.current)?;
@@ -719,6 +758,36 @@ mod task_table_tests {
         // An empty table has no peers for anyone.
         let empty = TaskTable::<4>::new();
         assert!(!empty.has_runnable_other_than(0));
+    }
+
+    #[test]
+    fn readiness_is_per_spawn_and_cleared_by_revival() {
+        let mut table = TaskTable::<4>::new();
+        let zero = table
+            .spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000, Identity::ROOT)
+            .unwrap();
+        assert!(!table.is_ready(zero));
+        assert!(table.mark_current_ready());
+        assert!(table.is_ready(zero));
+
+        // A dead slot is never ready, even if it was serving.
+        table.kill(zero).unwrap();
+        assert!(!table.is_ready(zero));
+
+        // Reviving clears readiness: a restarted service must re-declare.
+        table
+            .respawn(zero, SyscallRegs::EMPTY, frame(0x500))
+            .unwrap();
+        assert!(table.is_alive(zero));
+        assert!(!table.is_ready(zero));
+        assert!(table.mark_current_ready());
+        assert!(table.is_ready(zero));
+
+        // A fault restart clears it the same way.
+        let mut regs = SyscallRegs::EMPTY;
+        let mut irq = IrqFrame::EMPTY;
+        let _ = table.restart_current(&mut regs, &mut irq, SyscallRegs::EMPTY, frame(0x500));
+        assert!(!table.is_ready(zero));
     }
 
     #[test]

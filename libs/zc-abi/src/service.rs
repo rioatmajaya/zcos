@@ -54,6 +54,51 @@ pub const fn service_cap(id: u32) -> u32 {
     0x4000_0000 | (id & 0x3FFF_FFFF)
 }
 
+/// State bit in [`SYS_SERVICE_STATUS`](crate::SYS_SERVICE_STATUS): the
+/// service's task slot is alive.
+///
+/// Liveness is the kernel's own view. A service can be alive before it is
+/// ready, because it declares readiness itself once bring-up finishes.
+pub const SERVICE_STATE_UP: u64 = 1;
+
+/// State bit: the service has declared itself ready to serve.
+///
+/// A service sets this with
+/// [`SYS_SERVICE_READY`](crate::SYS_SERVICE_READY) after its bring-up, and the
+/// kernel clears it whenever the slot is spawned or revived. Readiness is
+/// therefore never inherited across a restart: a revived service has to prove
+/// again that it reached its serving state.
+pub const SERVICE_STATE_READY: u64 = 2;
+
+/// Packs a service's liveness and readiness into the word
+/// [`SYS_SERVICE_STATUS`](crate::SYS_SERVICE_STATUS) returns.
+///
+/// A dead service is `0` regardless of the readiness argument, so a stale ready
+/// flag can never make a down service look up.
+#[must_use]
+pub const fn service_state(alive: bool, ready: bool) -> u64 {
+    let mut state = 0;
+    if alive {
+        state |= SERVICE_STATE_UP;
+    }
+    if alive && ready {
+        state |= SERVICE_STATE_READY;
+    }
+    state
+}
+
+/// Returns whether a service state word says the service is alive.
+#[must_use]
+pub const fn service_is_up(state: u64) -> bool {
+    state & SERVICE_STATE_UP != 0
+}
+
+/// Returns whether a service state word says the service is alive and ready.
+#[must_use]
+pub const fn service_is_ready(state: u64) -> bool {
+    state & SERVICE_STATE_READY != 0
+}
+
 /// Event kind: the service faulted (a CPU exception in ring 3).
 ///
 /// Kinds start at one so no valid event encodes to zero, which would be
@@ -123,6 +168,30 @@ mod tests {
                 assert_ne!(service.name, other.name, "duplicate service name");
             }
         }
+    }
+
+    #[test]
+    fn service_state_separates_liveness_from_readiness() {
+        let down = service_state(false, false);
+        assert_eq!(down, 0);
+        assert!(!service_is_up(down));
+        assert!(!service_is_ready(down));
+
+        let starting = service_state(true, false);
+        assert_eq!(starting, SERVICE_STATE_UP);
+        assert!(service_is_up(starting));
+        assert!(!service_is_ready(starting));
+
+        let ready = service_state(true, true);
+        assert_eq!(ready, SERVICE_STATE_UP | SERVICE_STATE_READY);
+        assert!(service_is_up(ready));
+        assert!(service_is_ready(ready));
+
+        // A dead service can never report readiness, even if a caller passes
+        // a stale flag: liveness gates the ready bit.
+        let dead_but_ready = service_state(false, true);
+        assert_eq!(dead_but_ready, 0);
+        assert!(!service_is_ready(dead_but_ready));
     }
 
     #[test]

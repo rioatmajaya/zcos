@@ -192,6 +192,15 @@ pub const SYS_CLOCK: u64 = 38;
 /// `initd` checks that it is root at boot.
 pub const SYS_GETID: u64 = 39;
 
+/// Declares the calling task ready to serve.
+///
+/// Only a supervised service (a task named in [`crate::SERVICE_CATALOG`]) may
+/// call this; any other task gets `u64::MAX`. The kernel clears the flag
+/// whenever the slot is spawned or revived, so a service must declare
+/// readiness again after a restart. [`crate::SYS_SERVICE_STATUS`] reports it
+/// alongside liveness.
+pub const SYS_SERVICE_READY: u64 = 40;
+
 /// Packs a user and group id into the one word [`SYS_GETID`] returns.
 #[must_use]
 pub const fn identity_word(uid: u32, gid: u32) -> u64 {
@@ -310,6 +319,7 @@ mod tests {
         assert_eq!(SYS_WINDOW_ID, 37);
         assert_eq!(SYS_CLOCK, 38);
         assert_eq!(SYS_GETID, 39);
+        assert_eq!(SYS_SERVICE_READY, 40);
         assert_eq!(READDIR_ENTRY, 0);
         assert_eq!(READDIR_END, 1);
     }

@@ -60,6 +60,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0051](0051-one-service-catalog-and-ordered-shutdown.md) | One service catalog, a bounded restart budget, and ordered shutdown | Accepted |
 | [0052](0052-service-state-is-observable-without-control.md) | Service state is observable without control | Accepted |
 | [0053](0053-identity-is-readable-but-not-settable.md) | Identity is readable but not settable | Accepted |
+| [0054](0054-liveness-and-readiness-are-separate.md) | Liveness and readiness are separate service states | Accepted |
 
 ## Adding a decision
 

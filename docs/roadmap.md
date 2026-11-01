@@ -356,7 +356,10 @@ VFS → write path → journaling → `fsck`**.
       `SYS_GETID` then lets a domain read the identity it was spawned with —
       `initd` proves it is root, the shell proves it is not — without a setuid
       path (see
-      [ADR 0053](adr/0053-identity-is-readable-but-not-settable.md)).
+      [ADR 0053](adr/0053-identity-is-readable-but-not-settable.md)). Service
+      status distinguishes a live slot from a service that finished bring-up,
+      through `SYS_SERVICE_READY` and the state word (see
+      [ADR 0054](adr/0054-liveness-and-readiness-are-separate.md)).
 - [x] F7g: crash consistency. `Volume::mount_into` replays the log and then
       **clamps `head_seq` to the last record that actually replayed**, reporting
       it through `was_recovered()`. A superblock can claim a record a crash never

@@ -17,11 +17,12 @@ pub use zc_abi::{
     SYS_GETID, SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME,
     SYS_MMIO_MAP, SYS_MOUNT, SYS_MOUSE_READ, SYS_OPEN, SYS_PORT_CLAIM, SYS_POWEROFF, SYS_READ,
     SYS_READDIR, SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ,
-    SYS_SERVICE_START, SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT, SYS_SURFACE_CREATE,
-    SYS_SURFACE_DESTROY, SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TERM_READ, SYS_UMOUNT,
-    SYS_WINDOW_CLOSE, SYS_WINDOW_ID, SYS_WINDOW_READ, SYS_WRITE, SYS_YIELD, MmioInfo, ServiceSpec,
-    Stat, SurfaceInfo, SyscallError, WM_ACK, identity_gid, identity_uid, identity_word,
-    supervise_kind, supervise_service,
+    SYS_SERVICE_READY, SYS_SERVICE_START, SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT,
+    SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TERM_READ,
+    SYS_UMOUNT, SYS_WINDOW_CLOSE, SYS_WINDOW_ID, SYS_WINDOW_READ, SYS_WRITE, SYS_YIELD,
+    SERVICE_STATE_READY, SERVICE_STATE_UP, MmioInfo, ServiceSpec, Stat, SurfaceInfo, SyscallError,
+    WM_ACK, identity_gid, identity_uid, identity_word, service_is_ready, service_is_up,
+    service_state, supervise_kind, supervise_service,
 };
 
 /// Issues a syscall with no arguments.
@@ -548,11 +549,24 @@ pub fn service_stop(id: u64) -> u64 {
     syscall1(SYS_SERVICE_STOP, id)
 }
 
-/// Reports whether a supervised service is running: 1 up, 0 down, `u64::MAX`
-/// when the caller holds no authority over it.
+/// Reports a supervised service's liveness and readiness, or `u64::MAX` when
+/// the caller holds no authority over it.
+///
+/// Decode the word with [`service_is_up`] and [`service_is_ready`]; it carries
+/// [`SERVICE_STATE_UP`] and [`SERVICE_STATE_READY`].
 #[inline(always)]
 pub fn service_status(id: u64) -> u64 {
     syscall1(SYS_SERVICE_STATUS, id)
+}
+
+/// Declares the calling service ready to serve, returning 0 or `u64::MAX`.
+///
+/// Only a task named in [`zc_abi::SERVICE_CATALOG`] may call it. The kernel
+/// clears readiness on spawn and revive, so a restarted service calls this
+/// again once it reaches its serving loop.
+#[inline(always)]
+pub fn service_ready() -> u64 {
+    syscall0(SYS_SERVICE_READY)
 }
 
 /// Terminates the calling task; never returns.

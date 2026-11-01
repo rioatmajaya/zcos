@@ -23,8 +23,8 @@ filesystem exchange page (see [`server-protocol.md`](server-protocol.md)).
 
 ## Syscall table
 
-Numbers are stable and never reused. `SYS_GETID` (39) is the highest
-assigned number; 40 and above are rejected.
+Numbers are stable and never reused. `SYS_SERVICE_READY` (40) is the highest
+assigned number; 41 and above are rejected.
 
 Two numbers are **declared but not yet implemented**: `SYS_YIELD` (0) and
 `SYS_MAP_FRAME` (4) are recognized by the dispatch table but have no handler, so
@@ -58,7 +58,7 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 22 | `SYS_CREATE` | path ptr, length | 0 | `u64::MAX` |
 | 23 | `SYS_SERVICE_START` | service id | 0 | `u64::MAX` |
 | 24 | `SYS_SERVICE_STOP` | service id | 0 | `u64::MAX` |
-| 25 | `SYS_SERVICE_STATUS` | service id | 1 up / 0 down | `u64::MAX` |
+| 25 | `SYS_SERVICE_STATUS` | service id | state word: bit 0 up, bit 1 ready | `u64::MAX` |
 | 26 | `SYS_CHMOD` | path ptr, length, new mode | 0 | `u64::MAX` |
 | 27 | `SYS_SURFACE_CREATE` | width, height, raw format | surface object id | `u64::MAX` |
 | 28 | `SYS_SURFACE_MAP` | object id, `SurfaceInfo` out ptr, length | mapped virtual address | `u64::MAX` |
@@ -73,6 +73,7 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 37 | `SYS_WINDOW_ID` | — | the caller's window id, or `u64::MAX` if it owns none | — |
 | 38 | `SYS_CLOCK` | — | packed hour/minute/second, plus `CLOCK_LIVE` when read from the RTC | — |
 | 39 | `SYS_GETID` | — | user id in the high 32 bits and group id in the low 32 bits | — |
+| 40 | `SYS_SERVICE_READY` | — | 0 after the calling service declares readiness | `u64::MAX` |
 
 ### Clock
 
@@ -89,6 +90,22 @@ never receives a tick, so the proof frame's taskbar is exactly the fixed label
 its checksum was recorded with. A malformed or unavailable RTC falls back to
 that same fixed reading rather than inventing a time; the kernel logs
 `clock: rtc ok`, `clock: rtc unavailable`, or `clock: proof` once.
+
+### Service state
+
+`SYS_SERVICE_STATUS` (25) returns a state word instead of a bare boolean:
+`SERVICE_STATE_UP` (bit 0) is the kernel's view that the service's task slot is
+alive, and `SERVICE_STATE_READY` (bit 1) is the service's own statement that its
+bring-up finished. `zc_abi` provides `service_state`, `service_is_up`, and
+`service_is_ready`. A service declares readiness with `SYS_SERVICE_READY` (40),
+which only a task named in `zc_abi::SERVICE_CATALOG` may call.
+
+Liveness and readiness are deliberately separate: the kernel can spawn or
+revive a slot immediately, but a revived driver still has to re-claim its
+ports and re-enter its serving loop. The kernel clears the ready bit on every
+spawn, revive, and fault restart, so a service must call `SYS_SERVICE_READY`
+again after a restart. The shell's `svc` command prints `up ready` or
+`up starting` accordingly; a dead service is always `down` and never ready.
 
 ### Identity
 

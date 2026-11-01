@@ -30,7 +30,9 @@ use zc_abi::{INPUT_RING_VIRT, IRQ_ANY, IRQ_KEYBOARD, IRQ_MOUSE};
 use zc_kernel::irq::SharedInputRing;
 use zc_kernel::kbd::Modifiers;
 use zc_kernel::mouse::{MouseAssembler, encode_frame};
-use zc_user::{abort, irq_claim, irq_test, irq_wait, log, port_claim, port_inb, task_exit};
+use zc_user::{
+    abort, irq_claim, irq_test, irq_wait, log, port_claim, port_inb, service_ready, task_exit,
+};
 
 /// 8042 status port.
 const STATUS: u16 = 0x64;
@@ -122,6 +124,9 @@ fn serve() -> ! {
         task_exit()
     }
     let ring = shared_ring();
+    // The input lines are claimed and the ring is mapped: only now is the
+    // domain ready to serve, as opposed to merely alive.
+    let _ = service_ready();
     log("kbd: serving\n");
     loop {
         // Blocking call: sleep until *any* owned source fires (keyboard or

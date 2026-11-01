@@ -12,7 +12,7 @@ use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 use zc_abi::{
     BootInfo, IPC_SUPERVISE, IPC_WM_REPLY, MMIO_SLOT_STRIDE, MMIO_VIRT, SERVICE_KIND_EXIT,
     SERVICE_KIND_FAULT, SURFACE_SLOT_STRIDE, SURFACE_VIRT, WM_MOUSE, WM_TICK, service_cap,
-    supervise_event,
+    service_state, supervise_event,
 };
 use zc_kernel::capability::{Capability, CapabilityTable, Rights};
 use zc_kernel::gdt::{USER_CS, USER_RFLAGS, USER_SS};
@@ -1733,7 +1733,22 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 regs.set_result(u64::MAX);
                 return 0;
             }
-            regs.set_result(u64::from(tasks.is_alive(entry.task)));
+            regs.set_result(service_state(
+                tasks.is_alive(entry.task),
+                tasks.is_ready(entry.task),
+            ));
+            0
+        }
+        Ok(Action::ServiceReady) => {
+            // Readiness is a supervised service's own statement about its
+            // bring-up, so only a task the catalog names may make it. The
+            // kernel clears the flag on spawn and revive; this arm only sets
+            // it for the running task, never for another slot.
+            if service::for_task(tasks.current()).is_none() {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            regs.set_result(if tasks.mark_current_ready() { 0 } else { u64::MAX });
             0
         }
         Ok(Action::SurfaceCreate) => {

@@ -33,8 +33,8 @@
 use zc_user::{
     DIRENT_LEN, DirEntry, FS_ID_ZCFS, FS_OP_STOP, IPC_FS, KIND_CHR, KIND_DIR, READDIR_END,
     READDIR_ENTRY, SERVICE_CATALOG, Stat, chmod, close, create, getid, identity_gid, identity_uid,
-    log, log_parts, mount, open, poweroff, read, readdir, send_to, serial_read, service_status,
-    stat, task_exit, umount, write,
+    log, log_parts, mount, open, poweroff, read, readdir, send_to, serial_read, service_is_ready,
+    service_is_up, service_status, stat, task_exit, umount, write,
 };
 
 /// Contents `persist` writes and expects to read back.
@@ -486,12 +486,20 @@ fn run(line: &[u8]) -> bool {
             // The catalog is the only list of service identity; the shell
             // never spells a service name or id itself.
             for service in SERVICE_CATALOG {
-                let state = if service_status(u64::from(service.id)) == 1 {
-                    "up"
+                let state = service_status(u64::from(service.id));
+                if !service_is_up(state) {
+                    log_parts(&["svc: ", service.name, " down\n"]);
+                    continue;
+                }
+                // Alive is the kernel's view; ready is the service's own
+                // statement that its bring-up finished. A revived service is
+                // up again before it is ready again.
+                let phase = if service_is_ready(state) {
+                    " ready"
                 } else {
-                    "down"
+                    " starting"
                 };
-                log_parts(&["svc: ", service.name, " ", state, "\n"]);
+                log_parts(&["svc: ", service.name, " up", phase, "\n"]);
             }
         }
         b"exit" => {
