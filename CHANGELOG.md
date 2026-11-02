@@ -328,6 +328,17 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **The boot manifest is parsed and checked against the catalog** (F7f, core
+  system): `zc.manifest` gains `services=blk,kbd`, and a host-tested parser in
+  `zc-supervise` reads the `key=value` file without allocation. `initd` reads it
+  once at startup and logs `initd: manifest ok` only when the `init` path and
+  the service names match `SERVICE_CATALOG` in boot order; a mismatch,
+  malformed file, or missing file is logged and the compiled catalog still
+  runs. The shipped file is parsed by a test through `include_str!`, so the
+  image and the parser cannot drift. The manifest is not yet authoritative for
+  spawn or shutdown order and is not reloaded. The three checksums remain
+  `0xd616ad79aaefb099`, `0x6d66e82d0f2d6fb8`, and `0x78ebd6d359914da7`. See
+  [ADR 0055](docs/adr/0055-the-boot-manifest-is-checked-not-authoritative.md).
 - **A service reports ready separately from alive** (F7f, core system):
   `SYS_SERVICE_STATUS` now returns a state word with `SERVICE_STATE_UP` and
   `SERVICE_STATE_READY`, and `SYS_SERVICE_READY` (40) lets a supervised service

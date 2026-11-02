@@ -11,6 +11,7 @@ same change that touches it.
 | [`syscall-abi.md`](syscall-abi.md) | syscall numbers, arguments, return codes, capability rights, object namespaces | every ring-3 task |
 | [`ipc-abi.md`](ipc-abi.md) | `Message` layout, channels, endpoint semantics, window/supervision word encodings | every server and client |
 | [`boot-info.md`](boot-info.md) | loader→kernel `BootInfo`, `MemoryRegion`, `FramebufferInfo`, validation rules | the loader and the kernel entry |
+| [`boot-manifest.md`](boot-manifest.md) | userspace `zc.manifest` format and the `initd` boot check | `initd`, the initramfs |
 | [`server-protocol.md`](server-protocol.md) | service table, discovery handshake, filesystem exchange page and opcodes | `initd`, `zc-blk`, `zc-devmgr`, the kernel proxy |
 
 ## Rules

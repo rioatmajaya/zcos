@@ -9,6 +9,8 @@
 
 #![no_std]
 
+pub mod manifest;
+
 pub use zc_abi::{SERVICE_CATALOG, ServiceSpec};
 
 /// Restarts one service may receive in a single boot.

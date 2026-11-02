@@ -394,9 +394,11 @@ agree.
   ([ADR 0054](adr/0054-liveness-and-readiness-are-separate.md)). It does not
   discover or load a service, and it has no endpoint or failure-rate data.
 - One boot manifest that names services and order; no magic indices spread
-  across compositor, shell, and tests. The compile-time catalog is the registry
-  until a parser and reload path exist, so a new service still needs a fixed
-  slot and an image.
+  across compositor, shell, and tests. `zc.manifest` now carries
+  `services=blk,kbd`, and `initd` parses it and checks the names against the
+  catalog ([ADR 0055](adr/0055-the-boot-manifest-is-checked-not-authoritative.md)).
+  The manifest is still checked rather than authoritative, and there is no
+  reload path, so a new service still needs a fixed slot and an image.
 - Keep the kernel VFS decision explicit; do not move it to a service without a
   measured reason.
 
@@ -540,9 +542,10 @@ trustworthy core.
    ([ADR 0053](adr/0053-identity-is-readable-but-not-settable.md)). Service
    status now separates liveness from self-declared readiness
    ([ADR 0054](adr/0054-liveness-and-readiness-are-separate.md)). The
-   compile-time catalog is still the registry; discovery, endpoints,
-   failure-rate health, and a parsed boot manifest remain. The three proof
-   checksums still hold.
+   compile-time catalog is still the registry; discovery, endpoints, and
+   failure-rate health remain. The boot manifest is now parsed and checked
+   ([ADR 0055](adr/0055-the-boot-manifest-is-checked-not-authoritative.md)) but
+   does not drive spawn order yet. The three proof checksums still hold.
 5. Do not start the app catalog, widget toolkit, or host runner yet.
 6. Keep `build/zcos.img` human-testable and keep the three proof images locked.
 

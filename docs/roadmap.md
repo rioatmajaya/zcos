@@ -359,7 +359,11 @@ VFS → write path → journaling → `fsck`**.
       [ADR 0053](adr/0053-identity-is-readable-but-not-settable.md)). Service
       status distinguishes a live slot from a service that finished bring-up,
       through `SYS_SERVICE_READY` and the state word (see
-      [ADR 0054](adr/0054-liveness-and-readiness-are-separate.md)).
+      [ADR 0054](adr/0054-liveness-and-readiness-are-separate.md)). The boot
+      manifest is parsed and checked against the catalog, so the image's
+      declared service order is visible in the transcript even though the
+      kernel still spawns the compile-time list (see
+      [ADR 0055](adr/0055-the-boot-manifest-is-checked-not-authoritative.md)).
 - [x] F7g: crash consistency. `Volume::mount_into` replays the log and then
       **clamps `head_seq` to the last record that actually replayed**, reporting
       it through `was_recovered()`. A superblock can claim a record a crash never

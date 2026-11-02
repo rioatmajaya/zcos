@@ -21,12 +21,20 @@
 #![no_main]
 #![allow(unsafe_code)]
 
+use zc_supervise::manifest::Manifest;
 use zc_supervise::{RestartBudget, ServiceSpec, shutdown_order, spec};
 use zc_user::{
-    IPC_SUPERVISE, SERVICE_KIND_EXIT, SERVICE_KIND_FAULT, getid, identity_uid, log, log_parts,
-    recv_from, service_is_up, service_start, service_status, service_stop, supervise_kind,
-    supervise_service, task_exit,
+    IPC_SUPERVISE, SERVICE_KIND_EXIT, SERVICE_KIND_FAULT, close, getid, identity_uid, log,
+    log_parts, open, read, recv_from, service_is_up, service_start, service_status, service_stop,
+    supervise_kind, supervise_service, task_exit,
 };
+
+/// Boot manifest the supervisor checks against the compiled catalog.
+const MANIFEST_PATH: &str = "zc.manifest";
+
+/// Largest manifest the supervisor reads. The shipped file is well under it;
+/// a longer one is reported instead of parsed from a truncated prefix.
+const MANIFEST_MAX: usize = 256;
 
 /// Task entry point; the kernel provides a fresh user stack.
 #[unsafe(no_mangle)]
@@ -40,6 +48,7 @@ pub unsafe extern "C" fn _start() -> ! {
     } else {
         log("initd: not root\n");
     }
+    check_manifest();
     let mut budget = RestartBudget::new();
     loop {
         let event = recv_from(IPC_SUPERVISE as u64);
@@ -64,6 +73,37 @@ pub unsafe extern "C" fn _start() -> ! {
             }
         }
     }
+}
+
+/// Reads the boot manifest and checks it against the compiled catalog.
+///
+/// The kernel still spawns the catalog at build time, so this is a consistency
+/// check: a stale or malformed manifest is visible in the boot transcript
+/// instead of being silently ignored. A missing manifest is not fatal — the
+/// supervisor can still use the compiled list — and an unreadable or malformed
+/// one falls back the same way.
+fn check_manifest() {
+    let fd = open(MANIFEST_PATH);
+    if fd == u64::MAX {
+        log("initd: manifest absent\n");
+        return;
+    }
+    let mut buffer = [0u8; MANIFEST_MAX];
+    let count = read(fd, &mut buffer);
+    close(fd);
+    if count == u64::MAX || count as usize >= MANIFEST_MAX {
+        log("initd: manifest unreadable\n");
+        return;
+    }
+    let Ok(text) = core::str::from_utf8(&buffer[..count as usize]) else {
+        log("initd: manifest not utf8\n");
+        return;
+    };
+    match Manifest::parse(text) {
+        Ok(manifest) if manifest.matches_boot() => log("initd: manifest ok\n"),
+        Ok(_) => log("initd: manifest mismatch\n"),
+        Err(_) => log("initd: manifest malformed\n"),
+    };
 }
 
 /// Revives `service` after a fault, or gives up when its budget is spent.
