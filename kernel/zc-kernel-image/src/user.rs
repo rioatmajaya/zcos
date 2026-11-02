@@ -481,6 +481,14 @@ static mut MMIO_REGIONS: zc_kernel::mmio::MmioRegions = zc_kernel::mmio::MmioReg
 /// Longest single userspace buffer accepted per syscall.
 const MAX_USER_IO_LEN: u64 = 512;
 
+/// Longest buffer `SYS_LOG_READ` accepts.
+///
+/// The kernel log ring holds a few pages of diagnostics, so one read of this
+/// size returns the whole retained window. It is larger than [`MAX_USER_IO_LEN`]
+/// because a consumer printing the ring should not have to page it and because
+/// the kernel's own buffer is a fixed static.
+const MAX_LOG_READ_LEN: u64 = 8192;
+
 /// Kernel stack pointer restored when leaving userspace for good.
 #[unsafe(no_mangle)]
 static mut RESUME_RSP: u64 = 0;
@@ -877,10 +885,10 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             match validate_user_slice(tasks, regs.rdi, regs.rsi) {
                 Some(bytes) => match core::str::from_utf8(bytes) {
                     Ok(text) => {
-                        let _ = crate::serial::print(format_args!("task {}: {}", me, text));
+                        let _ = crate::serial::print_task(format_args!("task {}: {}", me, text));
                     }
                     Err(_) => {
-                        let _ = crate::serial::print(format_args!(
+                        let _ = crate::serial::print_task(format_args!(
                             "task {}: <invalid utf-8>\n",
                             me
                         ));
@@ -1749,6 +1757,21 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 return 0;
             }
             regs.set_result(if tasks.mark_current_ready() { 0 } else { u64::MAX });
+            0
+        }
+        Ok(Action::LogRead) => {
+            // The ring is kernel diagnostics, not task output: reading it
+            // needs no authority, and writing it stays on the serial line so
+            // a task printing the log cannot grow it. The buffer is validated
+            // against the caller's own tables like any other user pointer.
+            let offset = regs.rdi;
+            let Some(out) =
+                validate_user_slice_mut_upto(tasks, regs.rsi, regs.rdx, MAX_LOG_READ_LEN)
+            else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            regs.set_result(crate::serial::log_read(offset, out) as u64);
             0
         }
         Ok(Action::SurfaceCreate) => {
@@ -3831,7 +3854,7 @@ fn validate_user_slice(
     len: u64,
 ) -> Option<&'static [u8]> {
     let pt = current_user_pt(tasks)?;
-    check_user_range(pt, ptr, len)?;
+    check_user_range(pt, ptr, len, MAX_USER_IO_LEN)?;
     // SAFETY: checked present above; the range stays mapped for the rest of
     // the boot.
     Some(unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) })
@@ -3846,16 +3869,30 @@ fn validate_user_slice_mut(
     ptr: u64,
     len: u64,
 ) -> Option<&'static mut [u8]> {
+    validate_user_slice_mut_upto(tasks, ptr, len, MAX_USER_IO_LEN)
+}
+
+/// Views a userspace byte range mutably with an explicit length bound.
+///
+/// Same checks as [`validate_user_slice`]; the caller must not retain the
+/// slice past the syscall. Used by `SYS_LOG_READ`, whose buffer is a whole
+/// page rather than one small message.
+fn validate_user_slice_mut_upto(
+    tasks: &TaskTable<TASK_COUNT>,
+    ptr: u64,
+    len: u64,
+    max: u64,
+) -> Option<&'static mut [u8]> {
     let pt = current_user_pt(tasks)?;
-    check_user_range(pt, ptr, len)?;
+    check_user_range(pt, ptr, len, max)?;
     // SAFETY: as above; every present user page is writable in this setup,
     // and the kernel writes the buffer before returning.
     Some(unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len as usize) })
 }
 
 /// Runs the checks shared by both validators.
-fn check_user_range(pt: u64, ptr: u64, len: u64) -> Option<()> {
-    if len == 0 || len > MAX_USER_IO_LEN {
+fn check_user_range(pt: u64, ptr: u64, len: u64, max: u64) -> Option<()> {
+    if len == 0 || len > max {
         return None;
     }
     let end = ptr.checked_add(len)?;

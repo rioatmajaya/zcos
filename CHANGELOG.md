@@ -328,6 +328,18 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **The kernel's boot diagnostics are readable from the shell** (F7, core
+  system): `SYS_LOG_READ` (41) copies a bounded kernel log ring into a caller
+  buffer. The image keeps the newest 8 KiB of kernel output in a host-tested
+  `LogRing<N>`; only kernel diagnostics enter it, so a task printing the log
+  cannot change it and cannot evict the boot transcript. The shell's new
+  `dmesg` command reads the ring at offset zero and prints it one line per
+  syscall. The read accepts up to 8192 bytes, so one call returns the whole
+  retained window, and it needs no capability because the ring contains only
+  what is already on the serial console. Task logs deliberately stay
+  serial-only for now. The three checksums remain `0xd616ad79aaefb099`,
+  `0x6d66e82d0f2d6fb8`, and `0x78ebd6d359914da7`. See
+  [ADR 0056](docs/adr/0056-kernel-logs-live-in-a-bounded-readable-ring.md).
 - **The boot manifest is parsed and checked against the catalog** (F7f, core
   system): `zc.manifest` gains `services=blk,kbd`, and a host-tested parser in
   `zc-supervise` reads the `key=value` file without allocation. `initd` reads it

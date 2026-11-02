@@ -62,6 +62,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0053](0053-identity-is-readable-but-not-settable.md) | Identity is readable but not settable | Accepted |
 | [0054](0054-liveness-and-readiness-are-separate.md) | Liveness and readiness are separate service states | Accepted |
 | [0055](0055-the-boot-manifest-is-checked-not-authoritative.md) | The boot manifest is parsed and checked, not yet authoritative | Accepted |
+| [0056](0056-kernel-logs-live-in-a-bounded-readable-ring.md) | Kernel diagnostics live in a bounded ring that a task can read | Accepted |
 
 ## Adding a decision
 

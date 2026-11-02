@@ -364,6 +364,10 @@ VFS → write path → journaling → `fsck`**.
       declared service order is visible in the transcript even though the
       kernel still spawns the compile-time list (see
       [ADR 0055](adr/0055-the-boot-manifest-is-checked-not-authoritative.md)).
+      Kernel diagnostics are kept in a bounded ring and are readable from the
+      shell's `dmesg` through `SYS_LOG_READ` (see
+      [ADR 0056](adr/0056-kernel-logs-live-in-a-bounded-readable-ring.md));
+      task output remains serial-only until a logging service exists.
 - [x] F7g: crash consistency. `Volume::mount_into` replays the log and then
       **clamps `head_seq` to the last record that actually replayed**, reporting
       it through `was_recovered()`. A superblock can claim a record a crash never

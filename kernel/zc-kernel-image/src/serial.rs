@@ -6,8 +6,19 @@
 use core::arch::asm;
 use core::fmt::{self, Write};
 
+use zc_kernel::log::LogRing;
+
 /// Base I/O port of COM1.
 const COM1: u16 = 0x3F8;
+
+/// Bytes of kernel diagnostics the log ring retains.
+///
+/// The boot transcript's kernel half is a few kilobytes; eight leaves room for
+/// audits and later diagnostics without making the read unbounded.
+const LOG_CAPACITY: usize = 8192;
+
+/// Kernel diagnostics ring exposed through `SYS_LOG_READ`.
+static mut LOG: LogRing<LOG_CAPACITY> = LogRing::new();
 
 /// Writes `value` to an I/O port.
 ///
@@ -76,7 +87,19 @@ fn write_byte(byte: u8) {
 }
 
 /// Writes a string, translating `\n` into CRLF.
+///
+/// Every kernel diagnostic goes through here, so the same bytes are kept in
+/// the bounded ring that `SYS_LOG_READ` exposes as `dmesg`. Task logs use
+/// [`print_task`] instead and never enter the ring.
 pub fn write_str(value: &str) {
+    // SAFETY: single CPU; serial writes and log reads never run concurrently,
+    // and the ring is a plain byte buffer.
+    unsafe { (*core::ptr::addr_of_mut!(LOG)).push(value.as_bytes()) };
+    write_serial(value);
+}
+
+/// Writes a string to serial without recording it in the kernel log.
+fn write_serial(value: &str) {
     for byte in value.bytes() {
         if byte == b'\n' {
             write_byte(b'\r');
@@ -90,12 +113,41 @@ pub fn print(args: fmt::Arguments<'_>) {
     let _ = Writer.write_fmt(args);
 }
 
+/// Writes formatted task output to the serial port without ring capture.
+///
+/// Task logs are part of the interactive transcript, not the kernel's own
+/// diagnostic ring. Keeping them out also means a task printing the ring
+/// cannot change the bytes it is printing.
+pub fn print_task(args: fmt::Arguments<'_>) {
+    let _ = TaskWriter.write_fmt(args);
+}
+
+/// Copies bytes from the kernel log ring into `out`, starting at `offset`.
+///
+/// Returns the number of bytes copied; zero means the offset is at or past
+/// the end of what the ring retained.
+pub fn log_read(offset: u64, out: &mut [u8]) -> usize {
+    // SAFETY: single CPU; the ring is only appended to by a serial write, and
+    // this shares it immutably for the duration of the copy.
+    unsafe { (*core::ptr::addr_of!(LOG)).read(offset, out) }
+}
+
 /// Adapter that lets `core::fmt` write to the serial port.
 struct Writer;
 
 impl Write for Writer {
     fn write_str(&mut self, value: &str) -> fmt::Result {
         write_str(value);
+        Ok(())
+    }
+}
+
+/// Adapter for task output: serial only, no kernel-log capture.
+struct TaskWriter;
+
+impl Write for TaskWriter {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        write_serial(value);
         Ok(())
     }
 }

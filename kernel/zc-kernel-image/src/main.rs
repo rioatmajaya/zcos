@@ -13,7 +13,7 @@ use core::fmt::Write;
 
 use zc_abi::{
     BootInfo, MemoryRegion, Message, SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOSE, SYS_FB_INFO,
-    SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_MMIO_MAP, SYS_MOUSE_READ, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ,
+    SYS_LOG_READ, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_MMIO_MAP, SYS_MOUSE_READ, SYS_OPEN, SYS_PORT_CLAIM, SYS_READ,
     SYS_RECV,
     SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_READY, SYS_SERVICE_START,
     SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP,
@@ -294,6 +294,7 @@ fn exercise_mechanisms(alloc: &mut FrameAllocator<'_>, usable: u64) {
         (SYS_SERVICE_STOP, Action::ServiceStop),
         (SYS_SERVICE_STATUS, Action::ServiceStatus),
         (SYS_SERVICE_READY, Action::ServiceReady),
+        (SYS_LOG_READ, Action::LogRead),
         (SYS_CHMOD, Action::Chmod),
         (SYS_SURFACE_CREATE, Action::SurfaceCreate),
         (SYS_SURFACE_MAP, Action::SurfaceMap),

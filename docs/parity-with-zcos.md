@@ -122,7 +122,7 @@ the 2026-10-20 changelog records the Linux entries being removed.
 | ACPI and power | RSDP/MADT, AML, battery, thermal/power paths, S5 | RSDP/MADT and a minimal AML `_S5_` reader; clean `SYS_POWEROFF` | 🟡 Power-off is at parity for the tested path; battery, thermal, suspend, and idle states are absent. |
 | Installer / updater | `zinstall`, `zupdate`, signed `.zup`, A/B slots | none | ❌ Belongs to the distribution phase, after storage and signing exist. |
 | Host emulator | `tools/zcos-emu` runs the real compositor and GUI apps on Linux | none | ❌ Useful later as a developer accelerator, not a core prerequisite. Add an independent host runner when GUI iteration needs it; do not treat it as an isolation test. |
-| Boot diagnostics | serial logs, screenshots, hardware probes, diagnostics overlay | serial logs, QEMU monitor input, proof checks | 🟡 Current proofs are strong; user-facing diagnostics are thin. |
+| Boot diagnostics | serial logs, screenshots, hardware probes, diagnostics overlay | serial logs, QEMU monitor input, proof checks, and `dmesg` over the kernel ring | 🟡 Current proofs are strong and the kernel log is readable from the shell; user-facing diagnostics are still thin. |
 
 ### 4.2 Kernel, process model, and authority
 
@@ -197,7 +197,7 @@ The current tree has:
 |---|---|---|---|
 | Service catalog | 19 endpoints, driver catalog, loader sandbox | 2 supervised services in one ABI catalog with boot order | ❌ Most service roles are absent, and the catalog is compile-time only. |
 | Discovery / loading | service discovery by name, driver match rules, dynamic spawn | fixed task indices, compile-time binaries, `SYS_SERVICE_START`/`STOP` | 🟡 Lifecycle policy exists with a bounded restart budget; discovery and packaging do not. |
-| Logging | `logd` | kernel and task serial logs | 🟡 No persistent or user-visible log service. |
+| Logging | `logd` | kernel diagnostic ring readable through `SYS_LOG_READ` and the shell's `dmesg`; task logs remain serial-only | 🟡 The kernel half is user-visible and bounded; there is still no persistent or task-facing log service. |
 | Clipboard | `clipboardd` | none | ❌ |
 | Process/session manager | `procmgr`, sessions, job control | fixed slots | ❌ |
 | Authentication | `authd`, greeter | none | ❌ |
@@ -545,7 +545,11 @@ trustworthy core.
    compile-time catalog is still the registry; discovery, endpoints, and
    failure-rate health remain. The boot manifest is now parsed and checked
    ([ADR 0055](adr/0055-the-boot-manifest-is-checked-not-authoritative.md)) but
-   does not drive spawn order yet. The three proof checksums still hold.
+   does not drive spawn order yet. Kernel diagnostics are now a bounded ring
+   that a task can read through `SYS_LOG_READ`, and the shell exposes it as
+   `dmesg` ([ADR 0056](adr/0056-kernel-logs-live-in-a-bounded-readable-ring.md));
+   task output still stays on the serial line. The three proof checksums still
+   hold.
 5. Do not start the app catalog, widget toolkit, or host runner yet.
 6. Keep `build/zcos.img` human-testable and keep the three proof images locked.
 

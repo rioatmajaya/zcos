@@ -110,6 +110,10 @@ jobs:
         grep -q "task 2: uid=1 gid=1" build/boot.log
         grep -q "task 2: svc: blk up ready" build/boot.log
         grep -q "task 2: svc: kbd up ready" build/boot.log
+        # `dmesg` reads the kernel's own ring, not the task transcript: the
+        # banner only appears with a `task 2:` prefix when the shell copied it
+        # out through SYS_LOG_READ.
+        grep -q "task 2: ZC OS kernel" build/boot.log
         grep -q "task 2: /tmp/scratch: file, 8 bytes, mode 0644, uid 1 gid 1" build/boot.log
         grep -q "task 2: chmod: ok" build/boot.log
         grep -q "audit: task 2 denied read /tmp/scratch" build/boot.log

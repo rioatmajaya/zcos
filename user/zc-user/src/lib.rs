@@ -14,7 +14,7 @@ pub use zc_abi::{
     DIRENT_LEN, DirEntry, FS_ID_ZCFS, FS_OP_STOP, IPC_FS, IPC_SUPERVISE, IPC_WM, IPC_WM_REPLY,
     KIND_CHR, KIND_DIR, KIND_FILE, READDIR_END, READDIR_ENTRY, SERVICE_CATALOG, SERVICE_KIND_EXIT,
     SERVICE_KIND_FAULT, SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOCK, SYS_CLOSE, SYS_CREATE, SYS_FB_INFO,
-    SYS_GETID, SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT, SYS_LOG_WRITE, SYS_MAP_FRAME,
+    SYS_GETID, SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT, SYS_LOG_READ, SYS_LOG_WRITE, SYS_MAP_FRAME,
     SYS_MMIO_MAP, SYS_MOUNT, SYS_MOUSE_READ, SYS_OPEN, SYS_PORT_CLAIM, SYS_POWEROFF, SYS_READ,
     SYS_READDIR, SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ,
     SYS_SERVICE_READY, SYS_SERVICE_START, SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT,
@@ -193,6 +193,23 @@ pub fn log_parts(parts: &[&str]) -> u64 {
 
 /// Longest line [`log_parts`] will assemble.
 pub const LOG_LINE_MAX: usize = 128;
+
+/// Copies the kernel's diagnostic log ring into `buffer`.
+///
+/// `offset` is a byte offset into the ring's absolute history; the kernel
+/// clamps it forward to the oldest byte it still retains. A buffer at least as
+/// large as the ring, read from offset zero, therefore returns the whole
+/// retained window in one call. Returns the number of bytes copied, or
+/// `u64::MAX` if the buffer is empty, too large, or unmapped.
+#[inline(always)]
+pub fn log_read(offset: u64, buffer: &mut [u8]) -> u64 {
+    syscall3(
+        SYS_LOG_READ,
+        offset,
+        buffer.as_mut_ptr() as u64,
+        buffer.len() as u64,
+    )
+}
 
 /// Opens a filesystem path, returning a descriptor or `u64::MAX`.
 #[inline(always)]

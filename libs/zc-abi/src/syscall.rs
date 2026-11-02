@@ -201,6 +201,19 @@ pub const SYS_GETID: u64 = 39;
 /// alongside liveness.
 pub const SYS_SERVICE_READY: u64 = 40;
 
+/// Copies the kernel's diagnostic log ring into a caller buffer.
+///
+/// Arguments are the absolute byte offset (`rdi`), the buffer pointer (`rsi`),
+/// and its length (`rdx`). The offset is clamped forward to the oldest byte the
+/// ring still retains, so a caller starting at zero always sees the window it
+/// can still read. Returns the number of bytes copied, or zero at the end.
+///
+/// The ring captures kernel diagnostics, not task output: `SYS_LOG_WRITE`
+/// stays on the serial line so a task printing the log cannot grow it. Reading
+/// needs no authority; the log is read-only diagnostic data. A buffer may be up
+/// to 8192 bytes, so one read returns the whole retained window.
+pub const SYS_LOG_READ: u64 = 41;
+
 /// Packs a user and group id into the one word [`SYS_GETID`] returns.
 #[must_use]
 pub const fn identity_word(uid: u32, gid: u32) -> u64 {
@@ -320,6 +333,7 @@ mod tests {
         assert_eq!(SYS_CLOCK, 38);
         assert_eq!(SYS_GETID, 39);
         assert_eq!(SYS_SERVICE_READY, 40);
+        assert_eq!(SYS_LOG_READ, 41);
         assert_eq!(READDIR_ENTRY, 0);
         assert_eq!(READDIR_END, 1);
     }

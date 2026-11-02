@@ -18,4 +18,5 @@ cat /tmp/scratch
 stat /dev/blk
 id
 svc
+dmesg
 exit

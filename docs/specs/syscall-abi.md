@@ -23,8 +23,8 @@ filesystem exchange page (see [`server-protocol.md`](server-protocol.md)).
 
 ## Syscall table
 
-Numbers are stable and never reused. `SYS_SERVICE_READY` (40) is the highest
-assigned number; 41 and above are rejected.
+Numbers are stable and never reused. `SYS_LOG_READ` (41) is the highest
+assigned number; 42 and above are rejected.
 
 Two numbers are **declared but not yet implemented**: `SYS_YIELD` (0) and
 `SYS_MAP_FRAME` (4) are recognized by the dispatch table but have no handler, so
@@ -74,6 +74,7 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 38 | `SYS_CLOCK` | — | packed hour/minute/second, plus `CLOCK_LIVE` when read from the RTC | — |
 | 39 | `SYS_GETID` | — | user id in the high 32 bits and group id in the low 32 bits | — |
 | 40 | `SYS_SERVICE_READY` | — | 0 after the calling service declares readiness | `u64::MAX` |
+| 41 | `SYS_LOG_READ` | absolute offset, buffer ptr, length | bytes copied (0 at end) | `u64::MAX` |
 
 ### Clock
 
@@ -107,8 +108,24 @@ spawn, revive, and fault restart, so a service must call `SYS_SERVICE_READY`
 again after a restart. The shell's `svc` command prints `up ready` or
 `up starting` accordingly; a dead service is always `down` and never ready.
 
-### Identity
+### Kernel log
 
+`SYS_LOG_READ` (41) copies the kernel's diagnostic ring into a caller buffer.
+`rdi` is an absolute byte offset into the ring's history, `rsi` the buffer, and
+`rdx` its length (at most 8192 bytes, larger than the usual 512-byte message
+limit because a reader wants the whole ring at once). The offset is clamped
+forward to the oldest byte the ring still retains, so a reader that starts at
+zero always gets the window it can still read. The return is the number of
+bytes copied; zero means the offset is at or past the end.
+
+Only kernel diagnostics enter the ring. `SYS_LOG_WRITE` (6) goes to the serial
+line without recording, so a task printing the log cannot change it. Reading
+needs no capability: the ring is read-only diagnostic data. The ring holds 8
+KiB and drops the oldest bytes when full, so `dmesg` is a snapshot of the most
+recent kernel diagnostics, not an unbounded transcript. The shell's `dmesg`
+command reads the ring once at offset zero and prints it line by line.
+
+### Identity
 `SYS_GETID` (39) returns the caller's user and group ids packed into one word:
 the high 32 bits are the user id, the low 32 bits the group id. `zc_abi`
 provides `identity_word`, `identity_uid`, and `identity_gid`. The identity is

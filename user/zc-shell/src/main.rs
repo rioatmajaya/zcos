@@ -2,9 +2,9 @@
 //!
 //! Reads keystrokes with blocking serial reads, edits a single line with
 //! backspace support, and runs `help`, `echo`, `cat`, `ls`, `stat`, `write`,
-//! `tmp`, `persist`, `chmod`, `mount`, `umount`, `id`, `svc`, and `exit`.
-//! Output goes through the log syscall, so the transcript appears in the kernel
-//! serial log.
+//! `tmp`, `persist`, `chmod`, `mount`, `umount`, `id`, `svc`, `dmesg`, and
+//! `exit`. Output goes through the log syscall, so the transcript appears in
+//! the kernel serial log.
 //!
 //! `id` asks the kernel for this task's user and group ids. The shell runs as
 //! an unprivileged user, so `id` is the observable side of the same owner
@@ -14,6 +14,10 @@
 //! service's state, so the registry is visible to a person instead of only in
 //! the boot log. The shell holds a read-only grant per service: it can report
 //! state but cannot start or stop a domain.
+//!
+//! `dmesg` reads the kernel's diagnostic ring through `SYS_LOG_READ` and prints
+//! it back. Task output never enters that ring, so printing the log cannot
+//! change what it prints.
 //!
 //! `persist` is the durability proof: it writes the zcfs volume through the
 //! VFS, unmounts and remounts it, and reads its own bytes back. The remount
@@ -33,8 +37,8 @@
 use zc_user::{
     DIRENT_LEN, DirEntry, FS_ID_ZCFS, FS_OP_STOP, IPC_FS, KIND_CHR, KIND_DIR, READDIR_END,
     READDIR_ENTRY, SERVICE_CATALOG, Stat, chmod, close, create, getid, identity_gid, identity_uid,
-    log, log_parts, mount, open, poweroff, read, readdir, send_to, serial_read, service_is_ready,
-    service_is_up, service_status, stat, task_exit, umount, write,
+    log, log_parts, log_read, mount, open, poweroff, read, readdir, send_to, serial_read,
+    service_is_ready, service_is_up, service_status, stat, task_exit, umount, write,
 };
 
 /// Contents `persist` writes and expects to read back.
@@ -64,6 +68,23 @@ static mut LINE_LEN: usize = 0;
 static mut OUT: [u8; LINE_CAP] = [0; LINE_CAP];
 /// Used bytes in [`OUT`].
 static mut OUT_LEN: usize = 0;
+
+/// Bytes `dmesg` reads from the kernel log ring in one call.
+///
+/// The kernel ring holds at least this much, so one read at offset zero
+/// returns the whole retained window even after it has wrapped.
+const DMESG_CAP: usize = 8192;
+
+/// Staging buffer for `dmesg`.
+///
+/// It lives in `.bss`, not on the task's single stack page.
+static mut DMESG: [u8; DMESG_CAP] = [0; DMESG_CAP];
+
+/// Longest captured line `dmesg` prints in one syscall, excluding the newline.
+///
+/// It matches the kernel's per-call buffer limit; kernel diagnostics are far
+/// shorter.
+const DMESG_LINE_CAP: usize = 512;
 
 /// Appends bytes to the output staging, truncating on overflow.
 fn out_bytes(bytes: &[u8]) {
@@ -210,6 +231,35 @@ fn print_bytes(bytes: &[u8]) {
     }
 }
 
+/// Logs captured kernel log lines one at a time.
+///
+/// The line and its newline go out in one syscall, so the `task N:` prefix
+/// appears once per line. Blank lines are skipped: a prefix-only line would add
+/// noise without content. A line longer than [`DMESG_LINE_CAP`] falls back to
+/// 64-byte chunks.
+fn print_lines(bytes: &[u8]) {
+    let mut line = [0u8; DMESG_LINE_CAP + 1];
+    let mut start = 0;
+    while start < bytes.len() {
+        let end = bytes[start..]
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map_or(bytes.len(), |offset| start + offset);
+        let content = &bytes[start..end];
+        if !content.is_empty() {
+            if content.len() <= DMESG_LINE_CAP {
+                line[..content.len()].copy_from_slice(content);
+                line[content.len()] = b'\n';
+                log(core::str::from_utf8(&line[..=content.len()]).unwrap_or("?"));
+            } else {
+                print_bytes(content);
+                log("\n");
+            }
+        }
+        start = end + 1;
+    }
+}
+
 /// Runs one parsed command line. Returns whether to exit the shell.
 fn run(line: &[u8]) -> bool {
     let mut argv: [&[u8]; 4] = [&[]; 4];
@@ -225,7 +275,7 @@ fn run(line: &[u8]) -> bool {
     }
     match argv[0] {
         b"help" => {
-            log("Commands: help echo cat ls stat write tmp persist chmod mount umount id svc poweroff exit\n");
+            log("Commands: help echo cat ls stat write tmp persist chmod mount umount id svc dmesg poweroff exit\n");
         }
         b"echo" => {
             for index in 1..count {
@@ -500,6 +550,21 @@ fn run(line: &[u8]) -> bool {
                     " starting"
                 };
                 log_parts(&["svc: ", service.name, " up", phase, "\n"]);
+            }
+        }
+        b"dmesg" => {
+            // The ring is read-only kernel diagnostics; printing it goes
+            // through `SYS_LOG_WRITE`, which never feeds the ring, so `dmesg`
+            // cannot grow what it prints.
+            //
+            // SAFETY: owned here; the kernel writes the buffer before it
+            // returns, and no other task touches it.
+            let buffer = unsafe { &mut *core::ptr::addr_of_mut!(DMESG) };
+            let got = log_read(0, buffer);
+            if got == u64::MAX {
+                log("dmesg: cannot read\n");
+            } else {
+                print_lines(&buffer[..got as usize]);
             }
         }
         b"exit" => {

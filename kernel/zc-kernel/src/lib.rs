@@ -22,6 +22,7 @@ pub mod ipc;
 pub mod iomap;
 pub mod irq;
 pub mod kbd;
+pub mod log;
 pub mod mouse;
 pub mod memory;
 pub mod mmio;
