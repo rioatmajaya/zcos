@@ -328,6 +328,23 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **The boot manifest selects the supervised service set** (F7f, core system):
+  a valid `zc.manifest` is now authoritative for which catalog services `initd`
+  supervises and in what order they shut down, not just a consistency check.
+  The names must form a subsequence of the catalog, so a subset is allowed but
+  the order still matches the compile-time boot order. `zc_supervise::
+  SupervisionPlan` is a fixed, allocation-free plan (manifest subset or full
+  fallback), and `plan_for` falls back to the full catalog for an absent,
+  unreadable, malformed, mismatched, or empty manifest so a service is never
+  left unwatched. `initd` logs `initd: supervising blk,kbd` and stops any
+  catalog service the plan omits. The kernel still provisions the whole catalog
+  at build time, so spawn order and reload remain future work. The shipped
+  manifest names both services, so the image is unchanged and the three
+  checksums remain `0xd616ad79aaefb099`, `0x6d66e82d0f2d6fb8`, and
+  `0x78ebd6d359914da7`. Supersedes
+  [ADR 0055](docs/adr/0055-the-boot-manifest-is-checked-not-authoritative.md)
+  with
+  [ADR 0058](docs/adr/0058-the-manifest-selects-the-supervised-set.md).
 - **Service health reports the kernel's own fault and restart counters** (F7f,
   core system): `SYS_SERVICE_HEALTH` (42) packs the existing liveness and
   readiness bits with saturating byte counters, restarts at bits 8–15 and

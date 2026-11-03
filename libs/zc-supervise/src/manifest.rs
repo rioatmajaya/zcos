@@ -127,25 +127,41 @@ impl<'a> Manifest<'a> {
         &self.services[..self.service_count]
     }
 
-    /// Returns whether the manifest names the catalog's services in boot order.
+    /// Returns whether the named services are a subsequence of the catalog.
+    ///
+    /// A subset is allowed — the manifest may supervise fewer services than
+    /// the catalog lists — but the relative order must still match the
+    /// compile-time boot order, because the kernel provisions the address
+    /// spaces and capabilities in catalog order. Reordering here would make
+    /// the file lie about the boot.
     ///
     /// Names, not ids, are what the file carries: an id is an ABI detail and a
     /// person editing the manifest should never have to look one up.
     #[must_use]
     pub fn names_catalog_in_order(&self) -> bool {
-        names_match_in_order(self, &SERVICE_CATALOG)
+        names_are_subsequence(self, &SERVICE_CATALOG)
     }
 
-    /// Returns whether the manifest names the default init and the catalog.
+    /// Returns whether the manifest names the default init and a valid subset.
     ///
     /// This is the check `initd` makes at boot; it deliberately does not
-    /// require informational keys such as `name` or `version`.
+    /// require informational keys such as `name` or `version`. A manifest that
+    /// passes is authoritative for the supervised set and order; one that does
+    /// not falls back to the full catalog rather than leaving services
+    /// unsupervised. A manifest with no `services` line is not authoritative.
     #[must_use]
     pub fn matches_boot(&self) -> bool {
-        self.init == Some(DEFAULT_INIT) && self.names_catalog_in_order()
+        self.init == Some(DEFAULT_INIT)
+            && !self.services().is_empty()
+            && self.names_catalog_in_order()
     }
 
     /// Appends the comma-separated names in `value` to the service list.
+    ///
+    /// The parser stays structural: it does not resolve names against the
+    /// catalog, so it can be host-tested and reused if the catalog changes.
+    /// [`matches_boot`](Self::matches_boot) is where a name is bound to the
+    /// catalog, and an unknown name simply fails the subsequence check.
     fn push_services(&mut self, value: &'a str) -> Result<(), ManifestError> {
         for name in value.split(',') {
             let name = name.trim();
@@ -177,15 +193,20 @@ fn set_once<'a>(slot: &mut Option<&'a str>, value: &'a str) -> Result<(), Manife
 /// Convenience for callers that already hold a catalog slice.
 ///
 /// [`Manifest::names_catalog_in_order`] uses the ABI catalog; this helper lets
-/// a test name an arbitrary order without rebuilding a manifest.
+/// a test name an arbitrary catalog without rebuilding a manifest.
 #[must_use]
-pub fn names_match_in_order(manifest: &Manifest<'_>, catalog: &[ServiceSpec]) -> bool {
-    manifest.services().len() == catalog.len()
-        && manifest
-            .services()
-            .iter()
-            .zip(catalog.iter())
-            .all(|(name, service)| *name == service.name)
+pub fn names_are_subsequence(manifest: &Manifest<'_>, catalog: &[ServiceSpec]) -> bool {
+    let mut catalog = catalog.iter();
+    for name in manifest.services() {
+        loop {
+            match catalog.next() {
+                Some(service) if service.name == *name => break,
+                Some(_) => continue,
+                None => return false,
+            }
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -215,25 +236,35 @@ mod tests {
     }
 
     #[test]
-    fn a_wrong_order_names_the_wrong_catalog_order() {
+    fn a_wrong_order_is_not_a_subsequence() {
         let text = "init=/sbin/initd\nservices=kbd,blk\n";
         let manifest = Manifest::parse(text).expect("manifest");
         assert!(!manifest.names_catalog_in_order());
         assert!(!manifest.matches_boot());
-        // The names are all present; only the order differs.
+        // The names are all present; only the order differs, and the kernel
+        // still provisions them in catalog order.
         assert_eq!(manifest.services().len(), SERVICE_CATALOG.len());
     }
 
     #[test]
-    fn a_missing_or_extra_service_is_rejected() {
-        let missing = Manifest::parse("init=/sbin/initd\nservices=blk\n").unwrap();
-        assert!(!missing.names_catalog_in_order());
-        let extra = Manifest::parse("init=/sbin/initd\nservices=blk,kbd,net\n").unwrap();
-        assert!(!extra.names_catalog_in_order());
-        // No services line at all is also a mismatch, not a parse error.
+    fn a_subset_is_a_valid_boot_but_an_unknown_name_is_not() {
+        // Fewer services than the catalog is allowed: the manifest is
+        // authoritative for the supervised set.
+        let subset = Manifest::parse("init=/sbin/initd\nservices=blk\n").unwrap();
+        assert!(subset.names_catalog_in_order());
+        assert!(subset.matches_boot());
+        assert_eq!(subset.services(), &["blk"]);
+
+        // A name the catalog does not list breaks the subsequence.
+        let unknown = Manifest::parse("init=/sbin/initd\nservices=blk,net\n").unwrap();
+        assert!(!unknown.names_catalog_in_order());
+        assert!(!unknown.matches_boot());
+
+        // No services line at all is not authoritative, even with the right
+        // init path: an empty list would otherwise pass vacuously.
         let none = Manifest::parse("init=/sbin/initd\n").unwrap();
         assert!(none.services().is_empty());
-        assert!(!none.names_catalog_in_order());
+        assert!(!none.matches_boot());
     }
 
     #[test]
@@ -276,11 +307,15 @@ mod tests {
     }
 
     #[test]
-    fn names_match_in_order_uses_the_supplied_catalog() {
+    fn names_are_subsequence_uses_the_supplied_catalog() {
         let manifest = Manifest::parse("services=blk,kbd\n").unwrap();
-        assert!(names_match_in_order(&manifest, &SERVICE_CATALOG));
+        assert!(names_are_subsequence(&manifest, &SERVICE_CATALOG));
         let reversed = [SERVICE_CATALOG[1], SERVICE_CATALOG[0]];
-        assert!(!names_match_in_order(&manifest, &reversed));
-        assert!(!names_match_in_order(&manifest, &[]));
+        assert!(!names_are_subsequence(&manifest, &reversed));
+        assert!(!names_are_subsequence(&manifest, &[]));
+
+        // A subset keeps the catalog's relative order.
+        let subset = Manifest::parse("services=blk\n").unwrap();
+        assert!(names_are_subsequence(&subset, &SERVICE_CATALOG));
     }
 }

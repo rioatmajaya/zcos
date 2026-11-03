@@ -360,10 +360,10 @@ VFS → write path → journaling → `fsck`**.
       status distinguishes a live slot from a service that finished bring-up,
       through `SYS_SERVICE_READY` and the state word (see
       [ADR 0054](adr/0054-liveness-and-readiness-are-separate.md)). The boot
-      manifest is parsed and checked against the catalog, so the image's
-      declared service order is visible in the transcript even though the
-      kernel still spawns the compile-time list (see
-      [ADR 0055](adr/0055-the-boot-manifest-is-checked-not-authoritative.md)).
+      manifest is parsed and checked against the catalog, and is now
+      authoritative for which services stay supervised and their shutdown
+      order even though the kernel still spawns the compile-time list (see
+      [ADR 0058](adr/0058-the-manifest-selects-the-supervised-set.md)).
       Kernel diagnostics are kept in a bounded ring and are readable from the
       shell's `dmesg` through `SYS_LOG_READ` (see
       [ADR 0056](adr/0056-kernel-logs-live-in-a-bounded-readable-ring.md));

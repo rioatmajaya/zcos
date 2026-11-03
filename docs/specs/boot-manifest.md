@@ -7,10 +7,13 @@ image starts without opening a binary. Normative parser source:
 
 The kernel still spawns `zc_abi::SERVICE_CATALOG` at build time, because it must
 build each address space and provision capabilities before any task runs. The
-manifest is therefore checked, not yet consumed for spawn order: `initd` reads
-it at boot and reports whether the `init` path and the service names match the
-compiled catalog. A mismatch is visible in the boot transcript instead of being
-silently ignored.
+manifest cannot change that spawn, but it **is authoritative for which catalog
+services stay supervised and in what order they shut down**: `initd` resolves
+the file through `zc_supervise::plan_for`, stops any catalog service the file
+omits, and uses the file's order for shutdown. An absent or unusable file falls
+back to the full catalog, so a broken config cannot silently leave a service
+unwatched. See
+[ADR 0058](../adr/0058-the-manifest-selects-the-supervised-set.md).
 
 ## Format
 
@@ -27,13 +30,15 @@ One `key=value` pair per line.
 | `name` | no | Display name, for example `ZC OS`. |
 | `version` | no | Manifest or image version. |
 | `init` | for a match | Path of the first userspace program, `/sbin/initd`. |
-| `services` | for a match | Comma-separated supervised service names in boot order. |
+| `services` | for authority | Comma-separated supervised service names in boot order; a subset of the catalog. |
 
 The service names are the names in `zc_abi::SERVICE_CATALOG`, not numeric ids:
 an id is an ABI detail, and an operator editing a boot file should not have to
-look one up. `services` may name at most eight services
-(`manifest::MAX_SERVICES`); the parser rejects a longer list before it can
-consume unbounded stack.
+look one up. The names must form a **subsequence** of the catalog: a subset is
+allowed, but the relative order must match the compile-time boot order, because
+the kernel provisions the services in catalog order. `services` may name at
+most eight services (`manifest::MAX_SERVICES`); the parser rejects a longer
+list before it can consume unbounded stack.
 
 The shipped file is:
 
@@ -51,18 +56,19 @@ of:
 
 | Line | Meaning |
 |---|---|
-| `initd: manifest ok` | the `init` path and every service name match the catalog in order |
-| `initd: manifest mismatch` | parsed, but a name, the order, or the `init` path differs |
+| `initd: manifest ok` | the `init` path is right and the services are a catalog subsequence; the file is authoritative |
+| `initd: manifest mismatch` | parsed, but the `init` path differs, a service is unknown, the order is wrong, or no service is named |
 | `initd: manifest malformed` | a structural error such as a missing `=`, unknown key, or duplicate service |
 | `initd: manifest absent` | the file is missing |
 | `initd: manifest unreadable` | the read failed or exceeded the fixed buffer |
 | `initd: manifest not utf8` | the bytes are not UTF-8 |
 
-Only the first line means the manifest agrees with the image. A failure does
-not stop the boot: the kernel has already spawned the catalog, and `initd`
-continues to supervise it. This keeps a stale config file from bricking a
-working image while still making the disagreement loud.
+Only `manifest ok` makes the file authoritative. Every other line falls back to
+the full catalog: `initd` logs `initd: supervising blk,kbd` for the effective
+plan, then stops any catalog service the plan omits with
+`initd: <name> not in manifest, stopped`. A failure therefore never stops the
+boot, but it also never disables a service by accident.
 
 The manifest is **not reloaded** at runtime, and it does not yet choose the
-spawn order or the shutdown order. Those remain compile-time data until the
-kernel can read the manifest before it builds address spaces.
+spawn order. Those remain compile-time data until the kernel can read the
+manifest before it builds address spaces.

@@ -128,6 +128,8 @@ jobs:
         grep -q "service: 2 roles, 4 grants (initd -> blk, kbd; shell -> status)" build/boot.log
         grep -q "task 7: initd: root identity" build/boot.log
         grep -q "task 7: initd: manifest ok" build/boot.log
+        # The manifest is authoritative for the supervised set and order.
+        grep -q "task 7: initd: supervising blk,kbd" build/boot.log
         grep -q "cap: task 6 delegated" build/boot.log
         grep -q "to task 4" build/boot.log
         grep -q "iomap: task 4 now holds 256 ports" build/boot.log

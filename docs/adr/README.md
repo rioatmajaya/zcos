@@ -61,9 +61,10 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0052](0052-service-state-is-observable-without-control.md) | Service state is observable without control | Accepted |
 | [0053](0053-identity-is-readable-but-not-settable.md) | Identity is readable but not settable | Accepted |
 | [0054](0054-liveness-and-readiness-are-separate.md) | Liveness and readiness are separate service states | Accepted |
-| [0055](0055-the-boot-manifest-is-checked-not-authoritative.md) | The boot manifest is parsed and checked, not yet authoritative | Accepted |
+| [0055](0055-the-boot-manifest-is-checked-not-authoritative.md) | The boot manifest is parsed and checked, not yet authoritative | Superseded by [0058](0058-the-manifest-selects-the-supervised-set.md) |
 | [0056](0056-kernel-logs-live-in-a-bounded-readable-ring.md) | Kernel diagnostics live in a bounded ring that a task can read | Accepted |
 | [0057](0057-service-health-exposes-mechanism-counters.md) | Service health exposes kernel mechanism counters, not policy | Accepted |
+| [0058](0058-the-manifest-selects-the-supervised-set.md) | The boot manifest selects the supervised service set | Accepted |
 
 ## Adding a decision
 

@@ -5,12 +5,15 @@
 //! restart belongs here. `initd` blocks on the supervision channel, and the
 //! kernel posts one event whenever a supervised service faults or exits.
 //!
-//! The service list, its boot order, and the user-visible names come from
-//! [`zc_supervise`] (the ABI catalog); this loop only applies policy. A fault
-//! consumes one restart from a per-service budget, so a crash loop cannot keep
-//! the boot alive forever. A clean exit is final: the service is recorded as
-//! stopped and every service still running is stopped in reverse boot order,
-//! dependents before providers, so no live driver outlives the boot.
+//! The supervised set and its order come from `zc.manifest`, resolved against
+//! the ABI catalog by [`zc_supervise::plan_for`]; a service the manifest omits
+//! is stopped at startup, and the survivors shut down in reverse manifest
+//! order. When the manifest is absent or not usable the full catalog is used,
+//! because leaving a service unsupervised is worse than supervising one the
+//! file forgot. A fault consumes one restart from a per-service budget, so a
+//! crash loop cannot keep the boot alive forever. A clean exit is final: the
+//! service is recorded as stopped and every planned service still running is
+//! stopped in reverse order, dependents before providers.
 //!
 //! The block driver faults deliberately after its bring-up, proving that a
 //! supervisor — not the kernel — decides to revive a service. The keyboard
@@ -22,7 +25,7 @@
 #![allow(unsafe_code)]
 
 use zc_supervise::manifest::Manifest;
-use zc_supervise::{RestartBudget, ServiceSpec, shutdown_order, spec};
+use zc_supervise::{RestartBudget, SERVICE_CATALOG, ServiceSpec, SupervisionPlan, plan_for, spec};
 use zc_user::{
     IPC_SUPERVISE, SERVICE_KIND_EXIT, SERVICE_KIND_FAULT, close, getid, identity_uid, log,
     log_parts, open, read, recv_from, service_is_up, service_start, service_status, service_stop,
@@ -48,7 +51,9 @@ pub unsafe extern "C" fn _start() -> ! {
     } else {
         log("initd: not root\n");
     }
-    check_manifest();
+    let plan = load_plan();
+    log_plan(&plan);
+    retire_unplanned(&plan);
     let mut budget = RestartBudget::new();
     loop {
         let event = recv_from(IPC_SUPERVISE as u64);
@@ -60,12 +65,18 @@ pub unsafe extern "C" fn _start() -> ! {
             log("initd: unknown service\n");
             continue;
         };
+        // A service the manifest omitted was stopped at startup; an event
+        // queued before that stop must not revive it behind the file's back.
+        if !plan.supervises(id) {
+            log_parts(&["initd: ", service.name, " not supervised\n"]);
+            continue;
+        }
 
         match kind {
             SERVICE_KIND_FAULT => restart(service, &mut budget),
             SERVICE_KIND_EXIT => {
                 log_parts(&["initd: ", service.name, " stopped\n"]);
-                stop_live_services();
+                stop_live_services(&plan);
                 task_exit()
             }
             _ => {
@@ -75,35 +86,89 @@ pub unsafe extern "C" fn _start() -> ! {
     }
 }
 
-/// Reads the boot manifest and checks it against the compiled catalog.
+/// Builds the supervision plan from the boot manifest.
 ///
-/// The kernel still spawns the catalog at build time, so this is a consistency
-/// check: a stale or malformed manifest is visible in the boot transcript
-/// instead of being silently ignored. A missing manifest is not fatal — the
-/// supervisor can still use the compiled list — and an unreadable or malformed
-/// one falls back the same way.
-fn check_manifest() {
+/// A manifest that passes [`Manifest::matches_boot`] is authoritative for the
+/// supervised set and order. Anything else — absent, unreadable, not UTF-8,
+/// malformed, wrong init, or naming no service — is logged and falls back to
+/// the full catalog, so a broken file cannot leave a service unsupervised.
+fn load_plan() -> SupervisionPlan {
     let fd = open(MANIFEST_PATH);
     if fd == u64::MAX {
         log("initd: manifest absent\n");
-        return;
+        return plan_for(None);
     }
     let mut buffer = [0u8; MANIFEST_MAX];
     let count = read(fd, &mut buffer);
     close(fd);
     if count == u64::MAX || count as usize >= MANIFEST_MAX {
         log("initd: manifest unreadable\n");
-        return;
+        return plan_for(None);
     }
     let Ok(text) = core::str::from_utf8(&buffer[..count as usize]) else {
         log("initd: manifest not utf8\n");
-        return;
+        return plan_for(None);
     };
     match Manifest::parse(text) {
-        Ok(manifest) if manifest.matches_boot() => log("initd: manifest ok\n"),
-        Ok(_) => log("initd: manifest mismatch\n"),
-        Err(_) => log("initd: manifest malformed\n"),
-    };
+        Ok(manifest) if manifest.matches_boot() => {
+            log("initd: manifest ok\n");
+            plan_for(Some(&manifest))
+        }
+        Ok(_) => {
+            log("initd: manifest mismatch\n");
+            plan_for(None)
+        }
+        Err(_) => {
+            log("initd: manifest malformed\n");
+            plan_for(None)
+        }
+    }
+}
+
+/// Logs the services the supervisor will watch, in order.
+fn log_plan(plan: &SupervisionPlan) {
+    let mut buffer = [0u8; 128];
+    let prefix = b"initd: supervising ";
+    buffer[..prefix.len()].copy_from_slice(prefix);
+    let mut len = prefix.len();
+    for (index, service) in plan.services().iter().enumerate() {
+        if index > 0 && len < buffer.len() {
+            buffer[len] = b',';
+            len += 1;
+        }
+        for &byte in service.name.as_bytes() {
+            if len >= buffer.len() {
+                break;
+            }
+            buffer[len] = byte;
+            len += 1;
+        }
+    }
+    if len < buffer.len() {
+        buffer[len] = b'\n';
+        len += 1;
+    }
+    log(core::str::from_utf8(&buffer[..len]).unwrap_or("initd: supervising ?\n"));
+}
+
+/// Stops every catalog service the plan does not supervise.
+///
+/// The kernel spawns the whole catalog before any task runs; the manifest
+/// decides which of those stay supervised. Stopping the rest keeps the running
+/// set equal to the file instead of leaving stray services the supervisor
+/// cannot account for.
+fn retire_unplanned(plan: &SupervisionPlan) {
+    for service in SERVICE_CATALOG {
+        if plan.supervises(service.id) {
+            continue;
+        }
+        if !service_is_up(service_status(u64::from(service.id))) {
+            continue;
+        }
+        if service_stop(u64::from(service.id)) == 0 {
+            log_parts(&["initd: ", service.name, " not in manifest, stopped\n"]);
+        }
+    }
 }
 
 /// Revives `service` after a fault, or gives up when its budget is spent.
@@ -125,12 +190,12 @@ fn restart(service: ServiceSpec, budget: &mut RestartBudget) {
     }
 }
 
-/// Stops every service still running, dependents before their providers.
+/// Stops every planned service still running, dependents before providers.
 ///
 /// The service whose exit started the shutdown is already gone, so the status
 /// check skips it instead of stopping it twice.
-fn stop_live_services() {
-    for service in shutdown_order() {
+fn stop_live_services(plan: &SupervisionPlan) {
+    for service in plan.shutdown() {
         if !service_is_up(service_status(u64::from(service.id))) {
             continue;
         }

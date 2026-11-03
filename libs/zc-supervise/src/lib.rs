@@ -13,6 +13,110 @@ pub mod manifest;
 
 pub use zc_abi::{SERVICE_CATALOG, ServiceSpec};
 
+use manifest::Manifest;
+
+/// The services one boot supervises, in boot order.
+///
+/// A valid `zc.manifest` makes the supervised set authoritative: it may name a
+/// subset of [`SERVICE_CATALOG`], and those names define the order. The kernel
+/// still provisions the whole catalog at build time, so the manifest cannot
+/// reorder the actual spawn; the plan therefore accepts only a catalog
+/// subsequence and falls back to the full catalog when the file is absent,
+/// unreadable, malformed, or names something the catalog does not.
+///
+/// The type is a fixed, allocation-free value so `initd` can build it on its
+/// small stack and pass it to the restart and shutdown policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SupervisionPlan {
+    services: [ServiceSpec; SERVICE_CATALOG.len()],
+    len: usize,
+}
+
+impl SupervisionPlan {
+    /// The whole catalog, used when no manifest is authoritative.
+    #[must_use]
+    pub const fn full() -> Self {
+        let mut services = [SERVICE_CATALOG[0]; SERVICE_CATALOG.len()];
+        let mut index = 0;
+        while index < SERVICE_CATALOG.len() {
+            services[index] = SERVICE_CATALOG[index];
+            index += 1;
+        }
+        Self {
+            services,
+            len: SERVICE_CATALOG.len(),
+        }
+    }
+
+    /// Resolves the names a valid [`Manifest`] carries, in that order.
+    ///
+    /// A name the catalog does not list is skipped. Callers build a plan from
+    /// [`Manifest::matches_boot`]-checked input, so the skip only protects
+    /// against a future catalog shrinking.
+    #[must_use]
+    pub fn from_manifest(manifest: &Manifest<'_>) -> Self {
+        let mut plan = Self {
+            services: [SERVICE_CATALOG[0]; SERVICE_CATALOG.len()],
+            len: 0,
+        };
+        for name in manifest.services() {
+            if let Some(service) = SERVICE_CATALOG.iter().copied().find(|s| s.name == *name) {
+                plan.services[plan.len] = service;
+                plan.len += 1;
+            }
+        }
+        plan
+    }
+
+    /// Returns the supervised services in boot order.
+    #[must_use]
+    pub fn services(&self) -> &[ServiceSpec] {
+        &self.services[..self.len]
+    }
+
+    /// Returns whether `id` is in the plan.
+    #[must_use]
+    pub fn supervises(&self, id: u32) -> bool {
+        self.services().iter().any(|service| service.id == id)
+    }
+
+    /// Returns the plan in shutdown order: dependents before their providers.
+    pub fn shutdown(&self) -> impl Iterator<Item = ServiceSpec> + '_ {
+        self.services().iter().rev().copied()
+    }
+
+    /// Returns how many services the plan supervises.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Returns whether the plan supervises nothing.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl Default for SupervisionPlan {
+    fn default() -> Self {
+        Self::full()
+    }
+}
+
+/// Chooses the supervised set from an optional manifest.
+///
+/// A manifest that matches the boot is authoritative; anything else falls back
+/// to the full catalog, because leaving a service unsupervised is worse than
+/// supervising one the file forgot.
+#[must_use]
+pub fn plan_for(manifest: Option<&Manifest<'_>>) -> SupervisionPlan {
+    match manifest {
+        Some(manifest) if manifest.matches_boot() => SupervisionPlan::from_manifest(manifest),
+        _ => SupervisionPlan::full(),
+    }
+}
+
 /// Restarts one service may receive in a single boot.
 ///
 /// A crash loop must not restart forever: the boot would never finish and the
@@ -130,6 +234,66 @@ mod tests {
     fn shutdown_is_the_reverse_of_boot_order() {
         let mut order = shutdown_order();
         assert_eq!(order.next(), Some(SERVICE_CATALOG[1]));
+        assert_eq!(order.next(), Some(SERVICE_CATALOG[0]));
+        assert_eq!(order.next(), None);
+    }
+
+    #[test]
+    fn the_full_plan_is_the_catalog_in_boot_order() {
+        let plan = SupervisionPlan::full();
+        assert_eq!(plan.len(), SERVICE_CATALOG.len());
+        assert!(!plan.is_empty());
+        assert_eq!(plan.services(), &SERVICE_CATALOG);
+        for service in SERVICE_CATALOG {
+            assert!(plan.supervises(service.id));
+        }
+        assert!(!plan.supervises(99));
+        // The full plan's shutdown matches the catalog helper.
+        let mut plan_order = plan.shutdown();
+        let mut catalog_order = shutdown_order();
+        assert_eq!(plan_order.next(), catalog_order.next());
+        assert_eq!(plan_order.next(), catalog_order.next());
+        assert_eq!(plan_order.next(), None);
+        assert_eq!(catalog_order.next(), None);
+    }
+
+    #[test]
+    fn a_manifest_plan_is_a_subset_in_manifest_order() {
+        let manifest = Manifest::parse("init=/sbin/initd\nservices=blk\n").unwrap();
+        let plan = SupervisionPlan::from_manifest(&manifest);
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan.services(), &[SERVICE_CATALOG[0]]);
+        assert!(plan.supervises(BLK_SERVICE));
+        assert!(!plan.supervises(KBD_SERVICE));
+
+        // The full manifest resolves to the whole catalog.
+        let both = Manifest::parse("init=/sbin/initd\nservices=blk,kbd\n").unwrap();
+        assert_eq!(
+            SupervisionPlan::from_manifest(&both).services(),
+            &SERVICE_CATALOG
+        );
+    }
+
+    #[test]
+    fn plan_for_prefers_a_valid_manifest_and_falls_back_otherwise() {
+        let valid = Manifest::parse("init=/sbin/initd\nservices=blk\n").unwrap();
+        let plan = plan_for(Some(&valid));
+        assert_eq!(plan.services(), &[SERVICE_CATALOG[0]]);
+
+        // Absent, malformed, mismatched, or empty manifests all fall back to
+        // the full catalog so no service is left unsupervised by accident.
+        let wrong_init = Manifest::parse("init=/bin/sh\nservices=blk\n").unwrap();
+        let no_services = Manifest::parse("init=/sbin/initd\n").unwrap();
+        assert_eq!(plan_for(None).services(), &SERVICE_CATALOG);
+        assert_eq!(plan_for(Some(&wrong_init)).services(), &SERVICE_CATALOG);
+        assert_eq!(plan_for(Some(&no_services)).services(), &SERVICE_CATALOG);
+    }
+
+    #[test]
+    fn a_subset_shutdown_reverses_only_the_planned_services() {
+        let manifest = Manifest::parse("init=/sbin/initd\nservices=blk\n").unwrap();
+        let plan = SupervisionPlan::from_manifest(&manifest);
+        let mut order = plan.shutdown();
         assert_eq!(order.next(), Some(SERVICE_CATALOG[0]));
         assert_eq!(order.next(), None);
     }

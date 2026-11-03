@@ -1,6 +1,6 @@
 # 0055 — The boot manifest is parsed and checked, not yet authoritative
 
-- **Status:** accepted
+- **Status:** Superseded by [0058](0058-the-manifest-selects-the-supervised-set.md)
 - **Date:** 2026-11-02
 - **Affects:** `libs/zc-supervise`, `user/zc-initd`, `initramfs/zc.manifest`, `docs/specs/boot-manifest.md`, F7f
 

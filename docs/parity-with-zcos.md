@@ -133,7 +133,7 @@ the 2026-10-20 changelog records the Linux entries being removed.
 | IPC | synchronous endpoints, shared memory, notifications, poll | channels, blocking send/receive, shared exchange page, `SYS_SEND_TO`/`SYS_RECV_FROM` | 🟡 Enough for current services; no general shared-memory API or notification object. |
 | Capabilities | `libcap` rights over process/thread/endpoint/shm/IRQ/I/O/block; SOF manifests; signed policy | generation-safe tables, explicit rights, delegation, per-task I/O bitmap, port/IRQ claims | 🟡 Current delegation is strong, but there is no signed object or policy layer. |
 | Process model | `fork`/`exec`/`spawn`/`wait`, signals, process registry, sessions | fixed 10 task slots; `SYS_TASK_EXIT`, service revive, no fork/exec/wait | ❌ This is the single largest architectural blocker for real apps. The launcher cannot become a real app launcher while only two client slots exist. |
-| Syscall surface | about 70+ calls, including process, signal, network, library, Linux compatibility | 41 numbers, highest `SYS_SERVICE_READY` (40), two reserved but unimplemented | 🟡 The current ABI is coherent; it is simply much smaller. Add calls only with specs and tests. |
+| Syscall surface | about 70+ calls, including process, signal, network, library, Linux compatibility | 43 numbers, highest `SYS_SERVICE_HEALTH` (42), two reserved but unimplemented | 🟡 The current ABI is coherent; it is simply much smaller. Add calls only with specs and tests. |
 | Fault isolation | ring-3 faults kill only the domain; init supervises services | same principle; `initd` supervises `blk` and `kbd` | 🟡 The mechanism is at parity; the service catalog is much smaller. |
 | Linux personality | kernel-level POSIX translator for static x86_64 ELF (`busybox`, `tcc`), sockets `ENOSYS` | none | ⛔ Do not copy the kernel placement. If needed later, build a userspace personality domain. |
 | Linux driver strategy | many hand-written drivers, some in ring 0 | ring-3 driver domains with brokered authority | ✅ Keep the current boundary. Do not regress to ring-0 drivers for feature speed. |
@@ -395,10 +395,14 @@ agree.
   discover or load a service, and it has no endpoint or failure-rate data.
 - One boot manifest that names services and order; no magic indices spread
   across compositor, shell, and tests. `zc.manifest` now carries
-  `services=blk,kbd`, and `initd` parses it and checks the names against the
-  catalog ([ADR 0055](adr/0055-the-boot-manifest-is-checked-not-authoritative.md)).
-  The manifest is still checked rather than authoritative, and there is no
-  reload path, so a new service still needs a fixed slot and an image.
+  `services=blk,kbd`, and it is authoritative for the supervised set and
+  shutdown order: `initd` resolves it through `zc_supervise::plan_for`, stops
+  any catalog service the file omits, and falls back to the full catalog when
+  the file is unusable
+  ([ADR 0058](adr/0058-the-manifest-selects-the-supervised-set.md)). Spawn
+  order is still compile-time — the kernel provisions address spaces and
+  capabilities before any task runs — and there is no reload path, so a new
+  service still needs a fixed slot and an image.
 - Keep the kernel VFS decision explicit; do not move it to a service without a
   measured reason.
 
@@ -543,9 +547,10 @@ trustworthy core.
    status now separates liveness from self-declared readiness
    ([ADR 0054](adr/0054-liveness-and-readiness-are-separate.md)). The
    compile-time catalog is still the registry; discovery, endpoints, and
-   failure-rate health remain. The boot manifest is now parsed and checked
-   ([ADR 0055](adr/0055-the-boot-manifest-is-checked-not-authoritative.md)) but
-   does not drive spawn order yet. Kernel diagnostics are now a bounded ring
+   failure-rate routing remain. The boot manifest is now authoritative for the
+   supervised service set and shutdown order
+   ([ADR 0058](adr/0058-the-manifest-selects-the-supervised-set.md)) but does
+   not drive spawn order yet. Kernel diagnostics are now a bounded ring
    that a task can read through `SYS_LOG_READ`, and the shell exposes it as
    `dmesg` ([ADR 0056](adr/0056-kernel-logs-live-in-a-bounded-readable-ring.md));
    task output still stays on the serial line. The kernel now also reports its
