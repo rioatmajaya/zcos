@@ -146,6 +146,10 @@ jobs:
         # once the child is gone.
         grep -q "task 2: rmdir: cannot remove" build/boot.log
         grep -q "task 2: rmdir: removed /tmp/dir" build/boot.log
+        # `mv` renames within the scratch filesystem, and the file resolves
+        # under its new name.
+        grep -q "task 2: mv: moved /tmp/a -> /tmp/b" build/boot.log
+        grep -q "task 2: /tmp/b: file, 4 bytes, mode 0644, uid 1 gid 1" build/boot.log
         grep -q "task 4: blk: zcfs stopped" build/boot.log
         grep -q "user: 10 address spaces" build/boot.log
         grep -q "device: 3 roles, 7 grants (blk 0, kbd 4, devmgr 3)" build/boot.log

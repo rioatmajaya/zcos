@@ -10,7 +10,7 @@ use zc_abi::{
     SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOCK, SYS_CLOSE, SYS_CREATE, SYS_FB_INFO, SYS_GETID,
     SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT, SYS_LOG_READ, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_MKDIR, SYS_MMIO_MAP, SYS_MOUNT,
     SYS_MOUSE_READ, SYS_OPEN, SYS_PORT_CLAIM, SYS_POWEROFF, SYS_READ, SYS_READDIR, SYS_RECV,
-    SYS_RECV_FROM, SYS_RMDIR, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_HEALTH,
+    SYS_RECV_FROM, SYS_RENAME, SYS_RMDIR, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_HEALTH,
     SYS_SERVICE_READY, SYS_SERVICE_START, SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_SESSION,
     SYS_STAT,
     SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY,
@@ -91,6 +91,8 @@ pub enum Action {
     Mkdir,
     /// Remove an empty directory by path.
     Rmdir,
+    /// Rename or move an entry within one filesystem.
+    Rename,
     /// Change a file's permission bits.
     Chmod,
     /// Allocate a pixel surface and its backing frames.
@@ -177,6 +179,7 @@ pub const fn dispatch(number: u64) -> Result<Action, SyscallError> {
         SYS_UNLINK => Ok(Action::Unlink),
         SYS_MKDIR => Ok(Action::Mkdir),
         SYS_RMDIR => Ok(Action::Rmdir),
+        SYS_RENAME => Ok(Action::Rename),
         _ => Err(SyscallError::InvalidNumber),
     }
 }
@@ -235,12 +238,13 @@ mod tests {
         assert_eq!(dispatch(SYS_UNLINK), Ok(Action::Unlink));
         assert_eq!(dispatch(SYS_MKDIR), Ok(Action::Mkdir));
         assert_eq!(dispatch(SYS_RMDIR), Ok(Action::Rmdir));
+        assert_eq!(dispatch(SYS_RENAME), Ok(Action::Rename));
     }
 
     #[test]
     fn unknown_numbers_are_rejected() {
-        // The last assigned number is SYS_RMDIR (47), so probe past it.
-        assert_eq!(dispatch(48), Err(SyscallError::InvalidNumber));
+        // The last assigned number is SYS_RENAME (48), so probe past it.
+        assert_eq!(dispatch(49), Err(SyscallError::InvalidNumber));
         assert_eq!(
             dispatch(u64::MAX),
             Err(SyscallError::InvalidNumber)

@@ -16,7 +16,7 @@ pub use zc_abi::{
     SERVICE_KIND_FAULT, SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOCK, SYS_CLOSE, SYS_CREATE, SYS_FB_INFO,
     SYS_GETID, SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT, SYS_LOG_READ, SYS_LOG_WRITE, SYS_MAP_FRAME,
     SYS_MKDIR, SYS_MMIO_MAP, SYS_MOUNT, SYS_MOUSE_READ, SYS_OPEN, SYS_PORT_CLAIM, SYS_POWEROFF, SYS_READ,
-    SYS_READDIR, SYS_RECV, SYS_RECV_FROM, SYS_RMDIR, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ,
+    SYS_READDIR, SYS_RECV, SYS_RECV_FROM, SYS_RENAME, SYS_RMDIR, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ,
     SYS_SERVICE_HEALTH, SYS_SERVICE_READY, SYS_SERVICE_START, SYS_SERVICE_STATUS,
     SYS_SERVICE_STOP, SYS_SESSION, SYS_STAT, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP,
     SYS_TASK_EXIT, SYS_TASK_INFO, SYS_TERM_READ, SYS_UMOUNT, SYS_UNLINK, SYS_WINDOW_CLOSE, SYS_WINDOW_ID,
@@ -410,6 +410,22 @@ pub fn mkdir(path: &str) -> u64 {
 #[inline(always)]
 pub fn rmdir(path: &str) -> u64 {
     syscall2(SYS_RMDIR, path.as_ptr() as u64, path.len() as u64)
+}
+
+/// Renames or moves `old` to `new` within one filesystem, returning 0 or
+/// `u64::MAX`.
+///
+/// The caller must hold write and search permission on both parent
+/// directories, and both paths must name the same filesystem.
+#[inline(always)]
+pub fn rename(old: &str, new: &str) -> u64 {
+    syscall4(
+        SYS_RENAME,
+        old.as_ptr() as u64,
+        old.len() as u64,
+        new.as_ptr() as u64,
+        new.len() as u64,
+    )
 }
 
 /// Changes `path`'s permission bits to `mode`, returning 0 or `u64::MAX`.

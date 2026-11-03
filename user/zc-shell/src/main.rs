@@ -2,9 +2,9 @@
 //!
 //! Reads keystrokes with blocking serial reads, edits a single line with
 //! backspace support, and runs `help`, `echo`, `cat`, `ls`, `stat`, `write`,
-//! `rm`, `mkdir`, `rmdir`, `tmp`, `persist`, `chmod`, `mount`, `umount`, `id`,
-//! `svc`, `ps`, `dmesg`, and `exit`. Output goes through the log syscall, so
-//! the transcript appears in the kernel serial log.
+//! `rm`, `mkdir`, `rmdir`, `mv`, `tmp`, `persist`, `chmod`, `mount`, `umount`,
+//! `id`, `svc`, `ps`, `dmesg`, and `exit`. Output goes through the log syscall,
+//! so the transcript appears in the kernel serial log.
 //!
 //! `id` asks the kernel for this task's user and group ids plus its session.
 //! The shell runs as an unprivileged user, so `id` is the observable side of
@@ -50,7 +50,8 @@ use zc_user::{
     READDIR_ENTRY, SERVICE_CATALOG, Stat, TASK_SLOTS, TaskInfo, chmod, close, create, getid,
     identity_gid, identity_uid, log, log_parts, log_read, mount, open, poweroff, read, readdir,
     send_to, serial_read, service_faults, service_health, service_is_ready, service_is_up,
-    service_restarts, session, stat, task_exit_with, task_info, umount, unlink, mkdir, rmdir, write,
+    service_restarts, session, stat, task_exit_with, task_info, umount, unlink, mkdir, rmdir,
+    rename, write,
 };
 
 /// Contents `persist` writes and expects to read back.
@@ -290,7 +291,7 @@ fn run(line: &[u8]) -> bool {
     }
     match argv[0] {
         b"help" => {
-            log("Commands: help echo cat ls stat write rm mkdir rmdir tmp persist chmod mount umount id svc ps dmesg poweroff exit\n");
+            log("Commands: help echo cat ls stat write rm mkdir rmdir mv tmp persist chmod mount umount id svc ps dmesg poweroff exit\n");
         }
         b"echo" => {
             for index in 1..count {
@@ -458,6 +459,26 @@ fn run(line: &[u8]) -> bool {
                 // read-only mount all surface as `u64::MAX`. `rm` removes a
                 // file; `rmdir` only removes a directory.
                 log("rmdir: cannot remove\n");
+            }
+        }
+        b"mv" => {
+            if count < 3 {
+                log("usage: mv <old> <new>\n");
+                return false;
+            }
+            let old = core::str::from_utf8(argv[1]).unwrap_or("");
+            let new = core::str::from_utf8(argv[2]).unwrap_or("");
+            if rename(old, new) == 0 {
+                out_bytes(b"mv: moved ");
+                out_bytes(argv[1]);
+                out_bytes(b" -> ");
+                out_bytes(argv[2]);
+                out_bytes(b"\n");
+                out_flush();
+            } else {
+                // A missing source, a denied parent, a directory target, or a
+                // cross-mount move all surface as `u64::MAX`.
+                log("mv: cannot move\n");
             }
         }
         b"write" => {

@@ -328,6 +328,20 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **The VFS can rename or move an entry** (F7i, core system): `FileSystem`
+  gains `rename` and `SYS_RENAME` (48) renames or moves a path. Both paths must
+  name the same filesystem, so a cross-mount move is refused rather than
+  half-copied, and the caller must hold write and search on both parent
+  directories. `tmpfs` moves the node rather than its bytes, allows replacing a
+  file, and refuses to replace a directory or to move a directory into its own
+  subtree; a rename to the same name is a no-op so a scripted `mv` is
+  idempotent. This completes the ordinary namespace operations for the scratch
+  filesystem. The shell gains `mv`, and the scripted boot writes `/tmp/a`,
+  moves it to `/tmp/b`, and stats it. `zcfs` keeps the trait default, so a
+  persistent rename reports failure until its log format learns a move record.
+  The three checksums remain `0xd616ad79aaefb099`, `0x6d66e82d0f2d6fb8`, and
+  `0x78ebd6d359914da7`. See
+  [ADR 0065](docs/adr/0065-a-rename-moves-a-node-within-one-filesystem.md).
 - **A directory is removed only when empty** (F7i, core system): `FileSystem`
   gains `rmdir` and `SYS_RMDIR` (47) removes a directory behind the same
   parent-directory authority as `unlink`. A directory that still holds entries

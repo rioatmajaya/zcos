@@ -23,8 +23,8 @@ filesystem exchange page (see [`server-protocol.md`](server-protocol.md)).
 
 ## Syscall table
 
-Numbers are stable and never reused. `SYS_RMDIR` (47) is the highest
-assigned number; 48 and above are rejected.
+Numbers are stable and never reused. `SYS_RENAME` (48) is the highest
+assigned number; 49 and above are rejected.
 
 Two numbers are **declared but not yet implemented**: `SYS_YIELD` (0) and
 `SYS_MAP_FRAME` (4) are recognized by the dispatch table but have no handler, so
@@ -81,6 +81,7 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 45 | `SYS_UNLINK` | path ptr, length | 0 | `u64::MAX` |
 | 46 | `SYS_MKDIR` | path ptr, length | 0 | `u64::MAX` |
 | 47 | `SYS_RMDIR` | path ptr, length | 0 | `u64::MAX` |
+| 48 | `SYS_RENAME` | old ptr, old length, new ptr, new length (`r10`) | 0 | `u64::MAX` |
 
 ### Clock
 
@@ -255,6 +256,16 @@ removal cannot orphan children; `SYS_UNLINK` still refuses a directory, so the
 two calls stay distinct. `tmpfs` implements it and reuses the freed slot; a
 filesystem without directories keeps the trait default, which reports failure
 rather than pretending the directory is gone.
+
+`SYS_RENAME` (48) renames or moves an entry. It takes two paths — the old in
+`rdi`/`rsi` and the new in `rdx`/`r10` — resolves both parents, and checks write
+and search on **both**, because creating a name in the destination and removing
+one from the source are each an act of authority. Both paths must name the same
+filesystem: a cross-mount move would be a copy, so it is refused rather than
+half-done. Replacing an existing file is allowed; replacing a directory, or
+moving a directory into its own subtree, is refused. `tmpfs` implements it and
+moves the node rather than its bytes, so the other filesystems keep the trait
+default and report failure.
 
 ### `SYS_WINDOW_CLOSE`
 

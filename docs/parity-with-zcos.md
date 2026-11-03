@@ -576,8 +576,11 @@ trustworthy core.
    ([ADR 0063](adr/0063-the-scratch-filesystem-is-hierarchical.md)); `zcfs`
    keeps its flat namespace for now. A directory can then be removed once it is
    empty (`SYS_RMDIR`, [ADR 0064](adr/0064-a-directory-is-removed-only-when-empty.md)),
-   so the scratch tree can be built up and torn down. The three proof checksums
-   still hold.
+   so the scratch tree can be built up and torn down. An entry can also be
+   renamed or moved within one filesystem (`SYS_RENAME`,
+   [ADR 0065](adr/0065-a-rename-moves-a-node-within-one-filesystem.md)),
+   completing the ordinary namespace operations for the scratch filesystem. The
+   three proof checksums still hold.
 5. Do not start the app catalog, widget toolkit, or host runner yet.
 6. Keep `build/zcos.img` human-testable and keep the three proof images locked.
 

@@ -136,6 +136,28 @@ impl<const N: usize> Inner<N> {
             .map(|index| index as NodeId)
     }
 
+    /// Returns whether `node` is `ancestor` or lives below it.
+    ///
+    /// Walking parents guards a directory move: a directory cannot be renamed
+    /// into its own subtree, which would detach the subtree from the root.
+    fn is_descendant(&self, node: NodeId, ancestor: NodeId) -> bool {
+        let mut current = node;
+        loop {
+            if current == ancestor {
+                return true;
+            }
+            let parent = match self.get(current) {
+                Ok(entry) => entry.parent,
+                Err(_) => return false,
+            };
+            // The root's parent is itself; that ends the walk.
+            if parent == current {
+                return false;
+            }
+            current = parent;
+        }
+    }
+
     /// Adds a node `name` under `dir`, or returns an existing child.
     ///
     /// Creating a name that already exists is not an error: the shell calls
@@ -385,6 +407,61 @@ impl<const N: usize> FileSystem for TmpFs<N> {
         }
         let index = inner.slot(id)?;
         inner.nodes[index] = Node::blank();
+        Ok(())
+    }
+
+    fn rename(
+        &self,
+        old_dir: NodeId,
+        old_name: &[u8],
+        new_dir: NodeId,
+        new_name: &[u8],
+        _owner: Identity,
+    ) -> Result<(), VfsError> {
+        if old_name.is_empty()
+            || old_name.len() > NAME_MAX
+            || new_name.is_empty()
+            || new_name.len() > NAME_MAX
+        {
+            return Err(VfsError::BadPath);
+        }
+        let mut inner = self.inner.borrow_mut();
+        // Both ends must be directories: a rename is an operation *in* them.
+        if inner.get(old_dir)?.kind != KIND_DIR || inner.get(new_dir)?.kind != KIND_DIR {
+            return Err(VfsError::NotADirectory);
+        }
+        let src = inner.find_child(old_dir, old_name).ok_or(VfsError::NotFound)?;
+        // Renaming to the name a node already has in the same directory is a
+        // no-op, not an error, which keeps a scripted `mv` idempotent.
+        if old_dir == new_dir && old_name == new_name {
+            return Ok(());
+        }
+        // A directory cannot be moved into itself or its own subtree.
+        if inner.get(src)?.kind == KIND_DIR && inner.is_descendant(new_dir, src) {
+            return Err(VfsError::NotSupported);
+        }
+        // A file already using the destination name is replaced; a directory
+        // is out of `rename`'s scope, so it is refused rather than merged.
+        if let Some(dst) = inner.find_child(new_dir, new_name) {
+            if dst != src {
+                if inner.get(dst)?.kind == KIND_DIR {
+                    return Err(VfsError::NotEmpty);
+                }
+                let dst_index = inner.slot(dst)?;
+                inner.nodes[dst_index] = Node::blank();
+            }
+        }
+        let src_index = inner.slot(src)?;
+        let entry = &mut inner.nodes[src_index];
+        entry.parent = new_dir;
+        entry.name[..new_name.len()].copy_from_slice(new_name);
+        // Clear the tail of the old name so no stale byte can outlive the
+        // shorter new one; `is_named` only reads the prefix, but this keeps the
+        // stored name exact.
+        for byte in &mut entry.name[new_name.len()..] {
+            *byte = 0;
+        }
+        entry.name_len = new_name.len() as u8;
         Ok(())
     }
 
@@ -750,6 +827,59 @@ mod tests {
             Err(VfsError::NotFound)
         );
         assert_eq!(fs.rmdir(ROOT, b"", Identity::ROOT), Err(VfsError::BadPath));
+    }
+
+    #[test]
+    fn rename_moves_and_renames_a_file() {
+        let fs = TmpFs::<8>::new();
+        let dir = fs.mkdir(ROOT, b"d", 0o755, Identity::ROOT).expect("mkdir");
+        fs.create(ROOT, b"a", 0o644, Identity::ROOT).expect("a");
+        // Rename in place.
+        assert_eq!(fs.rename(ROOT, b"a", ROOT, b"b", Identity::ROOT), Ok(()));
+        assert_eq!(fs.lookup(ROOT, b"a"), Err(VfsError::NotFound));
+        assert!(fs.lookup(ROOT, b"b").is_ok());
+        // Move the same node into a directory.
+        assert_eq!(fs.rename(ROOT, b"b", dir, b"c", Identity::ROOT), Ok(()));
+        assert_eq!(fs.lookup(ROOT, b"b"), Err(VfsError::NotFound));
+        assert!(fs.lookup(dir, b"c").is_ok());
+        // A rename to the name it already has is a no-op.
+        assert_eq!(fs.rename(dir, b"c", dir, b"c", Identity::ROOT), Ok(()));
+        assert!(fs.lookup(dir, b"c").is_ok());
+    }
+
+    #[test]
+    fn rename_replaces_a_file_target_but_not_a_directory() {
+        let fs = TmpFs::<8>::new();
+        let dir = fs.mkdir(ROOT, b"d", 0o755, Identity::ROOT).expect("mkdir");
+        fs.create(ROOT, b"a", 0o644, Identity::ROOT).expect("a");
+        fs.create(ROOT, b"b", 0o644, Identity::ROOT).expect("b");
+        // The destination file is replaced by the move.
+        assert_eq!(fs.rename(ROOT, b"a", ROOT, b"b", Identity::ROOT), Ok(()));
+        assert_eq!(fs.lookup(ROOT, b"a"), Err(VfsError::NotFound));
+        assert!(fs.lookup(ROOT, b"b").is_ok());
+        // A directory in the way is refused rather than merged.
+        fs.create(ROOT, b"c", 0o644, Identity::ROOT).expect("c");
+        assert_eq!(
+            fs.rename(ROOT, b"c", ROOT, b"d", Identity::ROOT),
+            Err(VfsError::NotEmpty)
+        );
+        let _ = dir;
+    }
+
+    #[test]
+    fn rename_refuses_to_move_a_directory_into_its_subtree() {
+        let fs = TmpFs::<8>::new();
+        let outer = fs.mkdir(ROOT, b"o", 0o755, Identity::ROOT).expect("outer");
+        let inner = fs.mkdir(outer, b"i", 0o755, Identity::ROOT).expect("inner");
+        // Moving `o` under its own child would detach the subtree.
+        assert_eq!(
+            fs.rename(ROOT, b"o", inner, b"o2", Identity::ROOT),
+            Err(VfsError::NotSupported)
+        );
+        // Moving it to the root under a new name is fine.
+        assert_eq!(fs.rename(ROOT, b"o", ROOT, b"p", Identity::ROOT), Ok(()));
+        assert_eq!(fs.lookup(ROOT, b"o"), Err(VfsError::NotFound));
+        assert!(fs.lookup(ROOT, b"p").is_ok());
     }
 
     #[test]

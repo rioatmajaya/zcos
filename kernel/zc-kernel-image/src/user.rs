@@ -1269,6 +1269,45 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 }
             }
         }
+        Ok(Action::Rename) => {
+            let me = tasks.current();
+            let old = match validate_user_slice(tasks, regs.rdi, regs.rsi) {
+                Some(path) => path,
+                None => {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+            };
+            let new = match validate_user_slice(tasks, regs.rdx, regs.r10) {
+                Some(path) => path,
+                None => {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+            };
+            // SAFETY: mounted once during setup before any task runs.
+            let mounts = unsafe { &*core::ptr::addr_of!(MOUNTS) };
+            // Both parents must be writable and searchable by the caller, and
+            // both paths must name the same filesystem.
+            match mounts.rename(old, new, tasks.current_owner()) {
+                Ok(()) => {
+                    regs.set_result(0);
+                    0
+                }
+                Err(VfsError::WouldBlock) => {
+                    tasks.unblock_all();
+                    block_with_retry(tasks, regs, frame, 0)
+                }
+                Err(VfsError::PermissionDenied) => {
+                    regs.set_result(denied(me, "rename", old));
+                    0
+                }
+                Err(_) => {
+                    regs.set_result(u64::MAX);
+                    0
+                }
+            }
+        }
         Ok(Action::Chmod) => {
             let me = tasks.current();
             let path = match validate_user_slice(tasks, regs.rdi, regs.rsi) {

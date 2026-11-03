@@ -20,6 +20,7 @@ use zc_abi::{
     SYS_TASK_EXIT, SYS_TASK_INFO, SYS_TERM_READ, SYS_UNLINK, SYS_WINDOW_CLOSE,
     SYS_MKDIR,
     SYS_RMDIR,
+    SYS_RENAME,
     SYS_YIELD,
     SYS_SESSION,
 };
@@ -304,6 +305,7 @@ fn exercise_mechanisms(alloc: &mut FrameAllocator<'_>, usable: u64) {
         (SYS_UNLINK, Action::Unlink),
         (SYS_MKDIR, Action::Mkdir),
         (SYS_RMDIR, Action::Rmdir),
+        (SYS_RENAME, Action::Rename),
         (SYS_LOG_READ, Action::LogRead),
         (SYS_CHMOD, Action::Chmod),
         (SYS_SURFACE_CREATE, Action::SurfaceCreate),

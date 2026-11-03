@@ -281,6 +281,16 @@ pub const SYS_MKDIR: u64 = 46;
 /// uses `SYS_UNLINK` instead. Returns `0` or `u64::MAX`.
 pub const SYS_RMDIR: u64 = 47;
 
+/// Renames or moves a filesystem entry within one filesystem.
+///
+/// Arguments are the old path pointer (`rdi`) and length (`rsi`), then the new
+/// path pointer (`rdx`) and length (`r10`). Both paths must resolve to the same
+/// filesystem: a move across mounts would be a copy and is refused rather than
+/// half-done. The caller must hold write and search permission on both parent
+/// directories. Replacing an existing file is allowed; replacing a directory is
+/// not. Returns `0` or `u64::MAX`.
+pub const SYS_RENAME: u64 = 48;
+
 /// Packs a user and group id into the one word [`SYS_GETID`] returns.
 #[must_use]
 pub const fn identity_word(uid: u32, gid: u32) -> u64 {
@@ -407,6 +417,7 @@ mod tests {
         assert_eq!(SYS_UNLINK, 45);
         assert_eq!(SYS_MKDIR, 46);
         assert_eq!(SYS_RMDIR, 47);
+        assert_eq!(SYS_RENAME, 48);
         assert_eq!(READDIR_ENTRY, 0);
         assert_eq!(READDIR_END, 1);
     }

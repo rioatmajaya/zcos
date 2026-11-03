@@ -71,6 +71,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0062](0062-file-removal-is-directory-authority.md) | File removal is authority over the parent directory | Accepted |
 | [0063](0063-the-scratch-filesystem-is-hierarchical.md) | The scratch filesystem is hierarchical | Accepted |
 | [0064](0064-a-directory-is-removed-only-when-empty.md) | A directory is removed only when empty | Accepted |
+| [0065](0065-a-rename-moves-a-node-within-one-filesystem.md) | A rename moves a node within one filesystem | Accepted |
 
 ## Adding a decision
 

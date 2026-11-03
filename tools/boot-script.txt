@@ -24,6 +24,9 @@ rmdir /tmp/dir
 rm /tmp/dir/f
 rmdir /tmp/dir
 stat /tmp/dir
+write /tmp/a ZCMV
+mv /tmp/a /tmp/b
+stat /tmp/b
 ls /tmp
 stat /dev/blk
 id

@@ -184,6 +184,23 @@ pub trait FileSystem {
     fn rmdir(&self, _dir: NodeId, _name: &[u8], _owner: Identity) -> Result<(), VfsError> {
         Err(VfsError::NotSupported)
     }
+
+    /// Renames or moves an entry within one filesystem.
+    ///
+    /// The VFS has already checked that the caller may write and search both
+    /// directories. A filesystem that cannot rename returns the default
+    /// [`VfsError::NotSupported`]; a cross-mount move is refused by the VFS
+    /// before this is reached, because it would be a copy, not a rename.
+    fn rename(
+        &self,
+        _old_dir: NodeId,
+        _old_name: &[u8],
+        _new_dir: NodeId,
+        _new_name: &[u8],
+        _owner: Identity,
+    ) -> Result<(), VfsError> {
+        Err(VfsError::NotSupported)
+    }
 }
 
 /// One entry in the mount table.
@@ -341,6 +358,36 @@ impl MountTable {
         perms::check(stat.uid, stat.gid, stat.mode, owner, Access::Write)?;
         perms::check(stat.uid, stat.gid, stat.mode, owner, Access::Search)?;
         mount.fs.rmdir(dir, name, owner)
+    }
+
+    /// Renames or moves the entry `old_path` names to `new_path`.
+    ///
+    /// Both paths must resolve to the **same** filesystem: a move across mounts
+    /// would be a copy and is refused rather than half-done. The caller must
+    /// hold write and search on both parent directories, so creating a name in
+    /// the destination and removing one from the source are each authorized.
+    pub fn rename(
+        &self,
+        old_path: &[u8],
+        new_path: &[u8],
+        owner: Identity,
+    ) -> Result<(), VfsError> {
+        let (old_mount, old_rest) = self.locate(old_path)?;
+        let (new_mount, new_rest) = self.locate(new_path)?;
+        if !core::ptr::addr_eq(old_mount.fs, new_mount.fs) {
+            return Err(VfsError::NotSupported);
+        }
+        let (old_dir, old_name) = split_parent(old_mount, old_rest)?;
+        let (new_dir, new_name) = split_parent(new_mount, new_rest)?;
+        let old_stat = old_mount.fs.stat(old_dir)?;
+        perms::check(old_stat.uid, old_stat.gid, old_stat.mode, owner, Access::Write)?;
+        perms::check(old_stat.uid, old_stat.gid, old_stat.mode, owner, Access::Search)?;
+        let new_stat = new_mount.fs.stat(new_dir)?;
+        perms::check(new_stat.uid, new_stat.gid, new_stat.mode, owner, Access::Write)?;
+        perms::check(new_stat.uid, new_stat.gid, new_stat.mode, owner, Access::Search)?;
+        old_mount
+            .fs
+            .rename(old_dir, old_name, new_dir, new_name, owner)
     }
 
     /// Reads the `index`-th entry of the directory `path` names.
@@ -763,6 +810,7 @@ mod tests {
     static REMOVED: AtomicU32 = AtomicU32::new(0);
     static MKDIRS: AtomicU32 = AtomicU32::new(0);
     static RMDIRS: AtomicU32 = AtomicU32::new(0);
+    static RENAMES: AtomicU32 = AtomicU32::new(0);
 
     impl FileSystem for WritableFs {
         fn name(&self) -> &str {
@@ -845,6 +893,21 @@ mod tests {
                 return Err(VfsError::BadPath);
             }
             RMDIRS.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn rename(
+            &self,
+            _old_dir: NodeId,
+            old_name: &[u8],
+            _new_dir: NodeId,
+            new_name: &[u8],
+            _owner: Identity,
+        ) -> Result<(), VfsError> {
+            if old_name.is_empty() || new_name.is_empty() {
+                return Err(VfsError::BadPath);
+            }
+            RENAMES.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
     }
@@ -1055,6 +1118,45 @@ mod tests {
         let table = table();
         assert_eq!(
             table.rmdir(b"/sub", Identity::ROOT),
+            Err(VfsError::NotSupported)
+        );
+    }
+
+    #[test]
+    fn rename_rejects_a_cross_mount_move() {
+        let mut table = MountTable::new();
+        table.mount(b"/", &ROOT_FS).expect("root mount");
+        table.mount(b"/data", &WRITABLE_FS).expect("data mount");
+        // Moving between filesystems would be a copy, so it is refused rather
+        // than half-done.
+        assert_eq!(
+            table.rename(b"/data/a", b"/b", Identity::ROOT),
+            Err(VfsError::NotSupported)
+        );
+    }
+
+    #[test]
+    fn rename_checks_write_and_search_on_both_parents() {
+        let mut table = MountTable::new();
+        table.mount(b"/data", &WRITABLE_FS).expect("mount");
+        let stranger = Identity::new(7, 9);
+        let before = RENAMES.load(Ordering::Relaxed);
+        // The test filesystem's root is 0755 owned by root, so a stranger is
+        // refused before the filesystem is asked.
+        assert_eq!(
+            table.rename(b"/data/a", b"/data/b", stranger),
+            Err(VfsError::PermissionDenied)
+        );
+        assert_eq!(RENAMES.load(Ordering::Relaxed), before);
+        assert!(table.rename(b"/data/a", b"/data/b", Identity::ROOT).is_ok());
+        assert_eq!(RENAMES.load(Ordering::Relaxed), before + 1);
+    }
+
+    #[test]
+    fn rename_on_a_read_only_mount_is_not_supported() {
+        let table = table();
+        assert_eq!(
+            table.rename(b"/a", b"/b", Identity::ROOT),
             Err(VfsError::NotSupported)
         );
     }
