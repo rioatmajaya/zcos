@@ -328,6 +328,20 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **The scratch filesystem is hierarchical** (F7i, core system): `tmpfs` now
+  holds directories, not only its root. `FileSystem` gains `mkdir` with the
+  usual `NotSupported` default, and `SYS_MKDIR` (46) creates one, owned by the
+  caller at mode `0755`, behind the same parent-directory authority as
+  `create`. Nodes already carried a `parent` and a `kind`; the change is to use
+  them, so a name matches only among its directory's children and each
+  directory lists only its own. A shared `insert` helper backs `create` and
+  `mkdir` so they cannot drift, and `SYS_UNLINK` still refuses a directory
+  (`rmdir` is separate). The shell gains `mkdir`, and the scripted boot makes
+  `/tmp/dir`, writes `/tmp/dir/f`, and stats it, exercising the VFS path walk
+  across two levels. `zcfs` keeps the trait defaults; persistent directories
+  and deletion are a later, on-disk-format change. The three checksums remain
+  `0xd616ad79aaefb099`, `0x6d66e82d0f2d6fb8`, and `0x78ebd6d359914da7`. See
+  [ADR 0063](docs/adr/0063-the-scratch-filesystem-is-hierarchical.md).
 - **The VFS can remove a file, gated like create** (F7j, core system): the
   `FileSystem` trait gains `unlink` and `SYS_UNLINK` (45) removes a path. The
   check is authority over the parent directory — write and search, the same one

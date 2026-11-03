@@ -17,6 +17,10 @@ chmod /tmp/scratch 0644
 cat /tmp/scratch
 rm /tmp/scratch
 stat /tmp/scratch
+mkdir /tmp/dir
+write /tmp/dir/f ZCDIR
+stat /tmp/dir/f
+ls /tmp
 stat /dev/blk
 id
 svc

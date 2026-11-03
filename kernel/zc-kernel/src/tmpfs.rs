@@ -128,10 +128,56 @@ impl<const N: usize> Inner<N> {
         Ok(index)
     }
 
-    /// Finds the node called `name` in the root directory.
-    fn find(&self, name: &[u8]) -> Option<NodeId> {
-        // Slot 0 is the root, which has no name to match.
-        (1..self.used).find(|&index| self.nodes[index].is_named(name)).map(|index| index as NodeId)
+    /// Finds the node called `name` directly inside directory `dir`.
+    fn find_child(&self, dir: NodeId, name: &[u8]) -> Option<NodeId> {
+        // Slot 0 is the root, which has no name and no parent to match.
+        (1..self.used)
+            .find(|&index| self.nodes[index].parent == dir && self.nodes[index].is_named(name))
+            .map(|index| index as NodeId)
+    }
+
+    /// Adds a node `name` under `dir`, or returns an existing child.
+    ///
+    /// Creating a name that already exists is not an error: the shell calls
+    /// `create` when `open` fails and then re-opens, and a caller that
+    /// re-creates a node it is about to overwrite should get it back rather
+    /// than an error it cannot act on. The existing node keeps its owner and
+    /// mode.
+    fn insert(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        kind: u32,
+        mode: u32,
+        owner: Identity,
+    ) -> Result<NodeId, VfsError> {
+        if let Some(existing) = self.find_child(dir, name) {
+            return Ok(existing);
+        }
+        // A removed entry leaves a blank slot; reuse the first one before
+        // extending the high-water mark, so create/remove churn cannot exhaust
+        // a fixed volume.
+        let index = if let Some(free) = (1..self.used).find(|&slot| self.nodes[slot].name_len == 0)
+        {
+            free
+        } else if self.used < N {
+            let index = self.used;
+            self.used += 1;
+            index
+        } else {
+            return Err(VfsError::TableFull);
+        };
+        let entry = &mut self.nodes[index];
+        entry.parent = dir;
+        entry.name[..name.len()].copy_from_slice(name);
+        entry.name_len = name.len() as u8;
+        entry.kind = kind;
+        entry.mode = mode;
+        // The creator owns what it creates.
+        entry.uid = owner.uid;
+        entry.gid = owner.gid;
+        entry.len = 0;
+        Ok(index as NodeId)
     }
 }
 
@@ -181,13 +227,16 @@ impl<const N: usize> FileSystem for TmpFs<N> {
     }
 
     fn lookup(&self, dir: NodeId, name: &[u8]) -> Result<NodeId, VfsError> {
-        if dir != ROOT {
-            return Err(VfsError::NotADirectory);
-        }
         if name.is_empty() || name.len() > NAME_MAX {
             return Err(VfsError::BadPath);
         }
-        self.inner.borrow().find(name).ok_or(VfsError::NotFound)
+        let inner = self.inner.borrow();
+        // A lookup inside anything but a directory is a type error, not a
+        // missing name.
+        if inner.get(dir)?.kind != KIND_DIR {
+            return Err(VfsError::NotADirectory);
+        }
+        inner.find_child(dir, name).ok_or(VfsError::NotFound)
     }
 
     fn stat(&self, node: NodeId) -> Result<Stat, VfsError> {
@@ -243,45 +292,41 @@ impl<const N: usize> FileSystem for TmpFs<N> {
         mode: u32,
         owner: Identity,
     ) -> Result<NodeId, VfsError> {
-        if dir != ROOT {
-            return Err(VfsError::NotADirectory);
-        }
         if name.is_empty() || name.len() > NAME_MAX {
             return Err(VfsError::BadPath);
         }
         let mut inner = self.inner.borrow_mut();
-        // Creating a name that already exists is not an error: the shell calls
-        // `create` when `open` fails and then re-opens, and a caller that
-        // re-creates a file it is about to overwrite should get the node back
-        // rather than an error it cannot act on. The existing node keeps its
-        // owner and mode.
-        if let Some(existing) = inner.find(name) {
-            return Ok(existing);
+        // A file can only be created inside a directory.
+        if inner.get(dir)?.kind != KIND_DIR {
+            return Err(VfsError::NotADirectory);
         }
-        // A removed entry leaves a blank slot; reuse the first one before
-        // extending the high-water mark, so create/remove churn cannot exhaust
-        // a fixed volume.
-        let index = if let Some(free) = (1..inner.used).find(|&slot| inner.nodes[slot].name_len == 0)
-        {
-            free
-        } else if inner.used < N {
-            let index = inner.used;
-            inner.used += 1;
-            index
-        } else {
-            return Err(VfsError::TableFull);
-        };
-        let entry = &mut inner.nodes[index];
-        entry.parent = dir;
-        entry.name[..name.len()].copy_from_slice(name);
-        entry.name_len = name.len() as u8;
-        entry.kind = KIND_FILE;
-        entry.mode = mode;
-        // The creator owns what it creates.
-        entry.uid = owner.uid;
-        entry.gid = owner.gid;
-        entry.len = 0;
-        Ok(index as NodeId)
+        inner.insert(dir, name, KIND_FILE, mode, owner)
+    }
+
+    fn mkdir(
+        &self,
+        dir: NodeId,
+        name: &[u8],
+        mode: u32,
+        owner: Identity,
+    ) -> Result<NodeId, VfsError> {
+        if name.is_empty() || name.len() > NAME_MAX {
+            return Err(VfsError::BadPath);
+        }
+        let mut inner = self.inner.borrow_mut();
+        if inner.get(dir)?.kind != KIND_DIR {
+            return Err(VfsError::NotADirectory);
+        }
+        // A file already using the name is in the way: making the directory
+        // is not idempotent when the name belongs to something else.
+        if let Some(existing) = inner.find_child(dir, name) {
+            return if inner.get(existing)?.kind == KIND_DIR {
+                Ok(existing)
+            } else {
+                Err(VfsError::NotADirectory)
+            };
+        }
+        inner.insert(dir, name, KIND_DIR, mode, owner)
     }
 
     fn set_mode(&self, node: NodeId, mode: u32, owner: Identity) -> Result<(), VfsError> {
@@ -298,18 +343,17 @@ impl<const N: usize> FileSystem for TmpFs<N> {
     }
 
     fn unlink(&self, dir: NodeId, name: &[u8], _owner: Identity) -> Result<(), VfsError> {
-        if dir != ROOT {
-            return Err(VfsError::NotADirectory);
-        }
         if name.is_empty() || name.len() > NAME_MAX {
             return Err(VfsError::BadPath);
         }
         let mut inner = self.inner.borrow_mut();
-        let id = inner.find(name).ok_or(VfsError::NotFound)?;
+        if inner.get(dir)?.kind != KIND_DIR {
+            return Err(VfsError::NotADirectory);
+        }
+        let id = inner.find_child(dir, name).ok_or(VfsError::NotFound)?;
         let index = inner.slot(id)?;
         let entry = &mut inner.nodes[index];
-        // This volume only ever creates files; refuse to remove anything else
-        // so a future directory node cannot be dropped by `unlink`.
+        // `unlink` removes a file, not a directory; `rmdir` is a later step.
         if entry.kind == KIND_DIR {
             return Err(VfsError::NotSupported);
         }
@@ -326,9 +370,8 @@ impl<const N: usize> FileSystem for TmpFs<N> {
         out: &mut [u8],
     ) -> Result<Option<()>, VfsError> {
         let inner = self.inner.borrow();
-        // The root is the only directory this volume publishes; `create`
-        // refuses anything else, so there is no nested listing to walk.
-        if dir != ROOT {
+        // Any directory the volume holds can be listed, not only the root.
+        if inner.get(dir)?.kind != KIND_DIR {
             return Err(VfsError::NotADirectory);
         }
         let mut seen = 0;
@@ -592,6 +635,64 @@ mod tests {
         assert_eq!(
             fs.unlink(ROOT, b"missing", Identity::ROOT),
             Err(VfsError::NotFound)
+        );
+    }
+
+    #[test]
+    fn mkdir_creates_a_listable_directory_with_children() {
+        let fs = TmpFs::<8>::new();
+        let dir = fs.mkdir(ROOT, b"sub", 0o755, Identity::ROOT).expect("mkdir");
+        assert_ne!(dir, ROOT);
+        let stat = fs.stat(dir).expect("stat");
+        assert_eq!(stat.kind, KIND_DIR);
+        assert_eq!(stat.mode, 0o755);
+        assert_eq!(stat.size, 0);
+
+        let file = fs
+            .create(dir, b"f", 0o644, Identity::ROOT)
+            .expect("create in dir");
+        assert_eq!(fs.lookup(dir, b"f"), Ok(file));
+
+        // Each directory lists only its own children.
+        let mut out = [0u8; zc_abi::DIRENT_LEN];
+        assert_eq!(fs.read_dir(ROOT, 0, &mut out), Ok(Some(())));
+        assert_eq!(DirEntry::read_from(&out).expect("entry").name(), b"sub");
+        assert_eq!(fs.read_dir(ROOT, 1, &mut out), Ok(None));
+        assert_eq!(fs.read_dir(dir, 0, &mut out), Ok(Some(())));
+        assert_eq!(DirEntry::read_from(&out).expect("entry").name(), b"f");
+        assert_eq!(fs.lookup(ROOT, b"f"), Err(VfsError::NotFound));
+        assert_eq!(fs.lookup(dir, b"sub"), Err(VfsError::NotFound));
+    }
+
+    #[test]
+    fn mkdir_is_idempotent_but_a_file_blocks_it() {
+        let fs = TmpFs::<8>::new();
+        let first = fs.mkdir(ROOT, b"d", 0o755, Identity::ROOT).expect("mkdir");
+        let again = fs.mkdir(ROOT, b"d", 0o700, Identity::ROOT).expect("again");
+        assert_eq!(again, first);
+        assert_eq!(fs.stat(first).expect("stat").mode, 0o755);
+
+        let file = fs.create(ROOT, b"f", 0o644, Identity::ROOT).expect("file");
+        // A file using the directory's name is in the way, but `create` is
+        // idempotent for an existing directory.
+        assert_eq!(
+            fs.mkdir(ROOT, b"f", 0o755, Identity::ROOT),
+            Err(VfsError::NotADirectory)
+        );
+        assert_eq!(fs.create(ROOT, b"d", 0o644, Identity::ROOT), Ok(first));
+        assert_eq!(
+            fs.mkdir(file, b"x", 0o755, Identity::ROOT),
+            Err(VfsError::NotADirectory)
+        );
+    }
+
+    #[test]
+    fn unlink_does_not_remove_a_directory() {
+        let fs = TmpFs::<8>::new();
+        fs.mkdir(ROOT, b"d", 0o755, Identity::ROOT).expect("mkdir");
+        assert_eq!(
+            fs.unlink(ROOT, b"d", Identity::ROOT),
+            Err(VfsError::NotSupported)
         );
     }
 

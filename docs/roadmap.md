@@ -486,7 +486,10 @@ VFS → write path → journaling → `fsck`**.
   `/tmp/scratch` and reads it back through the same syscalls the disk path
   uses, with no block device involved — and `task 2: /dev/blk: char device`
   shows the block domain's node resolving through the path walk and reporting
-  the new kind. The `devfs` and `tmpfs` host tests pass.
+  the new kind. `task 2: mkdir: made /tmp/dir` and a `stat` of `/tmp/dir/f`
+  then show the scratch filesystem holding a directory and a file below it, so
+  the VFS path walk reaches past one level. The `devfs` and `tmpfs` host tests
+  pass.
 - F7j: `stat /tmp/scratch` prints the mode and owner the kernel decides from,
   `task 2: /tmp/scratch: file, 8 bytes, mode 0644, uid 1 gid 1`, and the
   unprivileged shell's `chmod` round trip is observable: `task 2: chmod: ok`

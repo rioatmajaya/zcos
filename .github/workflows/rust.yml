@@ -138,6 +138,10 @@ jobs:
         # `write` uses, and the file is gone from `stat` afterwards.
         grep -q "task 2: rm: removed /tmp/scratch" build/boot.log
         grep -q "task 2: stat: no such file" build/boot.log
+        # The scratch filesystem holds directories too, so a file can be made
+        # below one and still resolve through the VFS.
+        grep -q "task 2: mkdir: made /tmp/dir" build/boot.log
+        grep -q "task 2: /tmp/dir/f: file, 5 bytes, mode 0644, uid 1 gid 1" build/boot.log
         grep -q "task 4: blk: zcfs stopped" build/boot.log
         grep -q "user: 10 address spaces" build/boot.log
         grep -q "device: 3 roles, 7 grants (blk 0, kbd 4, devmgr 3)" build/boot.log

@@ -69,6 +69,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0060](0060-a-clean-exit-records-a-status.md) | A clean exit records a status in the task registry | Accepted |
 | [0061](0061-sessions-group-tasks-as-spawn-time-data.md) | Sessions group tasks as spawn-time data | Accepted |
 | [0062](0062-file-removal-is-directory-authority.md) | File removal is authority over the parent directory | Accepted |
+| [0063](0063-the-scratch-filesystem-is-hierarchical.md) | The scratch filesystem is hierarchical | Accepted |
 
 ## Adding a decision
 

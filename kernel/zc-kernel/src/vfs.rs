@@ -139,6 +139,21 @@ pub trait FileSystem {
         Err(VfsError::NotSupported)
     }
 
+    /// Creates a directory `name` in directory `dir` and returns the new node.
+    ///
+    /// Like [`create`](Self::create), `owner` becomes the new node's owner.
+    /// The default is read-only; a filesystem that can hold directories
+    /// overrides it.
+    fn mkdir(
+        &self,
+        _dir: NodeId,
+        _name: &[u8],
+        _mode: u32,
+        _owner: Identity,
+    ) -> Result<NodeId, VfsError> {
+        Err(VfsError::NotSupported)
+    }
+
     /// Replaces `node`'s permission bits.
     ///
     /// The caller has already been checked by the VFS; the filesystem only has
@@ -264,6 +279,27 @@ impl MountTable {
         perms::check(stat.uid, stat.gid, stat.mode, owner, Access::Write)?;
         perms::check(stat.uid, stat.gid, stat.mode, owner, Access::Search)?;
         mount.fs.create(dir, name, mode, owner)
+    }
+
+    /// Creates the directory `path` names, returning its node, owned by
+    /// `owner`.
+    ///
+    /// The parent is resolved and checked exactly as [`create`](Self::create)
+    /// does: a missing parent fails, and the caller must hold write and search
+    /// on it. A filesystem that cannot hold directories returns
+    /// [`VfsError::NotSupported`].
+    pub fn mkdir(
+        &self,
+        path: &[u8],
+        mode: u32,
+        owner: Identity,
+    ) -> Result<NodeId, VfsError> {
+        let (mount, rest) = self.locate(path)?;
+        let (dir, name) = split_parent(mount, rest)?;
+        let stat = mount.fs.stat(dir)?;
+        perms::check(stat.uid, stat.gid, stat.mode, owner, Access::Write)?;
+        perms::check(stat.uid, stat.gid, stat.mode, owner, Access::Search)?;
+        mount.fs.mkdir(dir, name, mode, owner)
     }
 
     /// Removes the entry `path` names.
@@ -700,6 +736,7 @@ mod tests {
     static WRITABLE_FS: WritableFs = WritableFs;
     static CREATED: AtomicU32 = AtomicU32::new(0);
     static REMOVED: AtomicU32 = AtomicU32::new(0);
+    static MKDIRS: AtomicU32 = AtomicU32::new(0);
 
     impl FileSystem for WritableFs {
         fn name(&self) -> &str {
@@ -761,6 +798,20 @@ mod tests {
             }
             REMOVED.fetch_add(1, Ordering::Relaxed);
             Ok(())
+        }
+
+        fn mkdir(
+            &self,
+            dir: NodeId,
+            name: &[u8],
+            _mode: u32,
+            _owner: Identity,
+        ) -> Result<NodeId, VfsError> {
+            if name.is_empty() {
+                return Err(VfsError::BadPath);
+            }
+            MKDIRS.fetch_add(1, Ordering::Relaxed);
+            Ok(100 + dir)
         }
     }
 
@@ -903,6 +954,51 @@ mod tests {
         // Root bypasses the parent check and reaches the filesystem.
         assert!(table.unlink(b"/data/gone", Identity::ROOT).is_ok());
         assert_eq!(REMOVED.load(Ordering::Relaxed), before + 1);
+    }
+
+    #[test]
+    fn mkdir_resolves_the_parent_then_creates() {
+        let mut table = MountTable::new();
+        table.mount(b"/", &ROOT_FS).expect("root mount");
+        table.mount(b"/data", &WRITABLE_FS).expect("data mount");
+
+        assert!(table.mkdir(b"/data/sub", 0o755, Identity::ROOT).is_ok());
+        // Below a directory: the parent is resolved through `lookup` first.
+        assert!(table.mkdir(b"/data/dir/sub", 0o755, Identity::ROOT).is_ok());
+        // A missing parent must not create anything.
+        assert_eq!(
+            table.mkdir(b"/data/missing/sub", 0o755, Identity::ROOT),
+            Err(VfsError::NotFound)
+        );
+        // The mount point itself names no entry to create.
+        assert_eq!(
+            table.mkdir(b"/data", 0o755, Identity::ROOT),
+            Err(VfsError::BadPath)
+        );
+    }
+
+    #[test]
+    fn mkdir_checks_write_and_search_on_the_parent() {
+        let mut table = MountTable::new();
+        table.mount(b"/data", &WRITABLE_FS).expect("mount");
+        let stranger = Identity::new(7, 9);
+        let before = MKDIRS.load(Ordering::Relaxed);
+        assert_eq!(
+            table.mkdir(b"/data/sub", 0o755, stranger),
+            Err(VfsError::PermissionDenied)
+        );
+        assert_eq!(MKDIRS.load(Ordering::Relaxed), before);
+        assert!(table.mkdir(b"/data/sub", 0o755, Identity::ROOT).is_ok());
+        assert_eq!(MKDIRS.load(Ordering::Relaxed), before + 1);
+    }
+
+    #[test]
+    fn mkdir_on_a_read_only_mount_is_not_supported() {
+        let table = table();
+        assert_eq!(
+            table.mkdir(b"/sub", 0o755, Identity::ROOT),
+            Err(VfsError::NotSupported)
+        );
     }
 
     #[test]

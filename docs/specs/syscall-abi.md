@@ -23,8 +23,8 @@ filesystem exchange page (see [`server-protocol.md`](server-protocol.md)).
 
 ## Syscall table
 
-Numbers are stable and never reused. `SYS_UNLINK` (45) is the highest
-assigned number; 46 and above are rejected.
+Numbers are stable and never reused. `SYS_MKDIR` (46) is the highest
+assigned number; 47 and above are rejected.
 
 Two numbers are **declared but not yet implemented**: `SYS_YIELD` (0) and
 `SYS_MAP_FRAME` (4) are recognized by the dispatch table but have no handler, so
@@ -79,6 +79,7 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 43 | `SYS_TASK_INFO` | slot index, `TaskInfo` out ptr, length | 0 | `u64::MAX` |
 | 44 | `SYS_SESSION` | — | the caller's session id | — |
 | 45 | `SYS_UNLINK` | path ptr, length | 0 | `u64::MAX` |
+| 46 | `SYS_MKDIR` | path ptr, length | 0 | `u64::MAX` |
 
 ### Clock
 
@@ -239,6 +240,14 @@ may write that directory. `tmpfs` implements it and reuses a freed slot, so
 create/remove churn cannot exhaust the fixed volume; the other filesystems keep
 the trait default, which reports `u64::MAX` rather than pretending the entry
 is gone.
+
+`SYS_MKDIR` (46) creates a directory. It resolves and checks the parent exactly
+as `SYS_CREATE` does, and the caller owns the new directory. The mode is fixed
+at `0755`; a caller that wants another uses `SYS_CHMOD` afterwards. `tmpfs` now
+keeps directories, so its scratch space is hierarchical: a file below a
+directory resolves through the VFS's own path walk, and each directory lists
+only its children. `SYS_UNLINK` still refuses a directory (`rmdir` is separate),
+and a filesystem without directories keeps the trait default.
 
 ### `SYS_WINDOW_CLOSE`
 

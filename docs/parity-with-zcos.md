@@ -570,8 +570,11 @@ trustworthy core.
    still no credential check or login. The VFS can now remove a file through
    `SYS_UNLINK`, gated by the same parent-directory authority as `create`, and
    the shell exposes it as `rm`
-   ([ADR 0062](adr/0062-file-removal-is-directory-authority.md)). The three
-   proof checksums still hold.
+   ([ADR 0062](adr/0062-file-removal-is-directory-authority.md)). The scratch
+   filesystem now holds directories too, so a file can live below one and each
+   directory lists only its own children
+   ([ADR 0063](adr/0063-the-scratch-filesystem-is-hierarchical.md)); `zcfs`
+   keeps its flat namespace for now. The three proof checksums still hold.
 5. Do not start the app catalog, widget toolkit, or host runner yet.
 6. Keep `build/zcos.img` human-testable and keep the three proof images locked.
 

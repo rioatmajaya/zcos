@@ -497,6 +497,12 @@ const MAX_USER_IO_LEN: u64 = 512;
 /// the kernel's own buffer is a fixed static.
 const MAX_LOG_READ_LEN: u64 = 8192;
 
+/// Mode a directory created through `SYS_MKDIR` starts with.
+///
+/// Owner-writable and searchable, readable by everyone, like the tmpfs root.
+/// A caller that wants another mode can `SYS_CHMOD` it afterwards.
+const MKDIR_MODE: u32 = 0o755;
+
 /// Kernel stack pointer restored when leaving userspace for good.
 #[unsafe(no_mangle)]
 static mut RESUME_RSP: u64 = 0;
@@ -1190,6 +1196,38 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 }
                 Err(VfsError::PermissionDenied) => {
                     regs.set_result(denied(me, "unlink", path));
+                    0
+                }
+                Err(_) => {
+                    regs.set_result(u64::MAX);
+                    0
+                }
+            }
+        }
+        Ok(Action::Mkdir) => {
+            let me = tasks.current();
+            let path = match validate_user_slice(tasks, regs.rdi, regs.rsi) {
+                Some(path) => path,
+                None => {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+            };
+            // SAFETY: mounted once during setup before any task runs.
+            let mounts = unsafe { &*core::ptr::addr_of!(MOUNTS) };
+            // The caller owns the new directory and must hold write and search
+            // on the parent, the same authority `create` needs.
+            match mounts.mkdir(path, MKDIR_MODE, tasks.current_owner()) {
+                Ok(_) => {
+                    regs.set_result(0);
+                    0
+                }
+                Err(VfsError::WouldBlock) => {
+                    tasks.unblock_all();
+                    block_with_retry(tasks, regs, frame, 0)
+                }
+                Err(VfsError::PermissionDenied) => {
+                    regs.set_result(denied(me, "mkdir", path));
                     0
                 }
                 Err(_) => {

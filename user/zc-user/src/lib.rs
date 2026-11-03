@@ -15,7 +15,7 @@ pub use zc_abi::{
     KIND_CHR, KIND_DIR, KIND_FILE, READDIR_END, READDIR_ENTRY, SERVICE_CATALOG, SERVICE_KIND_EXIT,
     SERVICE_KIND_FAULT, SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOCK, SYS_CLOSE, SYS_CREATE, SYS_FB_INFO,
     SYS_GETID, SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT, SYS_LOG_READ, SYS_LOG_WRITE, SYS_MAP_FRAME,
-    SYS_MMIO_MAP, SYS_MOUNT, SYS_MOUSE_READ, SYS_OPEN, SYS_PORT_CLAIM, SYS_POWEROFF, SYS_READ,
+    SYS_MKDIR, SYS_MMIO_MAP, SYS_MOUNT, SYS_MOUSE_READ, SYS_OPEN, SYS_PORT_CLAIM, SYS_POWEROFF, SYS_READ,
     SYS_READDIR, SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ,
     SYS_SERVICE_HEALTH, SYS_SERVICE_READY, SYS_SERVICE_START, SYS_SERVICE_STATUS,
     SYS_SERVICE_STOP, SYS_SESSION, SYS_STAT, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP,
@@ -390,6 +390,16 @@ pub fn create(path: &str) -> u64 {
 #[inline(always)]
 pub fn unlink(path: &str) -> u64 {
     syscall2(SYS_UNLINK, path.as_ptr() as u64, path.len() as u64)
+}
+
+/// Creates the directory `path` names, returning 0 or `u64::MAX`.
+///
+/// The caller owns the new directory and must hold write and search permission
+/// on the parent, the same authority `create` needs. The mode is `0755`; use
+/// `chmod` to change it.
+#[inline(always)]
+pub fn mkdir(path: &str) -> u64 {
+    syscall2(SYS_MKDIR, path.as_ptr() as u64, path.len() as u64)
 }
 
 /// Changes `path`'s permission bits to `mode`, returning 0 or `u64::MAX`.
