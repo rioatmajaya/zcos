@@ -2,9 +2,9 @@
 //!
 //! Reads keystrokes with blocking serial reads, edits a single line with
 //! backspace support, and runs `help`, `echo`, `cat`, `ls`, `stat`, `write`,
-//! `rm`, `mkdir`, `tmp`, `persist`, `chmod`, `mount`, `umount`, `id`, `svc`,
-//! `ps`, `dmesg`, and `exit`. Output goes through the log syscall, so the
-//! transcript appears in the kernel serial log.
+//! `rm`, `mkdir`, `rmdir`, `tmp`, `persist`, `chmod`, `mount`, `umount`, `id`,
+//! `svc`, `ps`, `dmesg`, and `exit`. Output goes through the log syscall, so
+//! the transcript appears in the kernel serial log.
 //!
 //! `id` asks the kernel for this task's user and group ids plus its session.
 //! The shell runs as an unprivileged user, so `id` is the observable side of
@@ -50,7 +50,7 @@ use zc_user::{
     READDIR_ENTRY, SERVICE_CATALOG, Stat, TASK_SLOTS, TaskInfo, chmod, close, create, getid,
     identity_gid, identity_uid, log, log_parts, log_read, mount, open, poweroff, read, readdir,
     send_to, serial_read, service_faults, service_health, service_is_ready, service_is_up,
-    service_restarts, session, stat, task_exit_with, task_info, umount, unlink, mkdir, write,
+    service_restarts, session, stat, task_exit_with, task_info, umount, unlink, mkdir, rmdir, write,
 };
 
 /// Contents `persist` writes and expects to read back.
@@ -290,7 +290,7 @@ fn run(line: &[u8]) -> bool {
     }
     match argv[0] {
         b"help" => {
-            log("Commands: help echo cat ls stat write rm mkdir tmp persist chmod mount umount id svc ps dmesg poweroff exit\n");
+            log("Commands: help echo cat ls stat write rm mkdir rmdir tmp persist chmod mount umount id svc ps dmesg poweroff exit\n");
         }
         b"echo" => {
             for index in 1..count {
@@ -440,6 +440,24 @@ fn run(line: &[u8]) -> bool {
                 // file, or a read-only mount all surface as `u64::MAX`; the
                 // kernel logs an `audit:` line for a denial.
                 log("mkdir: cannot create\n");
+            }
+        }
+        b"rmdir" => {
+            if count < 2 {
+                log("usage: rmdir <dir>\n");
+                return false;
+            }
+            let path = core::str::from_utf8(argv[1]).unwrap_or("");
+            if rmdir(path) == 0 {
+                out_bytes(b"rmdir: removed ");
+                out_bytes(argv[1]);
+                out_bytes(b"\n");
+                out_flush();
+            } else {
+                // A non-empty directory, a missing one, a denied one, or a
+                // read-only mount all surface as `u64::MAX`. `rm` removes a
+                // file; `rmdir` only removes a directory.
+                log("rmdir: cannot remove\n");
             }
         }
         b"write" => {

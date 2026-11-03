@@ -19,6 +19,7 @@ use zc_abi::{
     SYS_SERVICE_START, SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP,
     SYS_TASK_EXIT, SYS_TASK_INFO, SYS_TERM_READ, SYS_UNLINK, SYS_WINDOW_CLOSE,
     SYS_MKDIR,
+    SYS_RMDIR,
     SYS_YIELD,
     SYS_SESSION,
 };
@@ -302,6 +303,7 @@ fn exercise_mechanisms(alloc: &mut FrameAllocator<'_>, usable: u64) {
         (SYS_SESSION, Action::Session),
         (SYS_UNLINK, Action::Unlink),
         (SYS_MKDIR, Action::Mkdir),
+        (SYS_RMDIR, Action::Rmdir),
         (SYS_LOG_READ, Action::LogRead),
         (SYS_CHMOD, Action::Chmod),
         (SYS_SURFACE_CREATE, Action::SurfaceCreate),

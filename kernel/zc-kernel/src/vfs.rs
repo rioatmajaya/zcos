@@ -51,6 +51,8 @@ pub enum VfsError {
     /// A directory operation was applied to a node that is not a directory,
     /// such as a lookup inside a file or a read of a directory.
     NotADirectory,
+    /// A directory removal found the directory still holding entries.
+    NotEmpty,
     /// The path is empty, too long, malformed, or escapes the mount.
     BadPath,
     /// The filesystem does not implement the operation.
@@ -171,6 +173,15 @@ pub trait FileSystem {
     /// over IPC. Removing a directory is out of scope: a filesystem that
     /// publishes directories returns [`VfsError::NotSupported`] for one.
     fn unlink(&self, _dir: NodeId, _name: &[u8], _owner: Identity) -> Result<(), VfsError> {
+        Err(VfsError::NotSupported)
+    }
+
+    /// Removes the **empty** directory `name` from directory `dir`.
+    ///
+    /// The VFS has already checked that the caller may write the parent. The
+    /// default is a filesystem that publishes no directories. A directory that
+    /// still holds children must be refused, so a removal cannot orphan them.
+    fn rmdir(&self, _dir: NodeId, _name: &[u8], _owner: Identity) -> Result<(), VfsError> {
         Err(VfsError::NotSupported)
     }
 }
@@ -316,6 +327,20 @@ impl MountTable {
         perms::check(stat.uid, stat.gid, stat.mode, owner, Access::Write)?;
         perms::check(stat.uid, stat.gid, stat.mode, owner, Access::Search)?;
         mount.fs.unlink(dir, name, owner)
+    }
+
+    /// Removes the empty directory `path` names.
+    ///
+    /// The parent is resolved and checked exactly as [`unlink`](Self::unlink)
+    /// does. A directory that still holds entries is refused by the filesystem,
+    /// so a removal cannot orphan children.
+    pub fn rmdir(&self, path: &[u8], owner: Identity) -> Result<(), VfsError> {
+        let (mount, rest) = self.locate(path)?;
+        let (dir, name) = split_parent(mount, rest)?;
+        let stat = mount.fs.stat(dir)?;
+        perms::check(stat.uid, stat.gid, stat.mode, owner, Access::Write)?;
+        perms::check(stat.uid, stat.gid, stat.mode, owner, Access::Search)?;
+        mount.fs.rmdir(dir, name, owner)
     }
 
     /// Reads the `index`-th entry of the directory `path` names.
@@ -737,6 +762,7 @@ mod tests {
     static CREATED: AtomicU32 = AtomicU32::new(0);
     static REMOVED: AtomicU32 = AtomicU32::new(0);
     static MKDIRS: AtomicU32 = AtomicU32::new(0);
+    static RMDIRS: AtomicU32 = AtomicU32::new(0);
 
     impl FileSystem for WritableFs {
         fn name(&self) -> &str {
@@ -812,6 +838,14 @@ mod tests {
             }
             MKDIRS.fetch_add(1, Ordering::Relaxed);
             Ok(100 + dir)
+        }
+
+        fn rmdir(&self, _dir: NodeId, name: &[u8], _owner: Identity) -> Result<(), VfsError> {
+            if name.is_empty() {
+                return Err(VfsError::BadPath);
+            }
+            RMDIRS.fetch_add(1, Ordering::Relaxed);
+            Ok(())
         }
     }
 
@@ -997,6 +1031,30 @@ mod tests {
         let table = table();
         assert_eq!(
             table.mkdir(b"/sub", 0o755, Identity::ROOT),
+            Err(VfsError::NotSupported)
+        );
+    }
+
+    #[test]
+    fn rmdir_checks_write_and_search_on_the_parent() {
+        let mut table = MountTable::new();
+        table.mount(b"/data", &WRITABLE_FS).expect("mount");
+        let stranger = Identity::new(7, 9);
+        let before = RMDIRS.load(Ordering::Relaxed);
+        assert_eq!(
+            table.rmdir(b"/data/sub", stranger),
+            Err(VfsError::PermissionDenied)
+        );
+        assert_eq!(RMDIRS.load(Ordering::Relaxed), before);
+        assert!(table.rmdir(b"/data/sub", Identity::ROOT).is_ok());
+        assert_eq!(RMDIRS.load(Ordering::Relaxed), before + 1);
+    }
+
+    #[test]
+    fn rmdir_on_a_read_only_mount_is_not_supported() {
+        let table = table();
+        assert_eq!(
+            table.rmdir(b"/sub", Identity::ROOT),
             Err(VfsError::NotSupported)
         );
     }

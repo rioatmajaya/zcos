@@ -142,6 +142,10 @@ jobs:
         # below one and still resolve through the VFS.
         grep -q "task 2: mkdir: made /tmp/dir" build/boot.log
         grep -q "task 2: /tmp/dir/f: file, 5 bytes, mode 0644, uid 1 gid 1" build/boot.log
+        # `rmdir` refuses a directory that still holds a child, then succeeds
+        # once the child is gone.
+        grep -q "task 2: rmdir: cannot remove" build/boot.log
+        grep -q "task 2: rmdir: removed /tmp/dir" build/boot.log
         grep -q "task 4: blk: zcfs stopped" build/boot.log
         grep -q "user: 10 address spaces" build/boot.log
         grep -q "device: 3 roles, 7 grants (blk 0, kbd 4, devmgr 3)" build/boot.log

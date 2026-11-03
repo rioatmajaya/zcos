@@ -272,6 +272,15 @@ pub const SYS_UNLINK: u64 = 45;
 /// `u64::MAX`.
 pub const SYS_MKDIR: u64 = 46;
 
+/// Removes an empty directory.
+///
+/// `rdi` is the path pointer and `rsi` its length. The caller must hold write
+/// and search permission on the parent directory, exactly as `SYS_UNLINK`
+/// requires, and the directory must be empty: a directory that still holds
+/// entries is refused, so a removal cannot orphan children. Removing a file
+/// uses `SYS_UNLINK` instead. Returns `0` or `u64::MAX`.
+pub const SYS_RMDIR: u64 = 47;
+
 /// Packs a user and group id into the one word [`SYS_GETID`] returns.
 #[must_use]
 pub const fn identity_word(uid: u32, gid: u32) -> u64 {
@@ -397,6 +406,7 @@ mod tests {
         assert_eq!(SYS_SESSION, 44);
         assert_eq!(SYS_UNLINK, 45);
         assert_eq!(SYS_MKDIR, 46);
+        assert_eq!(SYS_RMDIR, 47);
         assert_eq!(READDIR_ENTRY, 0);
         assert_eq!(READDIR_END, 1);
     }

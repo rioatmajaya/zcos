@@ -70,6 +70,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0061](0061-sessions-group-tasks-as-spawn-time-data.md) | Sessions group tasks as spawn-time data | Accepted |
 | [0062](0062-file-removal-is-directory-authority.md) | File removal is authority over the parent directory | Accepted |
 | [0063](0063-the-scratch-filesystem-is-hierarchical.md) | The scratch filesystem is hierarchical | Accepted |
+| [0064](0064-a-directory-is-removed-only-when-empty.md) | A directory is removed only when empty | Accepted |
 
 ## Adding a decision
 

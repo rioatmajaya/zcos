@@ -328,6 +328,20 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **A directory is removed only when empty** (F7i, core system): `FileSystem`
+  gains `rmdir` and `SYS_RMDIR` (47) removes a directory behind the same
+  parent-directory authority as `unlink`. A directory that still holds entries
+  is refused, so a removal cannot orphan children; `SYS_UNLINK` still refuses a
+  directory, so the two calls stay distinct. `tmpfs` implements it and reuses
+  the freed slot, and a new `VfsError::NotEmpty` keeps the "still full" case
+  distinguishable inside the kernel. The shell gains `rmdir`, and the scripted
+  boot tries to remove `/tmp/dir` while it holds a file, sees it refused, and
+  then succeeds once the file is gone. The longer script also exposed that the
+  shared input ring held barely one retransmitted command body, so it is now
+  2048 bytes — still inside its page — and cannot drop the terminating `exit`
+  mid-line. The three checksums remain `0xd616ad79aaefb099`,
+  `0x6d66e82d0f2d6fb8`, and `0x78ebd6d359914da7`. See
+  [ADR 0064](docs/adr/0064-a-directory-is-removed-only-when-empty.md).
 - **The scratch filesystem is hierarchical** (F7i, core system): `tmpfs` now
   holds directories, not only its root. `FileSystem` gains `mkdir` with the
   usual `NotSupported` default, and `SYS_MKDIR` (46) creates one, owned by the

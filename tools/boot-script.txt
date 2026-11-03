@@ -20,6 +20,10 @@ stat /tmp/scratch
 mkdir /tmp/dir
 write /tmp/dir/f ZCDIR
 stat /tmp/dir/f
+rmdir /tmp/dir
+rm /tmp/dir/f
+rmdir /tmp/dir
+stat /tmp/dir
 ls /tmp
 stat /dev/blk
 id

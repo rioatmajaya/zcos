@@ -363,6 +363,31 @@ impl<const N: usize> FileSystem for TmpFs<N> {
         Ok(())
     }
 
+    fn rmdir(&self, dir: NodeId, name: &[u8], _owner: Identity) -> Result<(), VfsError> {
+        if name.is_empty() || name.len() > NAME_MAX {
+            return Err(VfsError::BadPath);
+        }
+        let mut inner = self.inner.borrow_mut();
+        if inner.get(dir)?.kind != KIND_DIR {
+            return Err(VfsError::NotADirectory);
+        }
+        let id = inner.find_child(dir, name).ok_or(VfsError::NotFound)?;
+        // `rmdir` removes a directory, not a file; `unlink` handles files.
+        if inner.get(id)?.kind != KIND_DIR {
+            return Err(VfsError::NotADirectory);
+        }
+        // Refuse to remove a directory that still holds entries, so a removal
+        // cannot orphan children.
+        if (1..inner.used)
+            .any(|slot| inner.nodes[slot].name_len != 0 && inner.nodes[slot].parent == id)
+        {
+            return Err(VfsError::NotEmpty);
+        }
+        let index = inner.slot(id)?;
+        inner.nodes[index] = Node::blank();
+        Ok(())
+    }
+
     fn read_dir(
         &self,
         dir: NodeId,
@@ -694,6 +719,37 @@ mod tests {
             fs.unlink(ROOT, b"d", Identity::ROOT),
             Err(VfsError::NotSupported)
         );
+    }
+
+    #[test]
+    fn rmdir_removes_only_an_empty_directory() {
+        let fs = TmpFs::<8>::new();
+        let dir = fs.mkdir(ROOT, b"d", 0o755, Identity::ROOT).expect("mkdir");
+        fs.create(dir, b"f", 0o644, Identity::ROOT).expect("file");
+        // A directory holding a child cannot be removed, so a removal cannot
+        // orphan the child.
+        assert_eq!(fs.rmdir(ROOT, b"d", Identity::ROOT), Err(VfsError::NotEmpty));
+        // Emptying it lets the removal through, and the name is gone.
+        assert_eq!(fs.unlink(dir, b"f", Identity::ROOT), Ok(()));
+        assert_eq!(fs.rmdir(ROOT, b"d", Identity::ROOT), Ok(()));
+        assert_eq!(fs.lookup(ROOT, b"d"), Err(VfsError::NotFound));
+        assert_eq!(fs.rmdir(ROOT, b"d", Identity::ROOT), Err(VfsError::NotFound));
+    }
+
+    #[test]
+    fn rmdir_refuses_a_file_and_a_bad_name() {
+        let fs = TmpFs::<8>::new();
+        fs.create(ROOT, b"f", 0o644, Identity::ROOT).expect("file");
+        // A file is not a directory to remove.
+        assert_eq!(
+            fs.rmdir(ROOT, b"f", Identity::ROOT),
+            Err(VfsError::NotADirectory)
+        );
+        assert_eq!(
+            fs.rmdir(ROOT, b"missing", Identity::ROOT),
+            Err(VfsError::NotFound)
+        );
+        assert_eq!(fs.rmdir(ROOT, b"", Identity::ROOT), Err(VfsError::BadPath));
     }
 
     #[test]
