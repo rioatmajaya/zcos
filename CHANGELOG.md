@@ -328,6 +328,18 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **Sessions group tasks and are visible from `ps`** (F7, core system): every
+  task now belongs to a session, fixed at spawn. `zc_kernel::service` defines
+  `SYSTEM_SESSION` for the supervisor, drivers, and bring-up demos and
+  `DESKTOP_SESSION` for the shell, compositor, and window clients, with a
+  `SESSIONS` table tied to the task count. `SYS_SESSION` (44) returns the
+  caller's session, and `zc_abi::TaskInfo` grows to 28 bytes with `session`, so
+  `ps` prints it and `id` prints `sid=`. The session survives a revive, like the
+  owner. There is still no login boundary: this records the grouping a future
+  `login`/`procmgr` will populate, and no task can create or join a session.
+  The three checksums remain `0xd616ad79aaefb099`, `0x6d66e82d0f2d6fb8`, and
+  `0x78ebd6d359914da7`. See
+  [ADR 0061](docs/adr/0061-sessions-group-tasks-as-spawn-time-data.md).
 - **A clean exit records a status in the task registry** (F7, core system):
   `SYS_TASK_EXIT` (5) now takes an exit status in `rdi`, and `TaskTable` records
   it before the slot dies. `zc_abi::TaskInfo` grows to 24 bytes with

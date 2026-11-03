@@ -23,8 +23,8 @@ filesystem exchange page (see [`server-protocol.md`](server-protocol.md)).
 
 ## Syscall table
 
-Numbers are stable and never reused. `SYS_TASK_INFO` (43) is the highest
-assigned number; 44 and above are rejected.
+Numbers are stable and never reused. `SYS_SESSION` (44) is the highest
+assigned number; 45 and above are rejected.
 
 Two numbers are **declared but not yet implemented**: `SYS_YIELD` (0) and
 `SYS_MAP_FRAME` (4) are recognized by the dispatch table but have no handler, so
@@ -77,6 +77,7 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 41 | `SYS_LOG_READ` | absolute offset, buffer ptr, length | bytes copied (0 at end) | `u64::MAX` |
 | 42 | `SYS_SERVICE_HEALTH` | service id | health word: state bits, restarts, faults | `u64::MAX` |
 | 43 | `SYS_TASK_INFO` | slot index, `TaskInfo` out ptr, length | 0 | `u64::MAX` |
+| 44 | `SYS_SESSION` | — | the caller's session id | — |
 
 ### Clock
 
@@ -132,13 +133,13 @@ state bits.
 
 ### Task registry
 
-`SYS_TASK_INFO` (43) writes one `zc_abi::TaskInfo` — 24 bytes: `slot`,
-`generation`, `uid`, `gid`, a `flags` word, and `exit_status` — for the slot in
-`rdi`. `rsi` is the buffer and `rdx` its length, which must be exactly
-`zc_abi::TASK_INFO_LEN`. `TASK_STATE_ALIVE` (bit 0) and `TASK_STATE_READY`
-(bit 1) are the same liveness and readiness facts the service calls report.
-The call needs no authority: it exposes what the boot log already prints, so a
-`ps`-style tool can walk `0..zc_abi::TASK_SLOTS` (`10`).
+`SYS_TASK_INFO` (43) writes one `zc_abi::TaskInfo` — 28 bytes: `slot`,
+`generation`, `uid`, `gid`, a `flags` word, `exit_status`, and `session` — for
+the slot in `rdi`. `rsi` is the buffer and `rdx` its length, which must be
+exactly `zc_abi::TASK_INFO_LEN`. `TASK_STATE_ALIVE` (bit 0) and
+`TASK_STATE_READY` (bit 1) are the same liveness and readiness facts the
+service calls report. The call needs no authority: it exposes what the boot log
+already prints, so a `ps`-style tool can walk `0..zc_abi::TASK_SLOTS` (`10`).
 
 The slot index is stable for the life of the table, so the **generation** is
 what distinguishes two incarnations: it is `1` on first spawn and rises by one
@@ -152,6 +153,21 @@ the slot dies, so `exit_status` is meaningful once `TASK_STATE_ALIVE` is clear;
 a task that passes no status (and a task that faulted) reads `0`. The shell's
 `ps` prints `status=<n>` for a dead slot. This is exit-status propagation, not
 `wait`: there is no parent-child link and nothing blocks on it yet.
+
+### Sessions
+
+`SYS_SESSION` (44) returns the calling task's session id. A session groups
+tasks for lifecycle purposes: the system services (the supervisor, the drivers,
+the bring-up tasks) share `SYSTEM_SESSION` (`0`), and the interactive desktop
+(the shell, the compositor, the window clients) shares `DESKTOP_SESSION` (`1`).
+The shell already anchors the window input session — exiting it closes every
+window's input — so this is the group that session belongs to.
+
+The id is fixed at spawn from `zc_kernel::service::SESSIONS`, exactly like the
+owner from `SYS_GETID`, and survives a revive: a task can learn its session but
+cannot change or join one. `zc_abi::TaskInfo::session` reports it per slot, so
+`ps` shows it. A future `login`/`procmgr` populates the table; today it is
+build-time data, and there is no login boundary yet.
 
 ### Kernel log
 

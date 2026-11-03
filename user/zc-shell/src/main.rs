@@ -6,9 +6,10 @@
 //! and `exit`. Output goes through the log syscall, so the transcript appears
 //! in the kernel serial log.
 //!
-//! `id` asks the kernel for this task's user and group ids. The shell runs as
-//! an unprivileged user, so `id` is the observable side of the same owner
-//! record the VFS permission checks use.
+//! `id` asks the kernel for this task's user and group ids plus its session.
+//! The shell runs as an unprivileged user, so `id` is the observable side of
+//! the same owner record the VFS permission checks use; `sid` is the desktop
+//! session the shell leads.
 //!
 //! `svc` walks `zc_abi::SERVICE_CATALOG` and asks the kernel for each
 //! service's state and mechanism counters, so the registry is visible to a
@@ -20,9 +21,9 @@
 //! change what it prints.
 //!
 //! `ps` walks `SYS_TASK_INFO` over the fixed slot table and prints each slot's
-//! generation, owner, and state, plus the exit status of a slot that has died.
-//! The generation is what makes a revived service distinguishable from the
-//! incarnation that replaced it.
+//! generation, owner, session, and state, plus the exit status of a slot that
+//! has died. The generation is what makes a revived service distinguishable
+//! from the incarnation that replaced it.
 //!
 //! `exit [status]` ends the shell with the given status (default `0`); the
 //! kernel records it in the registry, so a supervisor could observe why the
@@ -48,7 +49,7 @@ use zc_user::{
     READDIR_ENTRY, SERVICE_CATALOG, Stat, TASK_SLOTS, TaskInfo, chmod, close, create, getid,
     identity_gid, identity_uid, log, log_parts, log_read, mount, open, poweroff, read, readdir,
     send_to, serial_read, service_faults, service_health, service_is_ready, service_is_up,
-    service_restarts, stat, task_exit_with, task_info, umount, write,
+    service_restarts, session, stat, task_exit_with, task_info, umount, write,
 };
 
 /// Contents `persist` writes and expects to read back.
@@ -542,6 +543,8 @@ fn run(line: &[u8]) -> bool {
             out_u64(u64::from(identity_uid(word)));
             out_bytes(b" gid=");
             out_u64(u64::from(identity_gid(word)));
+            out_bytes(b" sid=");
+            out_u64(session());
             out_bytes(b"\n");
             out_flush();
         }
@@ -595,6 +598,7 @@ fn run(line: &[u8]) -> bool {
                     gid: 0,
                     flags: 0,
                     exit_status: 0,
+                    session: 0,
                 };
                 if !task_info(index, &mut info) {
                     continue;
@@ -620,6 +624,8 @@ fn run(line: &[u8]) -> bool {
                     out_bytes(b" status=");
                     out_u64(u64::from(info.exit_status));
                 }
+                out_bytes(b" sid=");
+                out_u64(u64::from(info.session));
                 out_bytes(b"\n");
                 out_flush();
             }

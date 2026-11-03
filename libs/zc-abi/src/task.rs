@@ -40,6 +40,13 @@ pub struct TaskInfo {
     /// Meaningful once [`TaskInfo::is_alive`] is false. A faulted task never
     /// passed a status, so it reads zero; the boot log records the fault.
     pub exit_status: u32,
+    /// Session the task belongs to.
+    ///
+    /// Sessions group tasks for lifecycle purposes: the system services share
+    /// one, and the desktop (shell leader, compositor, window clients) shares
+    /// another. A future `login` populates the table; today it is spawn-time
+    /// data, like the owner.
+    pub session: u32,
 }
 
 /// Number of bytes [`TaskInfo`] occupies on the wire.
@@ -59,6 +66,7 @@ impl TaskInfo {
         out[12..16].copy_from_slice(&self.gid.to_le_bytes());
         out[16..20].copy_from_slice(&self.flags.to_le_bytes());
         out[20..24].copy_from_slice(&self.exit_status.to_le_bytes());
+        out[24..28].copy_from_slice(&self.session.to_le_bytes());
         Some(())
     }
 
@@ -78,6 +86,7 @@ impl TaskInfo {
             gid: u32::from_le_bytes(bytes[12..16].try_into().ok()?),
             flags: u32::from_le_bytes(bytes[16..20].try_into().ok()?),
             exit_status: u32::from_le_bytes(bytes[20..24].try_into().ok()?),
+            session: u32::from_le_bytes(bytes[24..28].try_into().ok()?),
         })
     }
 
@@ -99,9 +108,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_wire_layout_is_twenty_four_bytes() {
+    fn the_wire_layout_is_twenty_eight_bytes() {
         assert_eq!(TASK_SLOTS, 10);
-        assert_eq!(TASK_INFO_LEN, 24);
+        assert_eq!(TASK_INFO_LEN, 28);
         let mut bytes = [0u8; TASK_INFO_LEN];
         let info = TaskInfo {
             slot: 4,
@@ -110,6 +119,7 @@ mod tests {
             gid: 1,
             flags: TASK_STATE_ALIVE | TASK_STATE_READY,
             exit_status: 0,
+            session: 1,
         };
         info.write_into(&mut bytes).unwrap();
         // Field order is fixed little-endian, so a reader never has to guess.
@@ -119,11 +129,12 @@ mod tests {
         assert_eq!(&bytes[12..16], &1u32.to_le_bytes());
         assert_eq!(&bytes[16..20], &3u32.to_le_bytes());
         assert_eq!(&bytes[20..24], &0u32.to_le_bytes());
+        assert_eq!(&bytes[24..28], &1u32.to_le_bytes());
         assert_eq!(TaskInfo::read_from(&bytes), Some(info));
     }
 
     #[test]
-    fn a_dead_task_carries_its_exit_status() {
+    fn a_dead_task_carries_its_exit_status_and_session() {
         let dead = TaskInfo {
             slot: 9,
             generation: 1,
@@ -131,11 +142,13 @@ mod tests {
             gid: 1,
             flags: 0,
             exit_status: 7,
+            session: 1,
         };
         let mut bytes = [0u8; TASK_INFO_LEN];
         dead.write_into(&mut bytes).unwrap();
         let decoded = TaskInfo::read_from(&bytes).unwrap();
         assert_eq!(decoded.exit_status, 7);
+        assert_eq!(decoded.session, 1);
         assert!(!decoded.is_alive());
     }
 
@@ -148,6 +161,7 @@ mod tests {
             gid: 0,
             flags: TASK_STATE_ALIVE | TASK_STATE_READY,
             exit_status: 0,
+            session: 0,
         };
         assert!(ready.is_alive());
         assert!(ready.is_ready());
@@ -177,6 +191,7 @@ mod tests {
             gid: 0,
             flags: 0,
             exit_status: 0,
+            session: 0,
         };
         assert_eq!(info.write_into(&mut [0u8; 4]), None);
         assert_eq!(TaskInfo::read_from(&[0u8; 4]), None);

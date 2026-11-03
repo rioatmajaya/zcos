@@ -241,8 +241,18 @@ pub const SYS_SERVICE_HEALTH: u64 = 42;
 ///
 /// The slot index is stable for life, so the **generation** is what tells two
 /// incarnations apart: a revive raises it. The `exit_status` field records what
-/// a dead task passed to [`crate::SYS_TASK_EXIT`].
+/// a dead task passed to [`crate::SYS_TASK_EXIT`], and `session` names the
+/// session group the task belongs to (see [`crate::SYS_SESSION`]).
 pub const SYS_TASK_INFO: u64 = 43;
+
+/// Returns the calling task's session id.
+///
+/// A session groups tasks for lifecycle purposes: the system services share
+/// one and the desktop shares another. The id is fixed at spawn from the
+/// kernel's session table, like the owner in [`crate::SYS_GETID`]; a task can
+/// learn its session but cannot change it. A future `login` populates the
+/// table; today it is build-time data.
+pub const SYS_SESSION: u64 = 44;
 
 /// Packs a user and group id into the one word [`SYS_GETID`] returns.
 #[must_use]
@@ -366,6 +376,7 @@ mod tests {
         assert_eq!(SYS_LOG_READ, 41);
         assert_eq!(SYS_SERVICE_HEALTH, 42);
         assert_eq!(SYS_TASK_INFO, 43);
+        assert_eq!(SYS_SESSION, 44);
         assert_eq!(READDIR_ENTRY, 0);
         assert_eq!(READDIR_END, 1);
     }

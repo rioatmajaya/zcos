@@ -379,7 +379,11 @@ VFS → write path → journaling → `fsck`**.
       remain the open part of the process model. A clean exit then records a
       status the registry reports, so a slot's record says how its incarnation
       ended even before `wait` exists (see
-      [ADR 0060](adr/0060-a-clean-exit-records-a-status.md)).
+      [ADR 0060](adr/0060-a-clean-exit-records-a-status.md)). Tasks are also
+      grouped into a system session and a desktop session, fixed at spawn and
+      visible through `SYS_SESSION` and `ps`; this is the grouping a future
+      `login` will populate, not a login itself (see
+      [ADR 0061](adr/0061-sessions-group-tasks-as-spawn-time-data.md)).
 - [x] F7g: crash consistency. `Volume::mount_into` replays the log and then
       **clamps `head_seq` to the last record that actually replayed**, reporting
       it through `was_recovered()`. A superblock can claim a record a crash never

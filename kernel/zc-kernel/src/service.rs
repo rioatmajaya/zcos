@@ -61,8 +61,46 @@ pub const TASK_COUNT: usize = zc_abi::TASK_SLOTS;
 /// Number of window clients, and therefore of windows the desktop can host.
 pub const WINDOW_TASKS: usize = TASK_COUNT - WINDOW_CLIENT_TASK;
 
-/// The one root task: the `initd` supervisor.
+/// One root task: the `initd` supervisor.
 pub const ROOT_IDENTITY: Identity = Identity::ROOT;
+
+/// Session the system services belong to.
+///
+/// The supervisor, the drivers, and the bring-up demo tasks share it. It is
+/// the group a future `login` would leave in place for the system.
+pub const SYSTEM_SESSION: u32 = 0;
+
+/// Session the interactive desktop belongs to.
+///
+/// The shell leads it, and the compositor and window clients join it. The
+/// shell already anchors the window input session — its exit closes every
+/// window's input — so this is the group that session belongs to.
+pub const DESKTOP_SESSION: u32 = 1;
+
+/// Session each bring-up task runs in, indexed by task slot.
+///
+/// Fixed at spawn and kept across a revive, exactly like [`OWNERS`]. A future
+/// `procmgr`/`login` populates this; today it is build-time data so the
+/// grouping is visible in `ps` and [`crate::service`]'s tests.
+pub const SESSIONS: [u32; TASK_COUNT] = [
+    SYSTEM_SESSION,  // producer
+    SYSTEM_SESSION,  // consumer
+    DESKTOP_SESSION, // shell
+    DESKTOP_SESSION, // fb
+    SYSTEM_SESSION,  // blk
+    SYSTEM_SESSION,  // kbd
+    SYSTEM_SESSION,  // devmgr
+    SYSTEM_SESSION,  // initd
+    DESKTOP_SESSION, // window client 0
+    DESKTOP_SESSION, // window client 1
+];
+
+/// Returns the session of the task in `task`, or the system session for an
+/// index outside the table.
+#[must_use]
+pub fn session_for_task(task: usize) -> u32 {
+    SESSIONS.get(task).copied().unwrap_or(SYSTEM_SESSION)
+}
 
 /// The unprivileged identity every other bring-up task runs as.
 ///
@@ -279,6 +317,21 @@ mod tests {
         }
         assert_eq!(OWNERS[SHELL_TASK], USER_IDENTITY);
         assert!(!OWNERS[SHELL_TASK].is_root());
+    }
+
+    #[test]
+    fn the_desktop_shares_one_session_and_the_system_another() {
+        assert_eq!(SESSIONS.len(), TASK_COUNT);
+        assert_eq!(SESSIONS[SHELL_TASK], DESKTOP_SESSION);
+        assert_eq!(SESSIONS[COMPOSITOR_TASK], DESKTOP_SESSION);
+        assert_eq!(SESSIONS[WINDOW_CLIENT_TASK], DESKTOP_SESSION);
+        assert_eq!(SESSIONS[SECOND_WINDOW_TASK], DESKTOP_SESSION);
+        assert_eq!(SESSIONS[INITD_TASK], SYSTEM_SESSION);
+        assert_eq!(SESSIONS[BLK_TASK], SYSTEM_SESSION);
+        // The desktop is not the system session, or the two would be one.
+        assert_ne!(DESKTOP_SESSION, SYSTEM_SESSION);
+        // Out-of-range lookups fall back to the system session.
+        assert_eq!(session_for_task(99), SYSTEM_SESSION);
     }
 
     #[test]

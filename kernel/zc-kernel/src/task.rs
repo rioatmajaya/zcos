@@ -171,6 +171,8 @@ pub struct Task {
     generation: u32,
     /// Status the task passed to `SYS_TASK_EXIT`; zero until it exits.
     exit_status: u32,
+    /// Session group the task belongs to.
+    session: u32,
 }
 
 impl Task {
@@ -227,6 +229,12 @@ impl Task {
     pub const fn exit_status(self) -> u32 {
         self.exit_status
     }
+
+    /// Returns the session group the task belongs to.
+    #[must_use]
+    pub const fn session(self) -> u32 {
+        self.session
+    }
 }
 
 /// Why a task-table operation failed.
@@ -263,13 +271,30 @@ impl<const N: usize> TaskTable<N> {
     }
 
     /// Adds a task with its first-run registers, frame, page-table root, and
-    /// identity.
+    /// identity, in the system session.
+    ///
+    /// A convenience wrapper over [`spawn_with_session`](Self::spawn_with_session)
+    /// for callers with no session model; the bring-up uses the session-aware
+    /// form.
     pub fn spawn(
         &mut self,
         regs: SyscallRegs,
         frame: IrqFrame,
         cr3: u64,
         owner: Identity,
+    ) -> Result<usize, TaskError> {
+        self.spawn_with_session(regs, frame, cr3, owner, 0)
+    }
+
+    /// Adds a task with its first-run registers, frame, page-table root,
+    /// identity, and session.
+    pub fn spawn_with_session(
+        &mut self,
+        regs: SyscallRegs,
+        frame: IrqFrame,
+        cr3: u64,
+        owner: Identity,
+        session: u32,
     ) -> Result<usize, TaskError> {
         let Some(index) = self.tasks.iter().position(|slot| slot.is_none()) else {
             return Err(TaskError::TableFull);
@@ -284,6 +309,7 @@ impl<const N: usize> TaskTable<N> {
             owner,
             generation: 1,
             exit_status: 0,
+            session,
         });
         Ok(index)
     }
@@ -341,6 +367,24 @@ impl<const N: usize> TaskTable<N> {
         self.tasks
             .get(index)
             .and_then(|slot| slot.map(|task| task.exit_status))
+    }
+
+    /// Returns the session of the slot at `index`, if it holds any task at all.
+    #[must_use]
+    pub fn session_of(&self, index: usize) -> Option<u32> {
+        self.tasks
+            .get(index)
+            .and_then(|slot| slot.map(|task| task.session))
+    }
+
+    /// Returns the running task's session.
+    ///
+    /// `current` always names a spawned slot while a syscall runs, so the
+    /// fallback is unreachable; it returns the system session so an unexpected
+    /// path cannot invent a privileged grouping.
+    #[must_use]
+    pub fn current_session(&self) -> u32 {
+        self.tasks[self.current].map_or(0, |task| task.session)
     }
 
     /// Records the running task's exit status before it leaves.
@@ -882,6 +926,28 @@ mod task_table_tests {
     fn exit_status_of_an_unknown_slot_is_none() {
         let table = TaskTable::<2>::new();
         assert_eq!(table.exit_status_of(9), None);
+    }
+
+    #[test]
+    fn a_session_survives_a_revive_and_is_reported() {
+        let mut table = TaskTable::<2>::new();
+        table
+            .spawn_with_session(SyscallRegs::EMPTY, frame(0x100), 0x1000, Identity::ROOT, 1)
+            .unwrap();
+        assert_eq!(table.session_of(0), Some(1));
+        assert_eq!(table.current_session(), 1);
+
+        // A revive is a new incarnation but stays in the same session.
+        let mut regs = SyscallRegs::EMPTY;
+        let mut irq = IrqFrame::EMPTY;
+        let _ = table.exit_current(&mut regs, &mut irq);
+        table
+            .respawn(0, SyscallRegs::EMPTY, frame(0x500))
+            .unwrap();
+        assert_eq!(table.session_of(0), Some(1));
+
+        // A slot outside the table names no session.
+        assert_eq!(table.session_of(9), None);
     }
 
     #[test]

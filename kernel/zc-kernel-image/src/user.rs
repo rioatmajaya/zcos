@@ -1828,12 +1828,19 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 gid: owner.gid,
                 flags,
                 exit_status: tasks.exit_status_of(index).unwrap_or(0),
+                session: tasks.session_of(index).unwrap_or(0),
             };
             regs.set_result(if info.write_into(out).is_some() {
                 0
             } else {
                 u64::MAX
             });
+            0
+        }
+        Ok(Action::Session) => {
+            // The session is fixed at spawn, like the identity, so the answer
+            // is the task's own record. A task cannot change or join one.
+            regs.set_result(u64::from(tasks.current_session()));
             0
         }
         Ok(Action::ServiceReady) => {
@@ -3622,7 +3629,7 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
     while index < TASK_COUNT {
         let flags = USER_RFLAGS;
         if tasks
-            .spawn(
+            .spawn_with_session(
                 SyscallRegs::EMPTY,
                 IrqFrame {
                     rip: entries[index],
@@ -3635,6 +3642,9 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
                 // `initd` is the only root task; the rest, the shell included,
                 // run as an unprivileged user so the VFS checks apply.
                 service::OWNERS[index],
+                // The session is spawn-time data too: the system services share
+                // one and the desktop another.
+                service::session_for_task(index),
             )
             .is_err()
         {

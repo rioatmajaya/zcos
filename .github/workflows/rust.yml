@@ -122,6 +122,10 @@ jobs:
         # the shell's own clean exit is recorded the same way.
         grep -q "task 2: ps: slot 6 gen 1 uid=1 gid=1 down status=0" build/boot.log
         grep -q "task 2: exited status 0" build/boot.log
+        # Sessions are spawn-time data: the shell leads the desktop session and
+        # the root supervisor stays in the system session.
+        grep -q "task 2: uid=1 gid=1 sid=1" build/boot.log
+        grep -q "task 2: ps: slot 7 gen 1 uid=0 gid=0 up sid=0" build/boot.log
         # `dmesg` reads the kernel's own ring, not the task transcript: the
         # banner only appears with a `task 2:` prefix when the shell copied it
         # out through SYS_LOG_READ.

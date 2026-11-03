@@ -18,7 +18,7 @@ pub use zc_abi::{
     SYS_MMIO_MAP, SYS_MOUNT, SYS_MOUSE_READ, SYS_OPEN, SYS_PORT_CLAIM, SYS_POWEROFF, SYS_READ,
     SYS_READDIR, SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ,
     SYS_SERVICE_HEALTH, SYS_SERVICE_READY, SYS_SERVICE_START, SYS_SERVICE_STATUS,
-    SYS_SERVICE_STOP, SYS_STAT, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP,
+    SYS_SERVICE_STOP, SYS_SESSION, SYS_STAT, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP,
     SYS_TASK_EXIT, SYS_TASK_INFO, SYS_TERM_READ, SYS_UMOUNT, SYS_WINDOW_CLOSE, SYS_WINDOW_ID,
     SYS_WINDOW_READ,
     SYS_WRITE, SYS_YIELD,
@@ -603,6 +603,15 @@ pub fn task_info(index: u64, info: &mut TaskInfo) -> bool {
         core::ptr::from_mut(info) as u64,
         TASK_INFO_LEN as u64,
     ) == 0
+}
+
+/// Returns the calling task's session id.
+///
+/// The session is fixed at spawn, like the identity, so a task can learn which
+/// group it belongs to but cannot change it.
+#[inline(always)]
+pub fn session() -> u64 {
+    syscall0(SYS_SESSION)
 }
 
 /// Declares the calling service ready to serve, returning 0 or `u64::MAX`.

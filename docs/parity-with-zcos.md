@@ -147,7 +147,7 @@ the 2026-10-20 changelog records the Linux entries being removed.
 | Foreign filesystems | ZCFS / RAMFS / ISO9660 are the documented set | FAT32 read-only, ext2 read-only, zcfs read-write | 🟡 Current has more read-only formats but no ISO9660; both are narrower than a daily-driver rootfs. |
 | Block layer | AHCI, ATA, NVMe, virtio-blk; block service | virtio-blk only; four-slot write-back cache | 🟡 Only one transport is proven. AHCI/NVMe are required for hardware parity. |
 | VFS placement | userspace `vfs` service; kernel keeps mechanisms | kernel VFS + `FileSystem` trait; storage parsers in `zc-storage` | 🟡 A deliberate difference. Keep it until a service split is justified by a measured need. |
-| Permissions | authentication/session plus service policy | uid/gid, POSIX mode classes, root bypass, per-descriptor cached stat; `SYS_GETID` reads the spawn-time identity | 🟡 File permissions are strong; owners are runtime-only and authentication is absent. |
+| Permissions | authentication/session plus service policy | uid/gid, POSIX mode classes, root bypass, per-descriptor cached stat; `SYS_GETID` reads the spawn-time identity and `SYS_SESSION` the spawn-time session | 🟡 File permissions and the session grouping are present; owners and sessions are runtime-only and authentication is absent. |
 | Installer / update slots | `zinstall`, signed updates, A/B slot promotion | none | ❌ Later phase. |
 
 ### 4.4 Drivers and hardware
@@ -172,7 +172,7 @@ the 2026-10-20 changelog records the Linux entries being removed.
 | TLS / PKI | TLS 1.2/1.3, X.509 chain validation, CA bundle, crypto library | none | ❌ |
 | Browser | `zcbrow`: HTML, CSS layout, JavaScript subset, cookies/cache/HSTS, real HTTPS | none | ❌ Very large. Treat as later product work, not an F8 task. |
 | SSH | client and test server | none | ❌ Optional after IP/TLS. |
-| Authentication | `authd`, `zlogin`, greeter, session control | none; `initd` is the only root task | ❌ No login boundary. |
+| Authentication | `authd`, `zlogin`, greeter, session control | none; `initd` is the only root task. Sessions exist as spawn-time grouping (`SYS_SESSION`) but there is no credential check | ❌ No login boundary. |
 | Signed objects / policy | SOF v2 signatures, manifests, signed policy, development key | unsigned ELF tasks; capability grants are the only authority | ❌ No package or binary signature chain. |
 | Update / install | signed `.zup`, A/B slots, `zupdate`, `zinstall` | none | ❌ |
 | Linux subsystem | kernel POSIX translator, static busybox/tcc | none | ⛔ Revisit only as a userspace personality, and only after the native app model works. |
@@ -563,8 +563,11 @@ trustworthy core.
    ([ADR 0059](adr/0059-a-task-slot-carries-a-generation.md)); spawn and wait
    are still absent. A clean exit now records an exit status that the registry
    reports, so a slot's record says how its incarnation ended
-   ([ADR 0060](adr/0060-a-clean-exit-records-a-status.md)). The three proof
-   checksums still hold.
+   ([ADR 0060](adr/0060-a-clean-exit-records-a-status.md)). Tasks now also
+   belong to a session, fixed at spawn and visible through `SYS_SESSION` and
+   `ps`, which records the system/desktop grouping a future login would create
+   ([ADR 0061](adr/0061-sessions-group-tasks-as-spawn-time-data.md)); there is
+   still no credential check or login. The three proof checksums still hold.
 5. Do not start the app catalog, widget toolkit, or host runner yet.
 6. Keep `build/zcos.img` human-testable and keep the three proof images locked.
 

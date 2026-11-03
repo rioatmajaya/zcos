@@ -18,6 +18,7 @@ use zc_abi::{
     SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_HEALTH, SYS_SERVICE_READY,
     SYS_SERVICE_START, SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP,
     SYS_TASK_EXIT, SYS_TASK_INFO, SYS_TERM_READ, SYS_WINDOW_CLOSE, SYS_YIELD,
+    SYS_SESSION,
 };
 use zc_kernel::{
     addrspace::AddressSpace,
@@ -296,6 +297,7 @@ fn exercise_mechanisms(alloc: &mut FrameAllocator<'_>, usable: u64) {
         (SYS_SERVICE_READY, Action::ServiceReady),
         (SYS_SERVICE_HEALTH, Action::ServiceHealth),
         (SYS_TASK_INFO, Action::TaskInfo),
+        (SYS_SESSION, Action::Session),
         (SYS_LOG_READ, Action::LogRead),
         (SYS_CHMOD, Action::Chmod),
         (SYS_SURFACE_CREATE, Action::SurfaceCreate),
