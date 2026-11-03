@@ -196,7 +196,7 @@ The current tree has:
 | Capability | Reference | Current | Status and gap |
 |---|---|---|---|
 | Service catalog | 19 endpoints, driver catalog, loader sandbox | 2 supervised services in one ABI catalog with boot order | ❌ Most service roles are absent, and the catalog is compile-time only. |
-| Discovery / loading | service discovery by name, driver match rules, dynamic spawn | fixed task indices, compile-time binaries, `SYS_SERVICE_START`/`STOP` | 🟡 Lifecycle policy exists with a bounded restart budget; discovery and packaging do not. |
+| Discovery / loading | service discovery by name, driver match rules, dynamic spawn | fixed task indices, compile-time binaries, `SYS_SERVICE_START`/`STOP`; `SYS_SERVICE_HEALTH` reports restart and fault counters | 🟡 Lifecycle policy and mechanism counters exist; discovery, packaging, and failure-rate routing do not. |
 | Logging | `logd` | kernel diagnostic ring readable through `SYS_LOG_READ` and the shell's `dmesg`; task logs remain serial-only | 🟡 The kernel half is user-visible and bounded; there is still no persistent or task-facing log service. |
 | Clipboard | `clipboardd` | none | ❌ |
 | Process/session manager | `procmgr`, sessions, job control | fixed slots | ❌ |
@@ -548,7 +548,11 @@ trustworthy core.
    does not drive spawn order yet. Kernel diagnostics are now a bounded ring
    that a task can read through `SYS_LOG_READ`, and the shell exposes it as
    `dmesg` ([ADR 0056](adr/0056-kernel-logs-live-in-a-bounded-readable-ring.md));
-   task output still stays on the serial line. The three proof checksums still
+   task output still stays on the serial line. The kernel now also reports its
+   own restart and fault counters through `SYS_SERVICE_HEALTH`, so a restarted
+   service's history is visible from `svc`
+   ([ADR 0057](adr/0057-service-health-exposes-mechanism-counters.md)); the
+   restart budget remains userspace policy. The three proof checksums still
    hold.
 5. Do not start the app catalog, widget toolkit, or host runner yet.
 6. Keep `build/zcos.img` human-testable and keep the three proof images locked.

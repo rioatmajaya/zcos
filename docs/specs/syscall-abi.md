@@ -23,8 +23,8 @@ filesystem exchange page (see [`server-protocol.md`](server-protocol.md)).
 
 ## Syscall table
 
-Numbers are stable and never reused. `SYS_LOG_READ` (41) is the highest
-assigned number; 42 and above are rejected.
+Numbers are stable and never reused. `SYS_SERVICE_HEALTH` (42) is the highest
+assigned number; 43 and above are rejected.
 
 Two numbers are **declared but not yet implemented**: `SYS_YIELD` (0) and
 `SYS_MAP_FRAME` (4) are recognized by the dispatch table but have no handler, so
@@ -75,6 +75,7 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 39 | `SYS_GETID` | — | user id in the high 32 bits and group id in the low 32 bits | — |
 | 40 | `SYS_SERVICE_READY` | — | 0 after the calling service declares readiness | `u64::MAX` |
 | 41 | `SYS_LOG_READ` | absolute offset, buffer ptr, length | bytes copied (0 at end) | `u64::MAX` |
+| 42 | `SYS_SERVICE_HEALTH` | service id | health word: state bits, restarts, faults | `u64::MAX` |
 
 ### Clock
 
@@ -107,6 +108,26 @@ ports and re-enter its serving loop. The kernel clears the ready bit on every
 spawn, revive, and fault restart, so a service must call `SYS_SERVICE_READY`
 again after a restart. The shell's `svc` command prints `up ready` or
 `up starting` accordingly; a dead service is always `down` and never ready.
+
+### Service health
+
+`SYS_SERVICE_HEALTH` (42) returns the same liveness and readiness bits as
+`SYS_SERVICE_STATUS`, packed with two saturating byte counters: restarts at
+bits 8–15 and faults at bits 16–23. `zc_abi` provides `service_health`,
+`service_restarts`, and `service_faults`; `service_is_up` and
+`service_is_ready` work unchanged because the state bits are identical.
+
+The counters describe **mechanism history**, not supervision policy. The
+kernel raises the fault count when it posts a fault event for a supervised
+service, and the restart count when `SYS_SERVICE_START` successfully respawns
+the slot. The initial boot spawn does not count, and an unknown id or a missing
+`READ` grant returns `u64::MAX`. The restart budget — how many restarts remain
+before the supervisor gives up — stays in `initd`/`zc-supervise`; the kernel
+never decides to restart and therefore cannot report that policy. `svc` omits
+zero counters and prints, for example, `svc: blk up ready restarts=1 faults=1`.
+
+`SYS_SERVICE_STATUS` remains the smaller call for a caller that only needs the
+state bits.
 
 ### Kernel log
 

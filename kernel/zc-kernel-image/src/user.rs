@@ -12,7 +12,7 @@ use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 use zc_abi::{
     BootInfo, IPC_SUPERVISE, IPC_WM_REPLY, MMIO_SLOT_STRIDE, MMIO_VIRT, SERVICE_KIND_EXIT,
     SERVICE_KIND_FAULT, SURFACE_SLOT_STRIDE, SURFACE_VIRT, WM_MOUSE, WM_TICK, service_cap,
-    service_state, supervise_event,
+    service_health, service_state, supervise_event,
 };
 use zc_kernel::capability::{Capability, CapabilityTable, Rights};
 use zc_kernel::gdt::{USER_CS, USER_RFLAGS, USER_SS};
@@ -33,6 +33,13 @@ use zc_kernel::vm::{VirtAddr, is_user_entry};
 /// Kept in step with [`zc_kernel::service::TASK_COUNT`], which is the single
 /// source of truth for the bring-up layout.
 const TASK_COUNT: usize = service::TASK_COUNT;
+
+/// Kernel-side restart and fault counters for the supervised services.
+///
+/// The supervisor decides whether to restart; this ledger records what the
+/// kernel actually did, so `SYS_SERVICE_HEALTH` reports mechanism history
+/// rather than policy. A task can read it but never write it.
+static mut SERVICE_HEALTH: service::ServiceHealth = service::ServiceHealth::new();
 
 /// Base virtual address user task images are linked at.
 const USER_CODE_VIRT: u64 = 0x40_0000;
@@ -681,11 +688,15 @@ pub unsafe extern "C" fn user_exception_entry(
     // exit/restart overwrites it wholesale when a successor exists.
     let frame_mut = unsafe { &mut *frame };
     // A supervised service is not restarted by the kernel: the supervisor
-    // decides. Post the fault before the slot is removed, so the waking
-    // supervisor finds the event already queued, then kill the slot so the
-    // supervisor can revive it.
-    let supervised = service::for_task(me).is_some();
-    if supervised {
+    // decides. Record the fault and post it before the slot is removed, so a
+    // woken supervisor can read the health it is reacting to and finds the
+    // event already queued. Then kill the slot so the supervisor can revive
+    // it.
+    let supervised = service::for_task(me);
+    if let Some(entry) = supervised {
+        // SAFETY: owned here; the ledger is a plain table and traps cannot
+        // nest inside this handler.
+        unsafe { (*addr_of_mut!(SERVICE_HEALTH)).record_fault(entry.id) };
         post_supervise(me, SERVICE_KIND_FAULT);
     }
     match tasks.exit_current(regs, frame_mut) {
@@ -694,7 +705,7 @@ pub unsafe extern "C" fn user_exception_entry(
             publish_next_cr3(tasks);
             let _ = crate::serial::print(format_args!(
                 "task {me}: faulted; {} scheduling task {}\n",
-                if supervised {
+                if supervised.is_some() {
                     "initd notified,"
                 } else {
                     "kernel survived,"
@@ -1685,6 +1696,11 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             // region, and no surface (ADR 0050).
             match tasks.respawn(entry.task, SyscallRegs::EMPTY, init_frame) {
                 Ok(()) => {
+                    // Count the mechanism action, not the supervisor's policy
+                    // decision: the restart budget lives in `initd`, while
+                    // this ledger records what the kernel actually did.
+                    // SAFETY: owned here; traps cannot nest inside a handler.
+                    unsafe { (*addr_of_mut!(SERVICE_HEALTH)).record_restart(entry.id) };
                     let _ = crate::serial::print(format_args!(
                         "task {me}: service {} started, task {} revived\n",
                         entry.name, entry.task,
@@ -1744,6 +1760,33 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             regs.set_result(service_state(
                 tasks.is_alive(entry.task),
                 tasks.is_ready(entry.task),
+            ));
+            0
+        }
+        Ok(Action::ServiceHealth) => {
+            let me = tasks.current();
+            let id = regs.rdi as u32;
+            let Some(entry) = service::by_id(id) else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            // Health adds mechanism counters to the same read-only grant that
+            // status uses. A task with no grant learns nothing, so the counters
+            // cannot become a side channel.
+            // SAFETY: owned here; traps cannot nest inside a handler.
+            let authorized =
+                unsafe { (*addr_of!(CAPS))[me].holds_object(service_cap(id), Rights::READ) };
+            if !authorized {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            // SAFETY: owned here; the ledger is a plain table.
+            let health = unsafe { &*addr_of!(SERVICE_HEALTH) };
+            regs.set_result(service_health(
+                tasks.is_alive(entry.task),
+                tasks.is_ready(entry.task),
+                health.restarts(id).unwrap_or(0),
+                health.faults(id).unwrap_or(0),
             ));
             0
         }

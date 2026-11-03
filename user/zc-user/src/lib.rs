@@ -17,12 +17,13 @@ pub use zc_abi::{
     SYS_GETID, SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT, SYS_LOG_READ, SYS_LOG_WRITE, SYS_MAP_FRAME,
     SYS_MMIO_MAP, SYS_MOUNT, SYS_MOUSE_READ, SYS_OPEN, SYS_PORT_CLAIM, SYS_POWEROFF, SYS_READ,
     SYS_READDIR, SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ,
-    SYS_SERVICE_READY, SYS_SERVICE_START, SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT,
-    SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TERM_READ,
-    SYS_UMOUNT, SYS_WINDOW_CLOSE, SYS_WINDOW_ID, SYS_WINDOW_READ, SYS_WRITE, SYS_YIELD,
+    SYS_SERVICE_HEALTH, SYS_SERVICE_READY, SYS_SERVICE_START, SYS_SERVICE_STATUS,
+    SYS_SERVICE_STOP, SYS_STAT, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP,
+    SYS_TASK_EXIT, SYS_TERM_READ, SYS_UMOUNT, SYS_WINDOW_CLOSE, SYS_WINDOW_ID, SYS_WINDOW_READ,
+    SYS_WRITE, SYS_YIELD,
     SERVICE_STATE_READY, SERVICE_STATE_UP, MmioInfo, ServiceSpec, Stat, SurfaceInfo, SyscallError,
-    WM_ACK, identity_gid, identity_uid, identity_word, service_is_ready, service_is_up,
-    service_state, supervise_kind, supervise_service,
+    WM_ACK, identity_gid, identity_uid, identity_word, service_faults, service_is_ready,
+    service_is_up, service_restarts, service_state, supervise_kind, supervise_service,
 };
 
 /// Issues a syscall with no arguments.
@@ -574,6 +575,17 @@ pub fn service_stop(id: u64) -> u64 {
 #[inline(always)]
 pub fn service_status(id: u64) -> u64 {
     syscall1(SYS_SERVICE_STATUS, id)
+}
+
+/// Reports a supervised service's state and mechanism counters, or `u64::MAX`
+/// when the caller holds no authority over it.
+///
+/// The word carries the same state bits as [`service_status`], plus saturating
+/// restart and fault counts. Decode it with [`service_is_up`],
+/// [`service_is_ready`], [`service_restarts`], and [`service_faults`].
+#[inline(always)]
+pub fn service_health(id: u64) -> u64 {
+    syscall1(SYS_SERVICE_HEALTH, id)
 }
 
 /// Declares the calling service ready to serve, returning 0 or `u64::MAX`.

@@ -214,6 +214,18 @@ pub const SYS_SERVICE_READY: u64 = 40;
 /// to 8192 bytes, so one read returns the whole retained window.
 pub const SYS_LOG_READ: u64 = 41;
 
+/// Returns a supervised service's liveness, readiness, and counters.
+///
+/// `rdi` is the service id. The result is a health word packed by
+/// [`crate::service_health`]: the same state bits as
+/// [`crate::SYS_SERVICE_STATUS`] plus saturating restart and fault counts.
+/// The restart count rises when the kernel respawns the slot in
+/// `SYS_SERVICE_START`, so it counts mechanism actions, not the supervisor's
+/// policy budget. The fault count rises when the kernel posts a fault event.
+/// A caller needs `READ` on [`crate::service_cap`] for the id; an unknown id or
+/// a missing grant returns `u64::MAX`.
+pub const SYS_SERVICE_HEALTH: u64 = 42;
+
 /// Packs a user and group id into the one word [`SYS_GETID`] returns.
 #[must_use]
 pub const fn identity_word(uid: u32, gid: u32) -> u64 {
@@ -334,6 +346,7 @@ mod tests {
         assert_eq!(SYS_GETID, 39);
         assert_eq!(SYS_SERVICE_READY, 40);
         assert_eq!(SYS_LOG_READ, 41);
+        assert_eq!(SYS_SERVICE_HEALTH, 42);
         assert_eq!(READDIR_ENTRY, 0);
         assert_eq!(READDIR_END, 1);
     }

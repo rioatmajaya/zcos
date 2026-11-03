@@ -11,9 +11,9 @@
 //! record the VFS permission checks use.
 //!
 //! `svc` walks `zc_abi::SERVICE_CATALOG` and asks the kernel for each
-//! service's state, so the registry is visible to a person instead of only in
-//! the boot log. The shell holds a read-only grant per service: it can report
-//! state but cannot start or stop a domain.
+//! service's state and mechanism counters, so the registry is visible to a
+//! person instead of only in the boot log. The shell holds a read-only grant
+//! per service: it can report state but cannot start or stop a domain.
 //!
 //! `dmesg` reads the kernel's diagnostic ring through `SYS_LOG_READ` and prints
 //! it back. Task output never enters that ring, so printing the log cannot
@@ -38,7 +38,8 @@ use zc_user::{
     DIRENT_LEN, DirEntry, FS_ID_ZCFS, FS_OP_STOP, IPC_FS, KIND_CHR, KIND_DIR, READDIR_END,
     READDIR_ENTRY, SERVICE_CATALOG, Stat, chmod, close, create, getid, identity_gid, identity_uid,
     log, log_parts, log_read, mount, open, poweroff, read, readdir, send_to, serial_read,
-    service_is_ready, service_is_up, service_status, stat, task_exit, umount, write,
+    service_faults, service_health, service_is_ready, service_is_up, service_restarts, stat,
+    task_exit, umount, write,
 };
 
 /// Contents `persist` writes and expects to read back.
@@ -536,20 +537,36 @@ fn run(line: &[u8]) -> bool {
             // The catalog is the only list of service identity; the shell
             // never spells a service name or id itself.
             for service in SERVICE_CATALOG {
-                let state = service_status(u64::from(service.id));
-                if !service_is_up(state) {
-                    log_parts(&["svc: ", service.name, " down\n"]);
+                let health = service_health(u64::from(service.id));
+                if health == u64::MAX {
+                    log_parts(&["svc: ", service.name, " denied\n"]);
                     continue;
                 }
-                // Alive is the kernel's view; ready is the service's own
-                // statement that its bring-up finished. A revived service is
-                // up again before it is ready again.
-                let phase = if service_is_ready(state) {
-                    " ready"
+                out_bytes(b"svc: ");
+                out_bytes(service.name.as_bytes());
+                if !service_is_up(health) {
+                    out_bytes(b" down");
+                } else if service_is_ready(health) {
+                    // Alive is the kernel's view; ready is the service's own
+                    // statement that its bring-up finished. A revived service
+                    // is up again before it is ready again.
+                    out_bytes(b" up ready");
                 } else {
-                    " starting"
-                };
-                log_parts(&["svc: ", service.name, " up", phase, "\n"]);
+                    out_bytes(b" up starting");
+                }
+                // Counters describe mechanism history, not liveness, so a down
+                // service keeps them. Omitting zeros keeps the common line
+                // short while still showing a restarted service.
+                let restarts = service_restarts(health);
+                let faults = service_faults(health);
+                if restarts != 0 || faults != 0 {
+                    out_bytes(b" restarts=");
+                    out_u64(u64::from(restarts));
+                    out_bytes(b" faults=");
+                    out_u64(u64::from(faults));
+                }
+                out_bytes(b"\n");
+                out_flush();
             }
         }
         b"dmesg" => {

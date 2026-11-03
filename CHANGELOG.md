@@ -328,6 +328,20 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **Service health reports the kernel's own fault and restart counters** (F7f,
+  core system): `SYS_SERVICE_HEALTH` (42) packs the existing liveness and
+  readiness bits with saturating byte counters, restarts at bits 8–15 and
+  faults at bits 16–23. The kernel raises the fault count when it posts a
+  supervised fault and the restart count when `SYS_SERVICE_START` respawns a
+  slot; the initial spawn does not count. A host-tested
+  `zc_kernel::service::ServiceHealth` ledger refuses unknown ids and keeps
+  services independent. The call reuses the read-only service grant and
+  returns `u64::MAX` without it. `svc` now prints `up ready restarts=1
+  faults=1`, making the deliberate boot faults and their respawns visible from
+  the shell, while the restart budget stays a userspace policy value. The three
+  checksums remain `0xd616ad79aaefb099`, `0x6d66e82d0f2d6fb8`, and
+  `0x78ebd6d359914da7`. See
+  [ADR 0057](docs/adr/0057-service-health-exposes-mechanism-counters.md).
 - **The kernel's boot diagnostics are readable from the shell** (F7, core
   system): `SYS_LOG_READ` (41) copies a bounded kernel log ring into a caller
   buffer. The image keeps the newest 8 KiB of kernel output in a host-tested

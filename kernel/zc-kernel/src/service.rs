@@ -137,6 +137,75 @@ pub fn by_id(id: u32) -> Option<Service> {
     SERVICES.iter().copied().find(|service| service.id == id)
 }
 
+/// Kernel-side counters for one boot's supervised services.
+///
+/// The restart budget belongs to the supervisor, but the kernel owns the
+/// mechanism: it is the component that notices a fault and respawns a slot.
+/// These counters expose that mechanism history without letting a task write
+/// it. They are saturating bytes because a health word packs both counters
+/// into one register alongside the state bits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ServiceHealth {
+    restarts: [u8; zc_abi::SERVICE_CATALOG.len()],
+    faults: [u8; zc_abi::SERVICE_CATALOG.len()],
+}
+
+impl ServiceHealth {
+    /// Creates a ledger with every counter at zero.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            restarts: [0; zc_abi::SERVICE_CATALOG.len()],
+            faults: [0; zc_abi::SERVICE_CATALOG.len()],
+        }
+    }
+
+    /// Records that the kernel respawned `id`, returning whether it was known.
+    ///
+    /// The initial boot spawn does not go through this path, so a service that
+    /// has never faulted reads zero. An unknown id changes nothing, so a stale
+    /// event cannot charge another service's history.
+    pub fn record_restart(&mut self, id: u32) -> bool {
+        let Some(index) = index_of(id) else {
+            return false;
+        };
+        self.restarts[index] = self.restarts[index].saturating_add(1);
+        true
+    }
+
+    /// Records that the kernel posted a fault for `id`, returning whether it
+    /// was known.
+    pub fn record_fault(&mut self, id: u32) -> bool {
+        let Some(index) = index_of(id) else {
+            return false;
+        };
+        self.faults[index] = self.faults[index].saturating_add(1);
+        true
+    }
+
+    /// Returns how many times `id` was respawned, or `None` for an unknown id.
+    #[must_use]
+    pub fn restarts(&self, id: u32) -> Option<u32> {
+        index_of(id).map(|index| u32::from(self.restarts[index]))
+    }
+
+    /// Returns how many faults `id` posted, or `None` for an unknown id.
+    #[must_use]
+    pub fn faults(&self, id: u32) -> Option<u32> {
+        index_of(id).map(|index| u32::from(self.faults[index]))
+    }
+}
+
+impl Default for ServiceHealth {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn index_of(id: u32) -> Option<usize> {
+    SERVICES.iter().position(|service| service.id == id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,5 +276,43 @@ mod tests {
         }
         assert_eq!(OWNERS[SHELL_TASK], USER_IDENTITY);
         assert!(!OWNERS[SHELL_TASK].is_root());
+    }
+
+    #[test]
+    fn health_starts_at_zero_and_counts_per_service() {
+        let mut health = ServiceHealth::new();
+        assert_eq!(health.restarts(BLK_SERVICE), Some(0));
+        assert_eq!(health.faults(BLK_SERVICE), Some(0));
+        assert_eq!(health.restarts(KBD_SERVICE), Some(0));
+
+        assert!(health.record_fault(BLK_SERVICE));
+        assert!(health.record_restart(BLK_SERVICE));
+        assert_eq!(health.faults(BLK_SERVICE), Some(1));
+        assert_eq!(health.restarts(BLK_SERVICE), Some(1));
+        // A count on one service never moves another.
+        assert_eq!(health.faults(KBD_SERVICE), Some(0));
+        assert_eq!(health.restarts(KBD_SERVICE), Some(0));
+    }
+
+    #[test]
+    fn health_refuses_unknown_ids_without_charging_known_ones() {
+        let mut health = ServiceHealth::new();
+        assert!(!health.record_fault(99));
+        assert!(!health.record_restart(99));
+        assert_eq!(health.faults(99), None);
+        assert_eq!(health.restarts(99), None);
+        assert_eq!(health.faults(BLK_SERVICE), Some(0));
+        assert_eq!(health.restarts(BLK_SERVICE), Some(0));
+    }
+
+    #[test]
+    fn health_counters_saturate() {
+        let mut health = ServiceHealth::new();
+        for _ in 0..=u8::MAX {
+            assert!(health.record_fault(KBD_SERVICE));
+            assert!(health.record_restart(KBD_SERVICE));
+        }
+        assert_eq!(health.faults(KBD_SERVICE), Some(u32::from(u8::MAX)));
+        assert_eq!(health.restarts(KBD_SERVICE), Some(u32::from(u8::MAX)));
     }
 }

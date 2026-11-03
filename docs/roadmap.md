@@ -368,6 +368,10 @@ VFS → write path → journaling → `fsck`**.
       shell's `dmesg` through `SYS_LOG_READ` (see
       [ADR 0056](adr/0056-kernel-logs-live-in-a-bounded-readable-ring.md));
       task output remains serial-only until a logging service exists.
+      `SYS_SERVICE_HEALTH` then reports the kernel's own restart and fault
+      counters alongside the state bits, so `svc` shows a restarted service's
+      mechanism history while the restart budget stays in `initd` (see
+      [ADR 0057](adr/0057-service-health-exposes-mechanism-counters.md)).
 - [x] F7g: crash consistency. `Volume::mount_into` replays the log and then
       **clamps `head_seq` to the last record that actually replayed**, reporting
       it through `was_recovered()`. A superblock can claim a record a crash never

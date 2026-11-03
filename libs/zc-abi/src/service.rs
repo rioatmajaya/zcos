@@ -99,6 +99,53 @@ pub const fn service_is_ready(state: u64) -> bool {
     state & SERVICE_STATE_READY != 0
 }
 
+/// Bit offset of the restart count in a service health word.
+pub const SERVICE_HEALTH_RESTART_SHIFT: u32 = 8;
+
+/// Bit offset of the fault count in a service health word.
+pub const SERVICE_HEALTH_FAULT_SHIFT: u32 = 16;
+
+/// Mask applied to each service counter.
+///
+/// Counters are bytes so the whole health word stays one register, and a
+/// saturated counter is honest rather than wrapping to zero.
+pub const SERVICE_HEALTH_COUNT_MASK: u64 = 0xFF;
+
+/// Packs liveness, readiness, restarts, and faults into one health word.
+///
+/// Bits 0–1 are the same state bits [`service_state`] returns, so
+/// [`service_is_up`] and [`service_is_ready`] work unchanged. The restart and
+/// fault counters are saturating bytes at
+/// [`SERVICE_HEALTH_RESTART_SHIFT`] and [`SERVICE_HEALTH_FAULT_SHIFT`].
+#[must_use]
+pub const fn service_health(alive: bool, ready: bool, restarts: u32, faults: u32) -> u64 {
+    let restarts = if restarts > SERVICE_HEALTH_COUNT_MASK as u32 {
+        SERVICE_HEALTH_COUNT_MASK
+    } else {
+        restarts as u64
+    };
+    let faults = if faults > SERVICE_HEALTH_COUNT_MASK as u32 {
+        SERVICE_HEALTH_COUNT_MASK
+    } else {
+        faults as u64
+    };
+    service_state(alive, ready)
+        | (restarts << SERVICE_HEALTH_RESTART_SHIFT)
+        | (faults << SERVICE_HEALTH_FAULT_SHIFT)
+}
+
+/// Returns how many times the kernel respawned a service after a fault.
+#[must_use]
+pub const fn service_restarts(word: u64) -> u32 {
+    ((word >> SERVICE_HEALTH_RESTART_SHIFT) & SERVICE_HEALTH_COUNT_MASK) as u32
+}
+
+/// Returns how many faults the kernel posted for a service.
+#[must_use]
+pub const fn service_faults(word: u64) -> u32 {
+    ((word >> SERVICE_HEALTH_FAULT_SHIFT) & SERVICE_HEALTH_COUNT_MASK) as u32
+}
+
 /// Event kind: the service faulted (a CPU exception in ring 3).
 ///
 /// Kinds start at one so no valid event encodes to zero, which would be
@@ -207,5 +254,44 @@ mod tests {
         assert_eq!(supervise_service(exit), 3);
         assert_eq!(supervise_kind(exit), SERVICE_KIND_EXIT);
         assert_ne!(fault, exit);
+    }
+
+    #[test]
+    fn health_carries_state_and_saturating_counters() {
+        let word = service_health(true, true, 1, 2);
+        assert!(service_is_up(word));
+        assert!(service_is_ready(word));
+        assert_eq!(service_restarts(word), 1);
+        assert_eq!(service_faults(word), 2);
+
+        // The state bits are the same ones a bare status word uses, so the
+        // existing predicates keep working on a health word.
+        assert_eq!(word & 0xFF, service_state(true, true));
+
+        // A down service keeps its counters: they describe history, not
+        // liveness.
+        let down = service_health(false, false, 3, 4);
+        assert!(!service_is_up(down));
+        assert!(!service_is_ready(down));
+        assert_eq!(service_restarts(down), 3);
+        assert_eq!(service_faults(down), 4);
+
+        // Each counter is a byte and saturates instead of wrapping.
+        let capped = service_health(true, false, 999, 999);
+        assert_eq!(service_restarts(capped), 0xFF);
+        assert_eq!(service_faults(capped), 0xFF);
+    }
+
+    #[test]
+    fn counters_do_not_bleed_into_each_other_or_state() {
+        let restarts = service_health(true, true, 0xAB, 0);
+        assert_eq!(service_restarts(restarts), 0xAB);
+        assert_eq!(service_faults(restarts), 0);
+        assert!(service_is_ready(restarts));
+
+        let faults = service_health(true, true, 0, 0xCD);
+        assert_eq!(service_restarts(faults), 0);
+        assert_eq!(service_faults(faults), 0xCD);
+        assert!(service_is_ready(faults));
     }
 }

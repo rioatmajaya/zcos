@@ -110,6 +110,10 @@ jobs:
         grep -q "task 2: uid=1 gid=1" build/boot.log
         grep -q "task 2: svc: blk up ready" build/boot.log
         grep -q "task 2: svc: kbd up ready" build/boot.log
+        # The kernel counts the deliberate faults and the respawns the
+        # supervisor asks for; `svc` reads them through SYS_SERVICE_HEALTH.
+        grep -q "task 2: svc: blk up ready restarts=1 faults=1" build/boot.log
+        grep -q "task 2: svc: kbd up ready restarts=1 faults=1" build/boot.log
         # `dmesg` reads the kernel's own ring, not the task transcript: the
         # banner only appears with a `task 2:` prefix when the shell copied it
         # out through SYS_LOG_READ.
