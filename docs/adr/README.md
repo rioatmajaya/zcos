@@ -68,6 +68,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0059](0059-a-task-slot-carries-a-generation.md) | A task slot carries a generation so incarnations are distinguishable | Accepted |
 | [0060](0060-a-clean-exit-records-a-status.md) | A clean exit records a status in the task registry | Accepted |
 | [0061](0061-sessions-group-tasks-as-spawn-time-data.md) | Sessions group tasks as spawn-time data | Accepted |
+| [0062](0062-file-removal-is-directory-authority.md) | File removal is authority over the parent directory | Accepted |
 
 ## Adding a decision
 

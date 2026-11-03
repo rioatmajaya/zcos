@@ -567,7 +567,11 @@ trustworthy core.
    belong to a session, fixed at spawn and visible through `SYS_SESSION` and
    `ps`, which records the system/desktop grouping a future login would create
    ([ADR 0061](adr/0061-sessions-group-tasks-as-spawn-time-data.md)); there is
-   still no credential check or login. The three proof checksums still hold.
+   still no credential check or login. The VFS can now remove a file through
+   `SYS_UNLINK`, gated by the same parent-directory authority as `create`, and
+   the shell exposes it as `rm`
+   ([ADR 0062](adr/0062-file-removal-is-directory-authority.md)). The three
+   proof checksums still hold.
 5. Do not start the app catalog, widget toolkit, or host runner yet.
 6. Keep `build/zcos.img` human-testable and keep the three proof images locked.
 

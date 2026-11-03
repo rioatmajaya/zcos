@@ -254,6 +254,15 @@ pub const SYS_TASK_INFO: u64 = 43;
 /// table; today it is build-time data.
 pub const SYS_SESSION: u64 = 44;
 
+/// Removes the filesystem entry a path names.
+///
+/// `rdi` is the path pointer and `rsi` its length. The caller must hold write
+/// and search permission on the parent directory, exactly as `SYS_CREATE`
+/// requires; the file's own mode is not consulted, because POSIX `unlink`
+/// works on the directory entry. Removing a directory is not supported yet.
+/// Returns `0` or `u64::MAX`.
+pub const SYS_UNLINK: u64 = 45;
+
 /// Packs a user and group id into the one word [`SYS_GETID`] returns.
 #[must_use]
 pub const fn identity_word(uid: u32, gid: u32) -> u64 {
@@ -377,6 +386,7 @@ mod tests {
         assert_eq!(SYS_SERVICE_HEALTH, 42);
         assert_eq!(SYS_TASK_INFO, 43);
         assert_eq!(SYS_SESSION, 44);
+        assert_eq!(SYS_UNLINK, 45);
         assert_eq!(READDIR_ENTRY, 0);
         assert_eq!(READDIR_END, 1);
     }

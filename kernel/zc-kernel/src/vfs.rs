@@ -147,6 +147,17 @@ pub trait FileSystem {
     fn set_mode(&self, _node: NodeId, _mode: u32, _owner: Identity) -> Result<(), VfsError> {
         Err(VfsError::NotSupported)
     }
+
+    /// Removes the entry `name` from directory `dir`.
+    ///
+    /// The VFS has already checked that the caller may write the directory, so
+    /// the filesystem only has to drop the entry. The default is a filesystem
+    /// that cannot remove an entry, such as a read-only mount or one served
+    /// over IPC. Removing a directory is out of scope: a filesystem that
+    /// publishes directories returns [`VfsError::NotSupported`] for one.
+    fn unlink(&self, _dir: NodeId, _name: &[u8], _owner: Identity) -> Result<(), VfsError> {
+        Err(VfsError::NotSupported)
+    }
 }
 
 /// One entry in the mount table.
@@ -248,25 +259,27 @@ impl MountTable {
         owner: Identity,
     ) -> Result<NodeId, VfsError> {
         let (mount, rest) = self.locate(path)?;
-        let (dir, name) = match rest.iter().rposition(|&byte| byte == b'/') {
-            Some(at) => {
-                let name = &rest[at + 1..];
-                if name.is_empty() {
-                    return Err(VfsError::BadPath);
-                }
-                (walk(mount, &rest[..at])?, name)
-            }
-            None => {
-                if rest.is_empty() {
-                    return Err(VfsError::BadPath);
-                }
-                (mount.fs.root(), rest)
-            }
-        };
+        let (dir, name) = split_parent(mount, rest)?;
         let stat = mount.fs.stat(dir)?;
         perms::check(stat.uid, stat.gid, stat.mode, owner, Access::Write)?;
         perms::check(stat.uid, stat.gid, stat.mode, owner, Access::Search)?;
         mount.fs.create(dir, name, mode, owner)
+    }
+
+    /// Removes the entry `path` names.
+    ///
+    /// The parent directory is resolved through the mount, so removing a path
+    /// whose parent is missing fails with [`VfsError::NotFound`] rather than
+    /// touching anything. The caller must hold write and search permission on
+    /// the parent, the same check `create` makes; the file's own mode is not
+    /// consulted, exactly as POSIX `unlink` works.
+    pub fn unlink(&self, path: &[u8], owner: Identity) -> Result<(), VfsError> {
+        let (mount, rest) = self.locate(path)?;
+        let (dir, name) = split_parent(mount, rest)?;
+        let stat = mount.fs.stat(dir)?;
+        perms::check(stat.uid, stat.gid, stat.mode, owner, Access::Write)?;
+        perms::check(stat.uid, stat.gid, stat.mode, owner, Access::Search)?;
+        mount.fs.unlink(dir, name, owner)
     }
 
     /// Reads the `index`-th entry of the directory `path` names.
@@ -548,6 +561,30 @@ fn normalize_path(path: &[u8]) -> Result<&[u8], VfsError> {
     Ok(inner)
 }
 
+/// Splits `rest`, a normalised path below a mount point, into its parent
+/// directory and final name.
+///
+/// The parent is resolved with [`walk`], so a path whose parent is missing
+/// fails rather than naming anything. The root path itself names no entry and
+/// is rejected: there is nothing to create or remove.
+fn split_parent<'a>(mount: &Mount, rest: &'a [u8]) -> Result<(NodeId, &'a [u8]), VfsError> {
+    match rest.iter().rposition(|&byte| byte == b'/') {
+        Some(at) => {
+            let name = &rest[at + 1..];
+            if name.is_empty() {
+                return Err(VfsError::BadPath);
+            }
+            Ok((walk(mount, &rest[..at])?, name))
+        }
+        None => {
+            if rest.is_empty() {
+                return Err(VfsError::BadPath);
+            }
+            Ok((mount.fs.root(), rest))
+        }
+    }
+}
+
 /// Walks `rest`, a normalised path below a mount point, from the mount root.
 ///
 /// `rest` has no leading, trailing, or doubled slash, so every component is a
@@ -662,6 +699,7 @@ mod tests {
 
     static WRITABLE_FS: WritableFs = WritableFs;
     static CREATED: AtomicU32 = AtomicU32::new(0);
+    static REMOVED: AtomicU32 = AtomicU32::new(0);
 
     impl FileSystem for WritableFs {
         fn name(&self) -> &str {
@@ -715,6 +753,14 @@ mod tests {
             }
             CREATED.fetch_add(1, Ordering::Relaxed);
             Ok(3 + dir)
+        }
+
+        fn unlink(&self, _dir: NodeId, name: &[u8], _owner: Identity) -> Result<(), VfsError> {
+            if name.is_empty() {
+                return Err(VfsError::BadPath);
+            }
+            REMOVED.fetch_add(1, Ordering::Relaxed);
+            Ok(())
         }
     }
 
@@ -806,6 +852,57 @@ mod tests {
         // Root bypasses the parent check and reaches the filesystem.
         assert!(table.create(b"/data/new", 0o644, Identity::ROOT).is_ok());
         assert_eq!(CREATED.load(Ordering::Relaxed), before + 1);
+    }
+
+    #[test]
+    fn unlink_resolves_the_parent_then_removes() {
+        let mut table = MountTable::new();
+        table.mount(b"/", &ROOT_FS).expect("root mount");
+        table.mount(b"/data", &WRITABLE_FS).expect("data mount");
+
+        assert!(table.unlink(b"/data/gone", Identity::ROOT).is_ok());
+        // Below a directory: the parent is resolved through `lookup` first.
+        assert!(table.unlink(b"/data/dir/gone", Identity::ROOT).is_ok());
+        // A missing parent must not touch anything.
+        assert_eq!(
+            table.unlink(b"/data/missing/gone", Identity::ROOT),
+            Err(VfsError::NotFound)
+        );
+        // The mount point itself names no entry to remove.
+        assert_eq!(
+            table.unlink(b"/data", Identity::ROOT),
+            Err(VfsError::BadPath)
+        );
+        assert_eq!(
+            table.unlink(b"/data/", Identity::ROOT),
+            Err(VfsError::BadPath)
+        );
+    }
+
+    #[test]
+    fn unlink_on_a_read_only_mount_is_not_supported() {
+        let table = table();
+        assert_eq!(
+            table.unlink(b"/a", Identity::ROOT),
+            Err(VfsError::NotSupported)
+        );
+    }
+
+    #[test]
+    fn unlink_checks_write_and_search_on_the_parent() {
+        let mut table = MountTable::new();
+        table.mount(b"/data", &WRITABLE_FS).expect("mount");
+
+        let stranger = Identity::new(7, 9);
+        let before = REMOVED.load(Ordering::Relaxed);
+        assert_eq!(
+            table.unlink(b"/data/gone", stranger),
+            Err(VfsError::PermissionDenied)
+        );
+        assert_eq!(REMOVED.load(Ordering::Relaxed), before);
+        // Root bypasses the parent check and reaches the filesystem.
+        assert!(table.unlink(b"/data/gone", Identity::ROOT).is_ok());
+        assert_eq!(REMOVED.load(Ordering::Relaxed), before + 1);
     }
 
     #[test]

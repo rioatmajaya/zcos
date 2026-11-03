@@ -97,6 +97,7 @@ pub use syscall::{
     SYS_STAT,
     SYS_SURFACE_CREATE,
     SYS_SURFACE_DESTROY, SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TASK_INFO, SYS_TERM_READ, SYS_UMOUNT,
+    SYS_UNLINK,
     SYS_WINDOW_CLOSE, SYS_WINDOW_ID, SYS_WINDOW_READ, SYS_WRITE, SYS_YIELD, SyscallError,
     identity_gid, identity_uid, identity_word,
 };

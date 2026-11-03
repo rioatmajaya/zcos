@@ -23,8 +23,8 @@ filesystem exchange page (see [`server-protocol.md`](server-protocol.md)).
 
 ## Syscall table
 
-Numbers are stable and never reused. `SYS_SESSION` (44) is the highest
-assigned number; 45 and above are rejected.
+Numbers are stable and never reused. `SYS_UNLINK` (45) is the highest
+assigned number; 46 and above are rejected.
 
 Two numbers are **declared but not yet implemented**: `SYS_YIELD` (0) and
 `SYS_MAP_FRAME` (4) are recognized by the dispatch table but have no handler, so
@@ -78,6 +78,7 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 42 | `SYS_SERVICE_HEALTH` | service id | health word: state bits, restarts, faults | `u64::MAX` |
 | 43 | `SYS_TASK_INFO` | slot index, `TaskInfo` out ptr, length | 0 | `u64::MAX` |
 | 44 | `SYS_SESSION` | — | the caller's session id | — |
+| 45 | `SYS_UNLINK` | path ptr, length | 0 | `u64::MAX` |
 
 ### Clock
 
@@ -220,6 +221,24 @@ listing, so "nothing here" and "cannot list" stay distinct. All four mounts
 enumerate: `ramfs`, `tmpfs`, and `devfs` directly, and zcfs through the
 `FS_OP_LIST` request the block domain answers (see
 [`server-protocol.md`](server-protocol.md#opcodes)).
+
+### Filesystem mutation
+
+`SYS_CREATE` (22) creates an entry, `SYS_CHMOD` (26) replaces a file's mode,
+and `SYS_UNLINK` (45) removes a file. All three resolve the parent directory,
+then check write and search permission on it against the caller's identity, so
+the authority to add, change, or remove a name is the authority over its
+directory. `SYS_CHMOD` is the exception: it additionally requires the caller to
+own the node or be root, because changing a mode is an act on the file itself.
+
+`SYS_UNLINK` takes a path pointer and length. It removes a file, not a
+directory: a filesystem that publishes directories returns `u64::MAX` for one.
+The file's own mode is not consulted — POSIX `unlink` works on the directory
+entry — so a read-only file in a writable directory can be removed by whoever
+may write that directory. `tmpfs` implements it and reuses a freed slot, so
+create/remove churn cannot exhaust the fixed volume; the other filesystems keep
+the trait default, which reports `u64::MAX` rather than pretending the entry
+is gone.
 
 ### `SYS_WINDOW_CLOSE`
 

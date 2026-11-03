@@ -134,6 +134,10 @@ jobs:
         grep -q "task 2: chmod: ok" build/boot.log
         grep -q "audit: task 2 denied read /tmp/scratch" build/boot.log
         grep -q "task 2: cat: cannot open" build/boot.log
+        # `rm` removes the tmpfs scratch file through the same VFS write path
+        # `write` uses, and the file is gone from `stat` afterwards.
+        grep -q "task 2: rm: removed /tmp/scratch" build/boot.log
+        grep -q "task 2: stat: no such file" build/boot.log
         grep -q "task 4: blk: zcfs stopped" build/boot.log
         grep -q "user: 10 address spaces" build/boot.log
         grep -q "device: 3 roles, 7 grants (blk 0, kbd 4, devmgr 3)" build/boot.log

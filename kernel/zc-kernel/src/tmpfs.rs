@@ -258,10 +258,19 @@ impl<const N: usize> FileSystem for TmpFs<N> {
         if let Some(existing) = inner.find(name) {
             return Ok(existing);
         }
-        if inner.used >= N {
+        // A removed entry leaves a blank slot; reuse the first one before
+        // extending the high-water mark, so create/remove churn cannot exhaust
+        // a fixed volume.
+        let index = if let Some(free) = (1..inner.used).find(|&slot| inner.nodes[slot].name_len == 0)
+        {
+            free
+        } else if inner.used < N {
+            let index = inner.used;
+            inner.used += 1;
+            index
+        } else {
             return Err(VfsError::TableFull);
-        }
-        let index = inner.used;
+        };
         let entry = &mut inner.nodes[index];
         entry.parent = dir;
         entry.name[..name.len()].copy_from_slice(name);
@@ -272,7 +281,6 @@ impl<const N: usize> FileSystem for TmpFs<N> {
         entry.uid = owner.uid;
         entry.gid = owner.gid;
         entry.len = 0;
-        inner.used += 1;
         Ok(index as NodeId)
     }
 
@@ -286,6 +294,28 @@ impl<const N: usize> FileSystem for TmpFs<N> {
             return Err(VfsError::PermissionDenied);
         }
         entry.mode = mode;
+        Ok(())
+    }
+
+    fn unlink(&self, dir: NodeId, name: &[u8], _owner: Identity) -> Result<(), VfsError> {
+        if dir != ROOT {
+            return Err(VfsError::NotADirectory);
+        }
+        if name.is_empty() || name.len() > NAME_MAX {
+            return Err(VfsError::BadPath);
+        }
+        let mut inner = self.inner.borrow_mut();
+        let id = inner.find(name).ok_or(VfsError::NotFound)?;
+        let index = inner.slot(id)?;
+        let entry = &mut inner.nodes[index];
+        // This volume only ever creates files; refuse to remove anything else
+        // so a future directory node cannot be dropped by `unlink`.
+        if entry.kind == KIND_DIR {
+            return Err(VfsError::NotSupported);
+        }
+        // Blank the slot: the name and content go, and the volume's directory
+        // scan skips a zero-length name. The slot is reusable by `create`.
+        *entry = Node::blank();
         Ok(())
     }
 
@@ -304,7 +334,10 @@ impl<const N: usize> FileSystem for TmpFs<N> {
         let mut seen = 0;
         for slot in 1..inner.used {
             let node = &inner.nodes[slot];
-            if node.parent != dir {
+            // A removed entry is blank: its name is gone, so it is not a
+            // directory entry even though its slot may still be below the
+            // high-water mark.
+            if node.name_len == 0 || node.parent != dir {
                 continue;
             }
             if seen == index {
@@ -501,6 +534,65 @@ mod tests {
         // An unprivileged task must be able to create in `/tmp`; the root's
         // mode is the only thing that lets it.
         assert_eq!(fs.stat(ROOT).expect("root").mode, 0o777);
+    }
+
+    #[test]
+    fn unlink_removes_the_name_and_frees_the_slot() {
+        let fs = TmpFs::<3>::new();
+        let node = fs
+            .create(ROOT, b"gone", 0o644, Identity::ROOT)
+            .expect("create");
+        assert_eq!(fs.write(node, 0, b"bytes"), Ok(5));
+        assert!(fs.lookup(ROOT, b"gone").is_ok());
+
+        assert_eq!(fs.unlink(ROOT, b"gone", Identity::ROOT), Ok(()));
+        assert_eq!(fs.lookup(ROOT, b"gone"), Err(VfsError::NotFound));
+        // Removing a name twice is a missing-name error, not a silent success.
+        assert_eq!(
+            fs.unlink(ROOT, b"gone", Identity::ROOT),
+            Err(VfsError::NotFound)
+        );
+
+        // The freed slot is reused, so create/remove churn cannot exhaust a
+        // fixed volume before its real capacity is reached.
+        let reused = fs
+            .create(ROOT, b"next", 0o644, Identity::ROOT)
+            .expect("reuse");
+        assert_eq!(reused, node);
+        assert_eq!(fs.stat(reused).expect("stat").size, 0);
+        assert_eq!(fs.used(), 1);
+    }
+
+    #[test]
+    fn a_removed_name_is_absent_from_listings() {
+        let fs = fs();
+        fs.create(ROOT, b"keep", 0o644, Identity::ROOT)
+            .expect("keep");
+        fs.create(ROOT, b"drop", 0o644, Identity::ROOT)
+            .expect("drop");
+        assert_eq!(fs.unlink(ROOT, b"drop", Identity::ROOT), Ok(()));
+
+        // The surviving entry moves down to index zero; the removed slot does
+        // not appear as an empty-name ghost.
+        let mut out = [0u8; zc_abi::DIRENT_LEN];
+        assert_eq!(fs.read_dir(ROOT, 0, &mut out), Ok(Some(())));
+        assert_eq!(DirEntry::read_from(&out).expect("entry").name(), b"keep");
+        assert_eq!(fs.read_dir(ROOT, 1, &mut out), Ok(None));
+    }
+
+    #[test]
+    fn unlink_refuses_a_bad_directory_or_name() {
+        let fs = fs();
+        let node = fs.create(ROOT, b"file", 0o644, Identity::ROOT).expect("create");
+        assert_eq!(
+            fs.unlink(node, b"x", Identity::ROOT),
+            Err(VfsError::NotADirectory)
+        );
+        assert_eq!(fs.unlink(ROOT, b"", Identity::ROOT), Err(VfsError::BadPath));
+        assert_eq!(
+            fs.unlink(ROOT, b"missing", Identity::ROOT),
+            Err(VfsError::NotFound)
+        );
     }
 
     #[test]

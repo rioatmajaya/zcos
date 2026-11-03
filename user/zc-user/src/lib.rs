@@ -19,7 +19,7 @@ pub use zc_abi::{
     SYS_READDIR, SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ,
     SYS_SERVICE_HEALTH, SYS_SERVICE_READY, SYS_SERVICE_START, SYS_SERVICE_STATUS,
     SYS_SERVICE_STOP, SYS_SESSION, SYS_STAT, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP,
-    SYS_TASK_EXIT, SYS_TASK_INFO, SYS_TERM_READ, SYS_UMOUNT, SYS_WINDOW_CLOSE, SYS_WINDOW_ID,
+    SYS_TASK_EXIT, SYS_TASK_INFO, SYS_TERM_READ, SYS_UMOUNT, SYS_UNLINK, SYS_WINDOW_CLOSE, SYS_WINDOW_ID,
     SYS_WINDOW_READ,
     SYS_WRITE, SYS_YIELD,
     SERVICE_STATE_READY, SERVICE_STATE_UP, MmioInfo, ServiceSpec, Stat, SurfaceInfo, SyscallError,
@@ -381,6 +381,15 @@ pub fn umount(path: &str) -> u64 {
 #[inline(always)]
 pub fn create(path: &str) -> u64 {
     syscall2(SYS_CREATE, path.as_ptr() as u64, path.len() as u64)
+}
+
+/// Removes the entry `path` names, returning 0 or `u64::MAX`.
+///
+/// The caller must hold write and search permission on the parent directory,
+/// the same authority `create` needs.
+#[inline(always)]
+pub fn unlink(path: &str) -> u64 {
+    syscall2(SYS_UNLINK, path.as_ptr() as u64, path.len() as u64)
 }
 
 /// Changes `path`'s permission bits to `mode`, returning 0 or `u64::MAX`.

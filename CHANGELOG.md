@@ -328,6 +328,20 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **The VFS can remove a file, gated like create** (F7j, core system): the
+  `FileSystem` trait gains `unlink` and `SYS_UNLINK` (45) removes a path. The
+  check is authority over the parent directory — write and search, the same one
+  `create` makes and the same rule POSIX `unlink` uses — so a read-only file in
+  a writable directory can still be removed. The parent/name split is factored
+  into `split_parent` and shared by both calls. `tmpfs` blanks the node and
+  reuses the freed slot, so create/remove churn cannot exhaust the fixed
+  volume; the volume's listing skips a zero-length name. Other filesystems keep
+  the default, which reports failure rather than pretending the entry is gone,
+  so zcfs deletion is a later step. The shell gains `rm`, and the scripted boot
+  removes `/tmp/scratch` and shows `stat` no longer finds it. The three
+  checksums remain `0xd616ad79aaefb099`, `0x6d66e82d0f2d6fb8`, and
+  `0x78ebd6d359914da7`. See
+  [ADR 0062](docs/adr/0062-file-removal-is-directory-authority.md).
 - **Sessions group tasks and are visible from `ps`** (F7, core system): every
   task now belongs to a session, fixed at spawn. `zc_kernel::service` defines
   `SYSTEM_SESSION` for the supervisor, drivers, and bring-up demos and

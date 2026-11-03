@@ -435,7 +435,12 @@ VFS → write path → journaling → `fsck`**.
       clears its read bit, the kernel logs the denial, and restoring the mode
       lets the read through. Ownership is runtime-only for now — the zcfs
       on-disk record carries the mode but not the owner (see
-      [ADR 0013](adr/0013-permissions-and-ownership.md)).
+      [ADR 0013](adr/0013-permissions-and-ownership.md)). File removal then
+      joins the same authority model: `SYS_UNLINK` checks write and search on
+      the parent directory, exactly like `create`, and `tmpfs` removes a name
+      and reuses its slot, so `rm /tmp/scratch` is observable and the scratch
+      volume cannot fill up from create/remove churn (see
+      [ADR 0062](adr/0062-file-removal-is-directory-authority.md)).
 
 **Pass criteria (machine).**
 
