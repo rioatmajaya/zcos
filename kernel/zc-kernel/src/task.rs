@@ -165,6 +165,10 @@ pub struct Task {
     cr3: u64,
     /// User and group the task runs as, for VFS permission checks.
     owner: Identity,
+    /// Incarnation counter: `1` on first spawn, raised by every revive.
+    ///
+    /// The slot index is reused, so this is what tells two incarnations apart.
+    generation: u32,
 }
 
 impl Task {
@@ -208,6 +212,12 @@ impl Task {
     #[must_use]
     pub const fn owner(self) -> Identity {
         self.owner
+    }
+
+    /// Returns the incarnation generation of the slot.
+    #[must_use]
+    pub const fn generation(self) -> u32 {
+        self.generation
     }
 }
 
@@ -264,6 +274,7 @@ impl<const N: usize> TaskTable<N> {
             ready: false,
             cr3,
             owner,
+            generation: 1,
         });
         Ok(index)
     }
@@ -297,6 +308,18 @@ impl<const N: usize> TaskTable<N> {
         self.tasks
             .get(index)
             .and_then(|slot| slot.map(|task| task.owner))
+    }
+
+    /// Returns the incarnation generation of the slot at `index`, if it holds
+    /// any task at all.
+    ///
+    /// A dead slot keeps its last generation, so a caller can still compare the
+    /// record it holds against the slot's history.
+    #[must_use]
+    pub fn generation_of(&self, index: usize) -> Option<u32> {
+        self.tasks
+            .get(index)
+            .and_then(|slot| slot.map(|task| task.generation))
     }
 
     /// Returns the running task's identity.
@@ -392,6 +415,9 @@ impl<const N: usize> TaskTable<N> {
         task.alive = true;
         task.blocked = false;
         task.ready = false;
+        // A revive is a new incarnation: the generation rises so a reference
+        // to the previous one can be detected as stale.
+        task.generation = task.generation.saturating_add(1);
         Ok(())
     }
 
@@ -736,6 +762,54 @@ mod task_table_tests {
         assert!(!table.is_alive(1));
         assert_eq!(table.alive_count(), 1);
         assert_eq!(table.kill(9), Err(TaskError::UnknownTask));
+    }
+
+    #[test]
+    fn a_generation_separates_revived_incarnations() {
+        let mut table = TaskTable::<2>::new();
+        let zero = table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000, Identity::ROOT).unwrap();
+        let one = table.spawn(SyscallRegs::EMPTY, frame(0x200), 0x2000, Identity::ROOT).unwrap();
+        // A fresh spawn is the first incarnation.
+        assert_eq!(table.generation_of(zero), Some(1));
+        assert_eq!(table.generation_of(one), Some(1));
+
+        // A revive raises only the revived slot's generation.
+        table.kill(zero).unwrap();
+        // A dead slot keeps its last generation, so an old reference still
+        // resolves to the incarnation it named.
+        assert_eq!(table.generation_of(zero), Some(1));
+        table
+            .respawn(zero, SyscallRegs::EMPTY, frame(0x500))
+            .unwrap();
+        assert_eq!(table.generation_of(zero), Some(2));
+        assert_eq!(table.generation_of(one), Some(1));
+
+        // Killing does not raise it; the next revive does.
+        table.kill(zero).unwrap();
+        assert_eq!(table.generation_of(zero), Some(2));
+        table
+            .respawn(zero, SyscallRegs::EMPTY, frame(0x600))
+            .unwrap();
+        assert_eq!(table.generation_of(zero), Some(3));
+
+        // A slot beyond the table names no incarnation.
+        assert_eq!(table.generation_of(9), None);
+    }
+
+    #[test]
+    fn a_generation_saturates_instead_of_wrapping() {
+        let mut table = TaskTable::<1>::new();
+        let zero = table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000, Identity::ROOT).unwrap();
+        // Drive the counter near its ceiling, then confirm it clamps.
+        table.tasks[zero].as_mut().unwrap().generation = u32::MAX - 1;
+        table
+            .respawn(zero, SyscallRegs::EMPTY, frame(0x200))
+            .unwrap();
+        assert_eq!(table.generation_of(zero), Some(u32::MAX));
+        table
+            .respawn(zero, SyscallRegs::EMPTY, frame(0x300))
+            .unwrap();
+        assert_eq!(table.generation_of(zero), Some(u32::MAX));
     }
 
     #[test]

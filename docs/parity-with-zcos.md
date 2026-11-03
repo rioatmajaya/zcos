@@ -132,7 +132,7 @@ the 2026-10-20 changelog records the Linux entries being removed.
 | Scheduling | 256 priority queues, affinity-aware, SMP load balancing | bounded round-robin over a fixed task table, single CPU | 🟡 No priorities, no SMP scheduler, no per-CPU run queues. |
 | IPC | synchronous endpoints, shared memory, notifications, poll | channels, blocking send/receive, shared exchange page, `SYS_SEND_TO`/`SYS_RECV_FROM` | 🟡 Enough for current services; no general shared-memory API or notification object. |
 | Capabilities | `libcap` rights over process/thread/endpoint/shm/IRQ/I/O/block; SOF manifests; signed policy | generation-safe tables, explicit rights, delegation, per-task I/O bitmap, port/IRQ claims | 🟡 Current delegation is strong, but there is no signed object or policy layer. |
-| Process model | `fork`/`exec`/`spawn`/`wait`, signals, process registry, sessions | fixed 10 task slots; `SYS_TASK_EXIT`, service revive, no fork/exec/wait | ❌ This is the single largest architectural blocker for real apps. The launcher cannot become a real app launcher while only two client slots exist. |
+| Process model | `fork`/`exec`/`spawn`/`wait`, signals, process registry, sessions | fixed 10 task slots; a read-only registry with per-slot generations (`SYS_TASK_INFO`), `SYS_TASK_EXIT`, service revive; no fork/exec/wait | ❌ Spawn and wait are still absent, but the registry now distinguishes incarnations, which is the identity foundation they need. The launcher cannot become a real app launcher while only two client slots exist. |
 | Syscall surface | about 70+ calls, including process, signal, network, library, Linux compatibility | 43 numbers, highest `SYS_SERVICE_HEALTH` (42), two reserved but unimplemented | 🟡 The current ABI is coherent; it is simply much smaller. Add calls only with specs and tests. |
 | Fault isolation | ring-3 faults kill only the domain; init supervises services | same principle; `initd` supervises `blk` and `kbd` | 🟡 The mechanism is at parity; the service catalog is much smaller. |
 | Linux personality | kernel-level POSIX translator for static x86_64 ELF (`busybox`, `tcc`), sockets `ENOSYS` | none | ⛔ Do not copy the kernel placement. If needed later, build a userspace personality domain. |
@@ -557,8 +557,11 @@ trustworthy core.
    own restart and fault counters through `SYS_SERVICE_HEALTH`, so a restarted
    service's history is visible from `svc`
    ([ADR 0057](adr/0057-service-health-exposes-mechanism-counters.md)); the
-   restart budget remains userspace policy. The three proof checksums still
-   hold.
+   restart budget remains userspace policy. The task table now numbers each
+   incarnation with a generation exposed through `SYS_TASK_INFO` and the
+   shell's `ps`, so a revived slot is distinguishable from its predecessor
+   ([ADR 0059](adr/0059-a-task-slot-carries-a-generation.md)); spawn and wait
+   are still absent. The three proof checksums still hold.
 5. Do not start the app catalog, widget toolkit, or host runner yet.
 6. Keep `build/zcos.img` human-testable and keep the three proof images locked.
 

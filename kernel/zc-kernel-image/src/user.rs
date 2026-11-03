@@ -11,8 +11,9 @@ use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 
 use zc_abi::{
     BootInfo, IPC_SUPERVISE, IPC_WM_REPLY, MMIO_SLOT_STRIDE, MMIO_VIRT, SERVICE_KIND_EXIT,
-    SERVICE_KIND_FAULT, SURFACE_SLOT_STRIDE, SURFACE_VIRT, WM_MOUSE, WM_TICK, service_cap,
-    service_health, service_state, supervise_event,
+    SERVICE_KIND_FAULT, SURFACE_SLOT_STRIDE, SURFACE_VIRT, TASK_INFO_LEN, TASK_STATE_ALIVE,
+    TASK_STATE_READY, TaskInfo, WM_MOUSE, WM_TICK, service_cap, service_health, service_state,
+    supervise_event,
 };
 use zc_kernel::capability::{Capability, CapabilityTable, Rights};
 use zc_kernel::gdt::{USER_CS, USER_RFLAGS, USER_SS};
@@ -1788,6 +1789,44 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 health.restarts(id).unwrap_or(0),
                 health.faults(id).unwrap_or(0),
             ));
+            0
+        }
+        Ok(Action::TaskInfo) => {
+            // The registry view is read-only and unprivileged: it exposes the
+            // same slot layout and owner the boot log prints. The generation
+            // is the interesting part, because a revived slot keeps its index.
+            let index = regs.rdi as usize;
+            let Some(owner) = tasks.owner_of(index) else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            if regs.rdx != TASK_INFO_LEN as u64 {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            let Some(out) = validate_user_slice_mut(tasks, regs.rsi, regs.rdx) else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            let mut flags = 0;
+            if tasks.is_alive(index) {
+                flags |= TASK_STATE_ALIVE;
+            }
+            if tasks.is_ready(index) {
+                flags |= TASK_STATE_READY;
+            }
+            let info = TaskInfo {
+                slot: index as u32,
+                generation: tasks.generation_of(index).unwrap_or(0),
+                uid: owner.uid,
+                gid: owner.gid,
+                flags,
+            };
+            regs.set_result(if info.write_into(out).is_some() {
+                0
+            } else {
+                u64::MAX
+            });
             0
         }
         Ok(Action::ServiceReady) => {

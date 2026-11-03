@@ -23,8 +23,8 @@ filesystem exchange page (see [`server-protocol.md`](server-protocol.md)).
 
 ## Syscall table
 
-Numbers are stable and never reused. `SYS_SERVICE_HEALTH` (42) is the highest
-assigned number; 43 and above are rejected.
+Numbers are stable and never reused. `SYS_TASK_INFO` (43) is the highest
+assigned number; 44 and above are rejected.
 
 Two numbers are **declared but not yet implemented**: `SYS_YIELD` (0) and
 `SYS_MAP_FRAME` (4) are recognized by the dispatch table but have no handler, so
@@ -76,6 +76,7 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 40 | `SYS_SERVICE_READY` | — | 0 after the calling service declares readiness | `u64::MAX` |
 | 41 | `SYS_LOG_READ` | absolute offset, buffer ptr, length | bytes copied (0 at end) | `u64::MAX` |
 | 42 | `SYS_SERVICE_HEALTH` | service id | health word: state bits, restarts, faults | `u64::MAX` |
+| 43 | `SYS_TASK_INFO` | slot index, `TaskInfo` out ptr, length | 0 | `u64::MAX` |
 
 ### Clock
 
@@ -128,6 +129,23 @@ zero counters and prints, for example, `svc: blk up ready restarts=1 faults=1`.
 
 `SYS_SERVICE_STATUS` remains the smaller call for a caller that only needs the
 state bits.
+
+### Task registry
+
+`SYS_TASK_INFO` (43) writes one `zc_abi::TaskInfo` — 20 bytes: `slot`,
+`generation`, `uid`, `gid`, and a `flags` word — for the slot in `rdi`. `rsi`
+is the buffer and `rdx` its length, which must be exactly
+`zc_abi::TASK_INFO_LEN`. `TASK_STATE_ALIVE` (bit 0) and `TASK_STATE_READY`
+(bit 1) are the same liveness and readiness facts the service calls report.
+The call needs no authority: it exposes what the boot log already prints, so a
+`ps`-style tool can walk `0..zc_abi::TASK_SLOTS` (`10`).
+
+The slot index is stable for the life of the table, so the **generation** is
+what distinguishes two incarnations: it is `1` on first spawn and rises by one
+on every revive. A dead slot keeps its last generation, so a caller can still
+tell which incarnation a stale reference named. `zc_kernel::service::TASK_COUNT`
+is defined from `zc_abi::TASK_SLOTS`, so the kernel and a registry walker cannot
+disagree about the table size.
 
 ### Kernel log
 

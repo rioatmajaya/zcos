@@ -13,7 +13,8 @@ use zc_abi::{
     SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_HEALTH,
     SYS_SERVICE_READY, SYS_SERVICE_START, SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_STAT,
     SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY,
-    SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TERM_READ, SYS_UMOUNT, SYS_WINDOW_CLOSE, SYS_WINDOW_ID,
+    SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TASK_INFO, SYS_TERM_READ, SYS_UMOUNT, SYS_WINDOW_CLOSE,
+    SYS_WINDOW_ID,
     SYS_WINDOW_READ, SYS_WRITE, SYS_YIELD, SyscallError,
 };
 
@@ -79,6 +80,8 @@ pub enum Action {
     ServiceStatus,
     /// Report a supervised service's state and mechanism counters.
     ServiceHealth,
+    /// Read one task slot's public metadata.
+    TaskInfo,
     /// Change a file's permission bits.
     Chmod,
     /// Allocate a pixel surface and its backing frames.
@@ -160,6 +163,7 @@ pub const fn dispatch(number: u64) -> Result<Action, SyscallError> {
         SYS_SERVICE_READY => Ok(Action::ServiceReady),
         SYS_LOG_READ => Ok(Action::LogRead),
         SYS_SERVICE_HEALTH => Ok(Action::ServiceHealth),
+        SYS_TASK_INFO => Ok(Action::TaskInfo),
         _ => Err(SyscallError::InvalidNumber),
     }
 }
@@ -213,12 +217,13 @@ mod tests {
         assert_eq!(dispatch(SYS_SERVICE_READY), Ok(Action::ServiceReady));
         assert_eq!(dispatch(SYS_LOG_READ), Ok(Action::LogRead));
         assert_eq!(dispatch(SYS_SERVICE_HEALTH), Ok(Action::ServiceHealth));
+        assert_eq!(dispatch(SYS_TASK_INFO), Ok(Action::TaskInfo));
     }
 
     #[test]
     fn unknown_numbers_are_rejected() {
-        // The last assigned number is SYS_SERVICE_HEALTH (42), so probe past it.
-        assert_eq!(dispatch(43), Err(SyscallError::InvalidNumber));
+        // The last assigned number is SYS_TASK_INFO (43), so probe past it.
+        assert_eq!(dispatch(44), Err(SyscallError::InvalidNumber));
         assert_eq!(
             dispatch(u64::MAX),
             Err(SyscallError::InvalidNumber)

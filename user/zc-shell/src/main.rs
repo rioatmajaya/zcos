@@ -2,9 +2,9 @@
 //!
 //! Reads keystrokes with blocking serial reads, edits a single line with
 //! backspace support, and runs `help`, `echo`, `cat`, `ls`, `stat`, `write`,
-//! `tmp`, `persist`, `chmod`, `mount`, `umount`, `id`, `svc`, `dmesg`, and
-//! `exit`. Output goes through the log syscall, so the transcript appears in
-//! the kernel serial log.
+//! `tmp`, `persist`, `chmod`, `mount`, `umount`, `id`, `svc`, `ps`, `dmesg`,
+//! and `exit`. Output goes through the log syscall, so the transcript appears
+//! in the kernel serial log.
 //!
 //! `id` asks the kernel for this task's user and group ids. The shell runs as
 //! an unprivileged user, so `id` is the observable side of the same owner
@@ -18,6 +18,10 @@
 //! `dmesg` reads the kernel's diagnostic ring through `SYS_LOG_READ` and prints
 //! it back. Task output never enters that ring, so printing the log cannot
 //! change what it prints.
+//!
+//! `ps` walks `SYS_TASK_INFO` over the fixed slot table and prints each slot's
+//! generation, owner, and state. The generation is what makes a revived service
+//! distinguishable from the incarnation that replaced it.
 //!
 //! `persist` is the durability proof: it writes the zcfs volume through the
 //! VFS, unmounts and remounts it, and reads its own bytes back. The remount
@@ -36,10 +40,10 @@
 
 use zc_user::{
     DIRENT_LEN, DirEntry, FS_ID_ZCFS, FS_OP_STOP, IPC_FS, KIND_CHR, KIND_DIR, READDIR_END,
-    READDIR_ENTRY, SERVICE_CATALOG, Stat, chmod, close, create, getid, identity_gid, identity_uid,
-    log, log_parts, log_read, mount, open, poweroff, read, readdir, send_to, serial_read,
-    service_faults, service_health, service_is_ready, service_is_up, service_restarts, stat,
-    task_exit, umount, write,
+    READDIR_ENTRY, SERVICE_CATALOG, Stat, TASK_SLOTS, TaskInfo, chmod, close, create, getid,
+    identity_gid, identity_uid, log, log_parts, log_read, mount, open, poweroff, read, readdir,
+    send_to, serial_read, service_faults, service_health, service_is_ready, service_is_up,
+    service_restarts, stat, task_exit, task_info, umount, write,
 };
 
 /// Contents `persist` writes and expects to read back.
@@ -276,7 +280,7 @@ fn run(line: &[u8]) -> bool {
     }
     match argv[0] {
         b"help" => {
-            log("Commands: help echo cat ls stat write tmp persist chmod mount umount id svc dmesg poweroff exit\n");
+            log("Commands: help echo cat ls stat write tmp persist chmod mount umount id svc ps dmesg poweroff exit\n");
         }
         b"echo" => {
             for index in 1..count {
@@ -568,6 +572,46 @@ fn run(line: &[u8]) -> bool {
                 out_bytes(b"\n");
                 out_flush();
             }
+        }
+        b"ps" => {
+            // The registry view is read-only: the shell learns each slot's
+            // generation and owner without any authority over it. The
+            // generation is the useful part, because a revived service keeps
+            // its slot index but not its generation.
+            let mut alive = 0u64;
+            for index in 0..TASK_SLOTS as u64 {
+                let mut info = TaskInfo {
+                    slot: 0,
+                    generation: 0,
+                    uid: 0,
+                    gid: 0,
+                    flags: 0,
+                };
+                if !task_info(index, &mut info) {
+                    continue;
+                }
+                if info.is_alive() {
+                    alive += 1;
+                }
+                out_bytes(b"ps: slot ");
+                out_u64(u64::from(info.slot));
+                out_bytes(b" gen ");
+                out_u64(u64::from(info.generation));
+                out_bytes(b" uid=");
+                out_u64(u64::from(info.uid));
+                out_bytes(b" gid=");
+                out_u64(u64::from(info.gid));
+                out_bytes(if info.is_alive() { b" up" } else { b" down" });
+                if info.is_ready() {
+                    out_bytes(b" ready");
+                }
+                out_bytes(b"\n");
+                out_flush();
+            }
+            out_bytes(b"ps: ");
+            out_u64(alive);
+            out_bytes(b" alive\n");
+            out_flush();
         }
         b"dmesg" => {
             // The ring is read-only kernel diagnostics; printing it goes

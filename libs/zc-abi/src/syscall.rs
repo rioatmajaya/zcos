@@ -226,6 +226,19 @@ pub const SYS_LOG_READ: u64 = 41;
 /// a missing grant returns `u64::MAX`.
 pub const SYS_SERVICE_HEALTH: u64 = 42;
 
+/// Reads one task slot's public metadata into a caller buffer.
+///
+/// Arguments are the slot index (`rdi`), a [`crate::TaskInfo`] out pointer
+/// (`rsi`), and the buffer length (`rdx`), which must be exactly
+/// [`crate::TASK_INFO_LEN`]. Returns `0` on success and `u64::MAX` for an
+/// out-of-range index or a bad buffer. The call needs no authority: it exposes
+/// the same slot, generation, owner, and state bits the boot log already
+/// prints, so a `ps`-style tool can enumerate the registry.
+///
+/// The slot index is stable for life, so the **generation** is what tells two
+/// incarnations apart: a revive raises it.
+pub const SYS_TASK_INFO: u64 = 43;
+
 /// Packs a user and group id into the one word [`SYS_GETID`] returns.
 #[must_use]
 pub const fn identity_word(uid: u32, gid: u32) -> u64 {
@@ -347,6 +360,7 @@ mod tests {
         assert_eq!(SYS_SERVICE_READY, 40);
         assert_eq!(SYS_LOG_READ, 41);
         assert_eq!(SYS_SERVICE_HEALTH, 42);
+        assert_eq!(SYS_TASK_INFO, 43);
         assert_eq!(READDIR_ENTRY, 0);
         assert_eq!(READDIR_END, 1);
     }

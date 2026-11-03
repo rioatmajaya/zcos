@@ -328,6 +328,21 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **Task slots carry a generation, and `ps` reads the registry** (F7, core
+  system): `TaskTable` now numbers each incarnation. A slot's generation is `1`
+  on first spawn, rises by one on every revive, and saturates instead of
+  wrapping; `kill` keeps it, so a dead slot still names its last incarnation.
+  `SYS_TASK_INFO` (43) writes a 20-byte `zc_abi::TaskInfo` — slot, generation,
+  uid, gid, and alive/ready flags — with no authority required, and the shell's
+  new `ps` command walks `0..zc_abi::TASK_SLOTS` to print it. After the
+  deliberate block and keyboard faults, `ps` shows slots 4 and 5 at generation
+  2 while every other slot is still at 1, so a restart is distinguishable from
+  its first incarnation. `zc_kernel::service::TASK_COUNT` is now defined from
+  `zc_abi::TASK_SLOTS`, so the kernel and a registry walker cannot disagree
+  about the table size. This is the identity half of a process model, not
+  spawn/wait. The three checksums remain `0xd616ad79aaefb099`,
+  `0x6d66e82d0f2d6fb8`, and `0x78ebd6d359914da7`. See
+  [ADR 0059](docs/adr/0059-a-task-slot-carries-a-generation.md).
 - **The boot manifest selects the supervised service set** (F7f, core system):
   a valid `zc.manifest` is now authoritative for which catalog services `initd`
   supervises and in what order they shut down, not just a consistency check.

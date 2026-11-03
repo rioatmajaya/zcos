@@ -23,10 +23,13 @@ is which.
 | 6 | `DEVMGR_TASK` | device manager | user |
 | 7 | `INITD_TASK` | supervisor | **root** |
 | 8 | `WINDOW_CLIENT_TASK` | first window client | user |
+| 9 | `SECOND_WINDOW_TASK` | second window client | user |
 
-`TASK_COUNT` = 9. `initd` is the only root task; every other slot runs as the
-unprivileged `USER_IDENTITY`, so the VFS permission checks are exercised rather
-than bypassed.
+`TASK_COUNT` = 10 (`zc_abi::TASK_SLOTS`). `initd` is the only root task; every
+other slot runs as the unprivileged `USER_IDENTITY`, so the VFS permission
+checks are exercised rather than bypassed. `SYS_TASK_INFO` (43) exposes each
+slot's generation, owner, and state to an unprivileged `ps`-style reader; the
+generation separates incarnations of a revived slot.
 
 **Supervised services** (`SERVICES`) are the block and keyboard drivers:
 

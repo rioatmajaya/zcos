@@ -53,7 +53,10 @@ pub const WINDOW_CLIENT_TASK: usize = 8;
 pub const SECOND_WINDOW_TASK: usize = 9;
 
 /// Number of ring-3 task slots the bring-up uses.
-pub const TASK_COUNT: usize = 10;
+///
+/// Defined from [`zc_abi::TASK_SLOTS`], the public registry size, so a `ps`
+/// caller and the kernel can never disagree about how many slots to enumerate.
+pub const TASK_COUNT: usize = zc_abi::TASK_SLOTS;
 
 /// Number of window clients, and therefore of windows the desktop can host.
 pub const WINDOW_TASKS: usize = TASK_COUNT - WINDOW_CLIENT_TASK;

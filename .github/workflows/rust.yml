@@ -114,6 +114,10 @@ jobs:
         # supervisor asks for; `svc` reads them through SYS_SERVICE_HEALTH.
         grep -q "task 2: svc: blk up ready restarts=1 faults=1" build/boot.log
         grep -q "task 2: svc: kbd up ready restarts=1 faults=1" build/boot.log
+        # `ps` reads the generation, so a revived service is distinguishable
+        # from its first incarnation even though it keeps its slot index.
+        grep -q "task 2: ps: slot 4 gen 2 uid=1 gid=1 up ready" build/boot.log
+        grep -q "task 2: ps: slot 5 gen 2 uid=1 gid=1 up ready" build/boot.log
         # `dmesg` reads the kernel's own ring, not the task transcript: the
         # banner only appears with a `task 2:` prefix when the shell copied it
         # out through SYS_LOG_READ.

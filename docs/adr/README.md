@@ -65,6 +65,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0056](0056-kernel-logs-live-in-a-bounded-readable-ring.md) | Kernel diagnostics live in a bounded ring that a task can read | Accepted |
 | [0057](0057-service-health-exposes-mechanism-counters.md) | Service health exposes kernel mechanism counters, not policy | Accepted |
 | [0058](0058-the-manifest-selects-the-supervised-set.md) | The boot manifest selects the supervised service set | Accepted |
+| [0059](0059-a-task-slot-carries-a-generation.md) | A task slot carries a generation so incarnations are distinguishable | Accepted |
 
 ## Adding a decision
 

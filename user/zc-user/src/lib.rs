@@ -19,9 +19,11 @@ pub use zc_abi::{
     SYS_READDIR, SYS_RECV, SYS_RECV_FROM, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ,
     SYS_SERVICE_HEALTH, SYS_SERVICE_READY, SYS_SERVICE_START, SYS_SERVICE_STATUS,
     SYS_SERVICE_STOP, SYS_STAT, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP,
-    SYS_TASK_EXIT, SYS_TERM_READ, SYS_UMOUNT, SYS_WINDOW_CLOSE, SYS_WINDOW_ID, SYS_WINDOW_READ,
+    SYS_TASK_EXIT, SYS_TASK_INFO, SYS_TERM_READ, SYS_UMOUNT, SYS_WINDOW_CLOSE, SYS_WINDOW_ID,
+    SYS_WINDOW_READ,
     SYS_WRITE, SYS_YIELD,
     SERVICE_STATE_READY, SERVICE_STATE_UP, MmioInfo, ServiceSpec, Stat, SurfaceInfo, SyscallError,
+    TASK_INFO_LEN, TASK_SLOTS, TASK_STATE_ALIVE, TASK_STATE_READY, TaskInfo,
     WM_ACK, identity_gid, identity_uid, identity_word, service_faults, service_is_ready,
     service_is_up, service_restarts, service_state, supervise_kind, supervise_service,
 };
@@ -586,6 +588,21 @@ pub fn service_status(id: u64) -> u64 {
 #[inline(always)]
 pub fn service_health(id: u64) -> u64 {
     syscall1(SYS_SERVICE_HEALTH, id)
+}
+
+/// Reads task slot `index`'s public metadata into `info`.
+///
+/// Returns `false` for an out-of-range index, so a caller can walk
+/// `0..TASK_SLOTS`. The generation in `info` separates two incarnations of
+/// the same slot.
+#[inline(always)]
+pub fn task_info(index: u64, info: &mut TaskInfo) -> bool {
+    syscall3(
+        SYS_TASK_INFO,
+        index,
+        core::ptr::from_mut(info) as u64,
+        TASK_INFO_LEN as u64,
+    ) == 0
 }
 
 /// Declares the calling service ready to serve, returning 0 or `u64::MAX`.

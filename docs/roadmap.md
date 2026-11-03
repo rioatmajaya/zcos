@@ -372,6 +372,11 @@ VFS → write path → journaling → `fsck`**.
       counters alongside the state bits, so `svc` shows a restarted service's
       mechanism history while the restart budget stays in `initd` (see
       [ADR 0057](adr/0057-service-health-exposes-mechanism-counters.md)).
+      The task table then numbers each incarnation with a generation exposed
+      through `SYS_TASK_INFO` and the shell's `ps`, so a revived service keeps
+      its slot but is distinguishable from the run it replaced (see
+      [ADR 0059](adr/0059-a-task-slot-carries-a-generation.md)); spawn and wait
+      remain the open part of the process model.
 - [x] F7g: crash consistency. `Volume::mount_into` replays the log and then
       **clamps `head_seq` to the last record that actually replayed**, reporting
       it through `was_recovered()`. A superblock can claim a record a crash never
