@@ -20,8 +20,13 @@
 //! change what it prints.
 //!
 //! `ps` walks `SYS_TASK_INFO` over the fixed slot table and prints each slot's
-//! generation, owner, and state. The generation is what makes a revived service
-//! distinguishable from the incarnation that replaced it.
+//! generation, owner, and state, plus the exit status of a slot that has died.
+//! The generation is what makes a revived service distinguishable from the
+//! incarnation that replaced it.
+//!
+//! `exit [status]` ends the shell with the given status (default `0`); the
+//! kernel records it in the registry, so a supervisor could observe why the
+//! shell left even though the shell is not itself a supervised service.
 //!
 //! `persist` is the durability proof: it writes the zcfs volume through the
 //! VFS, unmounts and remounts it, and reads its own bytes back. The remount
@@ -43,7 +48,7 @@ use zc_user::{
     READDIR_ENTRY, SERVICE_CATALOG, Stat, TASK_SLOTS, TaskInfo, chmod, close, create, getid,
     identity_gid, identity_uid, log, log_parts, log_read, mount, open, poweroff, read, readdir,
     send_to, serial_read, service_faults, service_health, service_is_ready, service_is_up,
-    service_restarts, stat, task_exit, task_info, umount, write,
+    service_restarts, stat, task_exit_with, task_info, umount, write,
 };
 
 /// Contents `persist` writes and expects to read back.
@@ -84,6 +89,9 @@ const DMESG_CAP: usize = 8192;
 ///
 /// It lives in `.bss`, not on the task's single stack page.
 static mut DMESG: [u8; DMESG_CAP] = [0; DMESG_CAP];
+
+/// Exit status the `exit` command parsed; read once by the entry loop.
+static mut EXIT_STATUS: u32 = 0;
 
 /// Longest captured line `dmesg` prints in one syscall, excluding the newline.
 ///
@@ -586,6 +594,7 @@ fn run(line: &[u8]) -> bool {
                     uid: 0,
                     gid: 0,
                     flags: 0,
+                    exit_status: 0,
                 };
                 if !task_info(index, &mut info) {
                     continue;
@@ -604,6 +613,12 @@ fn run(line: &[u8]) -> bool {
                 out_bytes(if info.is_alive() { b" up" } else { b" down" });
                 if info.is_ready() {
                     out_bytes(b" ready");
+                }
+                // A dead slot keeps the status its task passed to exit; a live
+                // one has none to show.
+                if !info.is_alive() {
+                    out_bytes(b" status=");
+                    out_u64(u64::from(info.exit_status));
                 }
                 out_bytes(b"\n");
                 out_flush();
@@ -629,6 +644,18 @@ fn run(line: &[u8]) -> bool {
             }
         }
         b"exit" => {
+            // `exit [status]` records the status the entry loop passes to
+            // `task_exit_with`; the registry keeps it after the shell is gone.
+            let status = if count >= 2 {
+                core::str::from_utf8(argv[1])
+                    .ok()
+                    .and_then(|text| text.parse::<u32>().ok())
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            // SAFETY: owned here; read once after `run` returns true.
+            unsafe { core::ptr::addr_of_mut!(EXIT_STATUS).write(status) };
             log("shell exiting\n");
             // Tell the block domain to flush and stop, so the boot can end
             // with the volume clean instead of waiting out the timeout.
@@ -665,7 +692,8 @@ pub unsafe extern "C" fn _start() -> ! {
         }
         let len = take_line();
         if run(line_bytes(len)) {
-            task_exit()
+            // SAFETY: `run` wrote the parsed status before returning true.
+            task_exit_with(unsafe { core::ptr::addr_of!(EXIT_STATUS).read() })
         }
     }
 }

@@ -376,7 +376,10 @@ VFS → write path → journaling → `fsck`**.
       through `SYS_TASK_INFO` and the shell's `ps`, so a revived service keeps
       its slot but is distinguishable from the run it replaced (see
       [ADR 0059](adr/0059-a-task-slot-carries-a-generation.md)); spawn and wait
-      remain the open part of the process model.
+      remain the open part of the process model. A clean exit then records a
+      status the registry reports, so a slot's record says how its incarnation
+      ended even before `wait` exists (see
+      [ADR 0060](adr/0060-a-clean-exit-records-a-status.md)).
 - [x] F7g: crash consistency. `Volume::mount_into` replays the log and then
       **clamps `head_seq` to the last record that actually replayed**, reporting
       it through `was_recovered()`. A superblock can claim a record a crash never

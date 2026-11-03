@@ -169,6 +169,8 @@ pub struct Task {
     ///
     /// The slot index is reused, so this is what tells two incarnations apart.
     generation: u32,
+    /// Status the task passed to `SYS_TASK_EXIT`; zero until it exits.
+    exit_status: u32,
 }
 
 impl Task {
@@ -218,6 +220,12 @@ impl Task {
     #[must_use]
     pub const fn generation(self) -> u32 {
         self.generation
+    }
+
+    /// Returns the status the task passed to `SYS_TASK_EXIT`.
+    #[must_use]
+    pub const fn exit_status(self) -> u32 {
+        self.exit_status
     }
 }
 
@@ -275,6 +283,7 @@ impl<const N: usize> TaskTable<N> {
             cr3,
             owner,
             generation: 1,
+            exit_status: 0,
         });
         Ok(index)
     }
@@ -320,6 +329,33 @@ impl<const N: usize> TaskTable<N> {
         self.tasks
             .get(index)
             .and_then(|slot| slot.map(|task| task.generation))
+    }
+
+    /// Returns the exit status recorded for the slot at `index`, if it holds
+    /// any task at all.
+    ///
+    /// The value is meaningful once the slot is dead; a live task reads zero
+    /// until it exits.
+    #[must_use]
+    pub fn exit_status_of(&self, index: usize) -> Option<u32> {
+        self.tasks
+            .get(index)
+            .and_then(|slot| slot.map(|task| task.exit_status))
+    }
+
+    /// Records the running task's exit status before it leaves.
+    ///
+    /// Returns `false` when there is no live running task. The caller calls
+    /// this immediately before [`exit_current`](Self::exit_current), so the
+    /// registry holds the status when the slot dies.
+    pub fn mark_current_exit(&mut self, status: u32) -> bool {
+        match self.tasks[self.current].as_mut() {
+            Some(task) if task.alive => {
+                task.exit_status = status;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Returns the running task's identity.
@@ -416,8 +452,10 @@ impl<const N: usize> TaskTable<N> {
         task.blocked = false;
         task.ready = false;
         // A revive is a new incarnation: the generation rises so a reference
-        // to the previous one can be detected as stale.
+        // to the previous one can be detected as stale, and the old exit
+        // status does not carry over.
         task.generation = task.generation.saturating_add(1);
+        task.exit_status = 0;
         Ok(())
     }
 
@@ -527,6 +565,7 @@ impl<const N: usize> TaskTable<N> {
             task.alive = true;
             task.blocked = false;
             task.ready = false;
+            task.exit_status = 0;
         }
         self.unblock_all();
         let next = self.next_runnable(self.current)?;
@@ -810,6 +849,39 @@ mod task_table_tests {
             .respawn(zero, SyscallRegs::EMPTY, frame(0x300))
             .unwrap();
         assert_eq!(table.generation_of(zero), Some(u32::MAX));
+    }
+
+    #[test]
+    fn exit_status_is_recorded_and_cleared_by_a_revive() {
+        let mut table = TaskTable::<2>::new();
+        let zero = table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000, Identity::ROOT).unwrap();
+        // A live task has no exit status yet.
+        assert_eq!(table.exit_status_of(zero), Some(0));
+
+        // Record and leave.
+        assert!(table.mark_current_exit(7));
+        let mut regs = SyscallRegs::EMPTY;
+        let mut irq = IrqFrame::EMPTY;
+        let _ = table.exit_current(&mut regs, &mut irq);
+        assert!(!table.is_alive(zero));
+        assert_eq!(table.exit_status_of(zero), Some(7));
+
+        // A revive is a new incarnation: the old status does not carry over.
+        table
+            .respawn(zero, SyscallRegs::EMPTY, frame(0x500))
+            .unwrap();
+        assert_eq!(table.exit_status_of(zero), Some(0));
+        assert_eq!(table.generation_of(zero), Some(2));
+
+        // The setter refuses a table with no live running task.
+        let mut empty = TaskTable::<2>::new();
+        assert!(!empty.mark_current_exit(9));
+    }
+
+    #[test]
+    fn exit_status_of_an_unknown_slot_is_none() {
+        let table = TaskTable::<2>::new();
+        assert_eq!(table.exit_status_of(9), None);
     }
 
     #[test]

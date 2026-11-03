@@ -781,6 +781,12 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             // hardware keeps raising interrupts that nobody drains and the
             // slot could hand a region or surface to its next occupant.
             let me = tasks.current() as u32;
+            // Record the status before the slot dies, so a registry reader
+            // finds it once `is_alive` is false. `rdi` is the status; a task
+            // that does not care passed zero.
+            let status = regs.rdi as u32;
+            let _ = tasks.mark_current_exit(status);
+            let _ = crate::serial::print(format_args!("task {me}: exited status {status}\n"));
             revoke_task_resources(me as usize);
             // Notify the supervisor before the slot is removed: `exit_current`
             // unblocks every task, so the event must already be queued when
@@ -1821,6 +1827,7 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 uid: owner.uid,
                 gid: owner.gid,
                 flags,
+                exit_status: tasks.exit_status_of(index).unwrap_or(0),
             };
             regs.set_result(if info.write_into(out).is_some() {
                 0

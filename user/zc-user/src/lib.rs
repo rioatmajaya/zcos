@@ -615,10 +615,19 @@ pub fn service_ready() -> u64 {
     syscall0(SYS_SERVICE_READY)
 }
 
-/// Terminates the calling task; never returns.
+/// Terminates the calling task with status `0`; never returns.
 #[inline(always)]
 pub fn task_exit() -> ! {
-    syscall0(SYS_TASK_EXIT);
+    task_exit_with(0)
+}
+
+/// Terminates the calling task with an exit status; never returns.
+///
+/// The status is recorded in the task registry: `SYS_TASK_INFO` reports it
+/// once the slot is dead, so a supervisor can see why a task left.
+#[inline(always)]
+pub fn task_exit_with(status: u32) -> ! {
+    syscall1(SYS_TASK_EXIT, u64::from(status));
     // The kernel never resumes an exited task; halt if it somehow does.
     loop {
         core::hint::spin_loop();

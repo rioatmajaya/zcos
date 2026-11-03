@@ -38,7 +38,7 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 2 | `SYS_RECV` | endpoint handle, buffer ptr | 0 | `u64::MAX` |
 | 3 | `SYS_CAP_DELEGATE` | object id, target task index, rights bits, broker range (`r10`, `r8`) | 0 | `u64::MAX` |
 | 4 | `SYS_MAP_FRAME` | — | *not implemented* | `u64::MAX` |
-| 5 | `SYS_TASK_EXIT` | — | never returns | — |
+| 5 | `SYS_TASK_EXIT` | exit status | never returns | — |
 | 6 | `SYS_LOG_WRITE` | UTF-8 ptr, length | 0 | `u64::MAX` |
 | 7 | `SYS_OPEN` | path ptr, length | descriptor | `u64::MAX` |
 | 8 | `SYS_READ` | descriptor, buffer ptr, length | bytes read | `u64::MAX` |
@@ -132,9 +132,9 @@ state bits.
 
 ### Task registry
 
-`SYS_TASK_INFO` (43) writes one `zc_abi::TaskInfo` — 20 bytes: `slot`,
-`generation`, `uid`, `gid`, and a `flags` word — for the slot in `rdi`. `rsi`
-is the buffer and `rdx` its length, which must be exactly
+`SYS_TASK_INFO` (43) writes one `zc_abi::TaskInfo` — 24 bytes: `slot`,
+`generation`, `uid`, `gid`, a `flags` word, and `exit_status` — for the slot in
+`rdi`. `rsi` is the buffer and `rdx` its length, which must be exactly
 `zc_abi::TASK_INFO_LEN`. `TASK_STATE_ALIVE` (bit 0) and `TASK_STATE_READY`
 (bit 1) are the same liveness and readiness facts the service calls report.
 The call needs no authority: it exposes what the boot log already prints, so a
@@ -146,6 +146,12 @@ on every revive. A dead slot keeps its last generation, so a caller can still
 tell which incarnation a stale reference named. `zc_kernel::service::TASK_COUNT`
 is defined from `zc_abi::TASK_SLOTS`, so the kernel and a registry walker cannot
 disagree about the table size.
+
+`SYS_TASK_EXIT` (5) takes the exit status in `rdi`. The kernel records it before
+the slot dies, so `exit_status` is meaningful once `TASK_STATE_ALIVE` is clear;
+a task that passes no status (and a task that faulted) reads `0`. The shell's
+`ps` prints `status=<n>` for a dead slot. This is exit-status propagation, not
+`wait`: there is no parent-child link and nothing blocks on it yet.
 
 ### Kernel log
 

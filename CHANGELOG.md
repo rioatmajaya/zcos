@@ -328,6 +328,17 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **A clean exit records a status in the task registry** (F7, core system):
+  `SYS_TASK_EXIT` (5) now takes an exit status in `rdi`, and `TaskTable` records
+  it before the slot dies. `zc_abi::TaskInfo` grows to 24 bytes with
+  `exit_status`, reported by `SYS_TASK_INFO` and printed as `status=<n>` by the
+  shell's `ps`; `zc_user` gains `task_exit_with(status)`. Every clean exit logs
+  `task N: exited status M`, so the transcript shows outcomes too. A revive
+  resets the status, and a faulted task reads `0` because it never passed one.
+  This is exit-status propagation, not `wait`: there is still no parent-child
+  link and nothing blocks. The three checksums remain `0xd616ad79aaefb099`,
+  `0x6d66e82d0f2d6fb8`, and `0x78ebd6d359914da7`. See
+  [ADR 0060](docs/adr/0060-a-clean-exit-records-a-status.md).
 - **Task slots carry a generation, and `ps` reads the registry** (F7, core
   system): `TaskTable` now numbers each incarnation. A slot's generation is `1`
   on first spawn, rises by one on every revive, and saturates instead of

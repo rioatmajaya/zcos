@@ -35,6 +35,11 @@ pub struct TaskInfo {
     pub gid: u32,
     /// [`TASK_STATE_ALIVE`] and [`TASK_STATE_READY`] bits.
     pub flags: u32,
+    /// Exit status the task passed to `SYS_TASK_EXIT`.
+    ///
+    /// Meaningful once [`TaskInfo::is_alive`] is false. A faulted task never
+    /// passed a status, so it reads zero; the boot log records the fault.
+    pub exit_status: u32,
 }
 
 /// Number of bytes [`TaskInfo`] occupies on the wire.
@@ -53,6 +58,7 @@ impl TaskInfo {
         out[8..12].copy_from_slice(&self.uid.to_le_bytes());
         out[12..16].copy_from_slice(&self.gid.to_le_bytes());
         out[16..20].copy_from_slice(&self.flags.to_le_bytes());
+        out[20..24].copy_from_slice(&self.exit_status.to_le_bytes());
         Some(())
     }
 
@@ -71,6 +77,7 @@ impl TaskInfo {
             uid: u32::from_le_bytes(bytes[8..12].try_into().ok()?),
             gid: u32::from_le_bytes(bytes[12..16].try_into().ok()?),
             flags: u32::from_le_bytes(bytes[16..20].try_into().ok()?),
+            exit_status: u32::from_le_bytes(bytes[20..24].try_into().ok()?),
         })
     }
 
@@ -92,9 +99,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_wire_layout_is_twenty_bytes() {
+    fn the_wire_layout_is_twenty_four_bytes() {
         assert_eq!(TASK_SLOTS, 10);
-        assert_eq!(TASK_INFO_LEN, 20);
+        assert_eq!(TASK_INFO_LEN, 24);
         let mut bytes = [0u8; TASK_INFO_LEN];
         let info = TaskInfo {
             slot: 4,
@@ -102,6 +109,7 @@ mod tests {
             uid: 1,
             gid: 1,
             flags: TASK_STATE_ALIVE | TASK_STATE_READY,
+            exit_status: 0,
         };
         info.write_into(&mut bytes).unwrap();
         // Field order is fixed little-endian, so a reader never has to guess.
@@ -110,7 +118,25 @@ mod tests {
         assert_eq!(&bytes[8..12], &1u32.to_le_bytes());
         assert_eq!(&bytes[12..16], &1u32.to_le_bytes());
         assert_eq!(&bytes[16..20], &3u32.to_le_bytes());
+        assert_eq!(&bytes[20..24], &0u32.to_le_bytes());
         assert_eq!(TaskInfo::read_from(&bytes), Some(info));
+    }
+
+    #[test]
+    fn a_dead_task_carries_its_exit_status() {
+        let dead = TaskInfo {
+            slot: 9,
+            generation: 1,
+            uid: 1,
+            gid: 1,
+            flags: 0,
+            exit_status: 7,
+        };
+        let mut bytes = [0u8; TASK_INFO_LEN];
+        dead.write_into(&mut bytes).unwrap();
+        let decoded = TaskInfo::read_from(&bytes).unwrap();
+        assert_eq!(decoded.exit_status, 7);
+        assert!(!decoded.is_alive());
     }
 
     #[test]
@@ -121,6 +147,7 @@ mod tests {
             uid: 0,
             gid: 0,
             flags: TASK_STATE_ALIVE | TASK_STATE_READY,
+            exit_status: 0,
         };
         assert!(ready.is_alive());
         assert!(ready.is_ready());
@@ -149,6 +176,7 @@ mod tests {
             uid: 0,
             gid: 0,
             flags: 0,
+            exit_status: 0,
         };
         assert_eq!(info.write_into(&mut [0u8; 4]), None);
         assert_eq!(TaskInfo::read_from(&[0u8; 4]), None);

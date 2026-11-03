@@ -66,6 +66,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0057](0057-service-health-exposes-mechanism-counters.md) | Service health exposes kernel mechanism counters, not policy | Accepted |
 | [0058](0058-the-manifest-selects-the-supervised-set.md) | The boot manifest selects the supervised service set | Accepted |
 | [0059](0059-a-task-slot-carries-a-generation.md) | A task slot carries a generation so incarnations are distinguishable | Accepted |
+| [0060](0060-a-clean-exit-records-a-status.md) | A clean exit records a status in the task registry | Accepted |
 
 ## Adding a decision
 

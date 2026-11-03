@@ -26,6 +26,10 @@ pub const SYS_CAP_DELEGATE: u64 = 3;
 /// Allocates one physical frame and maps it into the caller.
 pub const SYS_MAP_FRAME: u64 = 4;
 /// Terminates the calling task; never returns.
+///
+/// `rdi` is the exit status, recorded in the task registry and readable
+/// through [`crate::SYS_TASK_INFO`] after the slot is dead. A caller that does
+/// not care passes `0`.
 pub const SYS_TASK_EXIT: u64 = 5;
 /// Writes a UTF-8 log string to the kernel log: args are pointer and length.
 pub const SYS_LOG_WRITE: u64 = 6;
@@ -236,7 +240,8 @@ pub const SYS_SERVICE_HEALTH: u64 = 42;
 /// prints, so a `ps`-style tool can enumerate the registry.
 ///
 /// The slot index is stable for life, so the **generation** is what tells two
-/// incarnations apart: a revive raises it.
+/// incarnations apart: a revive raises it. The `exit_status` field records what
+/// a dead task passed to [`crate::SYS_TASK_EXIT`].
 pub const SYS_TASK_INFO: u64 = 43;
 
 /// Packs a user and group id into the one word [`SYS_GETID`] returns.

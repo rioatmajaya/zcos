@@ -118,6 +118,10 @@ jobs:
         # from its first incarnation even though it keeps its slot index.
         grep -q "task 2: ps: slot 4 gen 2 uid=1 gid=1 up ready" build/boot.log
         grep -q "task 2: ps: slot 5 gen 2 uid=1 gid=1 up ready" build/boot.log
+        # A dead slot reports the status its task passed to SYS_TASK_EXIT, and
+        # the shell's own clean exit is recorded the same way.
+        grep -q "task 2: ps: slot 6 gen 1 uid=1 gid=1 down status=0" build/boot.log
+        grep -q "task 2: exited status 0" build/boot.log
         # `dmesg` reads the kernel's own ring, not the task transcript: the
         # banner only appears with a `task 2:` prefix when the shell copied it
         # out through SYS_LOG_READ.
