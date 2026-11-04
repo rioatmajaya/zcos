@@ -626,6 +626,19 @@ impl DescriptorTable {
         Ok(count)
     }
 
+    /// Moves the descriptor's offset to `offset`.
+    ///
+    /// The descriptor must be open; no further permission is checked, because
+    /// the offset only decides where the caller's own next read or write
+    /// lands. A seek past the end is allowed, and a later write fills the gap.
+    pub fn seek(&mut self, fd: u32, offset: u64) -> Result<(), VfsError> {
+        let Some(descriptor) = self.descriptor_mut(fd) else {
+            return Err(VfsError::BadFd);
+        };
+        descriptor.offset = offset;
+        Ok(())
+    }
+
     /// Closes a descriptor, freeing its slot for reuse.
     pub fn close(&mut self, fd: u32) -> Result<(), VfsError> {
         let Some(slot) = self.slots.iter_mut().find(|slot| match slot {
@@ -1398,6 +1411,34 @@ mod tests {
         );
         assert_eq!(descriptors.close(fd), Err(VfsError::BadFd));
         assert_eq!(descriptors.len(), 0);
+    }
+
+    #[test]
+    fn seek_repositions_the_read_offset() {
+        let table = table();
+        let resolved = table.resolve(b"/a").expect("file");
+        let mut descriptors = DescriptorTable::new();
+        let fd = descriptors
+            .open(resolved.fs, resolved.node, file_stat())
+            .expect("descriptor");
+        let mut buffer = [0u8; 2];
+
+        // Seeking back re-reads bytes the offset already passed.
+        assert_eq!(descriptors.read(fd, &mut buffer, Identity::ROOT), Ok(2));
+        assert_eq!(&buffer, b"ab");
+        descriptors.seek(fd, 0).expect("seek");
+        assert_eq!(descriptors.read(fd, &mut buffer, Identity::ROOT), Ok(2));
+        assert_eq!(&buffer, b"ab");
+        // Seeking directly finds a middle byte.
+        descriptors.seek(fd, 1).expect("seek");
+        assert_eq!(descriptors.read(fd, &mut buffer[..1], Identity::ROOT), Ok(1));
+        assert_eq!(&buffer[..1], b"b");
+        // Seeking past the end reads as end-of-file.
+        descriptors.seek(fd, 99).expect("seek");
+        assert_eq!(descriptors.read(fd, &mut buffer, Identity::ROOT), Ok(0));
+        // A closed descriptor cannot be moved.
+        descriptors.close(fd).expect("close");
+        assert_eq!(descriptors.seek(fd, 0), Err(VfsError::BadFd));
     }
 
     #[test]

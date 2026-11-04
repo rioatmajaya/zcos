@@ -2,9 +2,9 @@
 //!
 //! Reads keystrokes with blocking serial reads, edits a single line with
 //! backspace support, and runs `help`, `echo`, `cat`, `ls`, `stat`, `write`,
-//! `rm`, `mkdir`, `rmdir`, `mv`, `sync`, `tmp`, `persist`, `chmod`, `mount`,
-//! `umount`, `id`, `svc`, `ps`, `dmesg`, and `exit`. Output goes through the
-//! log syscall, so the transcript appears in the kernel serial log.
+//! `append`, `rm`, `mkdir`, `rmdir`, `mv`, `sync`, `tmp`, `persist`, `chmod`,
+//! `mount`, `umount`, `id`, `svc`, `ps`, `dmesg`, and `exit`. Output goes
+//! through the log syscall, so the transcript appears in the kernel serial log.
 //!
 //! `id` asks the kernel for this task's user and group ids plus its session.
 //! The shell runs as an unprivileged user, so `id` is the observable side of
@@ -53,7 +53,7 @@ use zc_user::{
     identity_gid, identity_uid, log, log_parts, log_read, mount, open, poweroff, read, readdir,
     send_to, serial_read, service_faults, service_health, service_is_ready, service_is_up,
     service_restarts, session, stat, task_exit_with, task_info, umount, unlink, mkdir, rmdir,
-    rename, sync, write,
+    rename, seek, sync, write,
 };
 
 /// Contents `persist` writes and expects to read back.
@@ -293,7 +293,7 @@ fn run(line: &[u8]) -> bool {
     }
     match argv[0] {
         b"help" => {
-            log("Commands: help echo cat ls stat write rm mkdir rmdir mv sync tmp persist chmod mount umount id svc ps dmesg poweroff exit\n");
+            log("Commands: help echo cat ls stat write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc ps dmesg poweroff exit\n");
         }
         b"echo" => {
             for index in 1..count {
@@ -481,6 +481,48 @@ fn run(line: &[u8]) -> bool {
                 // A missing source, a denied parent, a directory target, or a
                 // cross-mount move all surface as `u64::MAX`.
                 log("mv: cannot move\n");
+            }
+        }
+        b"append" => {
+            if count < 3 {
+                log("usage: append <file> <text>\n");
+                return false;
+            }
+            let path = core::str::from_utf8(argv[1]).unwrap_or("");
+            let mut fd = open(path);
+            if fd == u64::MAX {
+                // A missing file is created on demand, like `write`.
+                if create(path) == u64::MAX {
+                    log("append: cannot create\n");
+                    return false;
+                }
+                fd = open(path);
+            }
+            if fd == u64::MAX {
+                log("append: no such file\n");
+                return false;
+            }
+            // Seek to the current end, then write there: the file grows
+            // instead of being overwritten from offset zero.
+            let mut info = Stat {
+                kind: 0,
+                mode: 0,
+                size: 0,
+                node: 0,
+                uid: 0,
+                gid: 0,
+            };
+            if !stat(path, &mut info) || seek(fd, info.size) != 0 {
+                close(fd);
+                log("append: cannot position\n");
+                return false;
+            }
+            let wrote = write(fd, argv[2]);
+            close(fd);
+            if wrote == u64::MAX {
+                log("append: failed\n");
+            } else {
+                log("append: ok\n");
             }
         }
         b"write" => {

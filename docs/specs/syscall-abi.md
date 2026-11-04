@@ -23,8 +23,8 @@ filesystem exchange page (see [`server-protocol.md`](server-protocol.md)).
 
 ## Syscall table
 
-Numbers are stable and never reused. `SYS_SYNC` (49) is the highest
-assigned number; 50 and above are rejected.
+Numbers are stable and never reused. `SYS_SEEK` (50) is the highest
+assigned number; 51 and above are rejected.
 
 Two numbers are **declared but not yet implemented**: `SYS_YIELD` (0) and
 `SYS_MAP_FRAME` (4) are recognized by the dispatch table but have no handler, so
@@ -83,6 +83,7 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 47 | `SYS_RMDIR` | path ptr, length | 0 | `u64::MAX` |
 | 48 | `SYS_RENAME` | old ptr, old length, new ptr, new length (`r10`) | 0 | `u64::MAX` |
 | 49 | `SYS_SYNC` | — | 0 | `u64::MAX` |
+| 50 | `SYS_SEEK` | descriptor, absolute offset | 0 | `u64::MAX` |
 
 ### Clock
 
@@ -274,6 +275,15 @@ flushes the device, and stamps the superblock clean, so a crash after a
 successful sync needs no recovery. It takes no arguments and needs no
 authority: durability is a property of the mount, not of the caller. A device
 error returns `u64::MAX`.
+
+`SYS_SEEK` (50) moves an open descriptor's offset: `rdi` is the descriptor and
+`rsi` the absolute byte offset. `SYS_READ` and `SYS_WRITE` always use that
+offset and advance it, so a seek is how a caller re-reads, writes at a chosen
+position, or appends. A seek past the end is allowed; a later write fills the
+gap. Only an open descriptor is required — the offset decides where the
+caller's own next read or write lands, so no separate permission is checked.
+The shell's `append` uses it: it stats the file for its size, seeks there, and
+writes, so bytes grow instead of being overwritten from zero.
 
 ### `SYS_WINDOW_CLOSE`
 

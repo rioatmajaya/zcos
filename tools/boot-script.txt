@@ -33,6 +33,9 @@ stat /tmp/dir
 write /tmp/a ZCMV
 mv /tmp/a /tmp/b
 stat /tmp/b
+write /tmp/ap A
+append /tmp/ap B
+cat /tmp/ap
 ls /tmp
 stat /dev/blk
 id

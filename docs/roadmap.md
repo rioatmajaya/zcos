@@ -495,7 +495,8 @@ VFS → write path → journaling → `fsck`**.
   the VFS path walk reaches past one level. `task 2: rmdir: cannot remove` then
   `task 2: rmdir: removed /tmp/dir` show a non-empty directory refused and an
   empty one removed. `task 2: mv: moved /tmp/a -> /tmp/b` and the following
-  `stat` show a rename within the same filesystem. The `devfs` and `tmpfs` host
+  `stat` show a rename within the same filesystem. `task 2: append: ok` and
+  the `cat` after it show a seek-to-end append. The `devfs` and `tmpfs` host
   tests pass.
 - F7j: `stat /tmp/scratch` prints the mode and owner the kernel decides from,
   `task 2: /tmp/scratch: file, 8 bytes, mode 0644, uid 1 gid 1`, and the

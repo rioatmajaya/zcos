@@ -1139,6 +1139,20 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 }
             }
         }
+        Ok(Action::Seek) => {
+            let me = tasks.current();
+            let fd = regs.rdi as u32;
+            // SAFETY: as in `Open`.
+            let table = unsafe { &mut (*core::ptr::addr_of_mut!(FDS))[me] };
+            // The offset moves where this caller's own next read or write
+            // lands, so only the open descriptor itself is required.
+            regs.set_result(if table.seek(fd, regs.rsi).is_ok() {
+                0
+            } else {
+                u64::MAX
+            });
+            0
+        }
         Ok(Action::Create) => {
             let me = tasks.current();
             let path = match validate_user_slice(tasks, regs.rdi, regs.rsi) {

@@ -300,6 +300,15 @@ pub const SYS_RENAME: u64 = 48;
 /// `u64::MAX` when a filesystem reports a device error.
 pub const SYS_SYNC: u64 = 49;
 
+/// Moves an open descriptor's offset.
+///
+/// `rdi` is the descriptor and `rsi` the absolute byte offset. A seek past the
+/// end is allowed, and a later write fills the gap. Returns `0`, or `u64::MAX`
+/// when the descriptor is not open. No permission beyond the open itself is
+/// checked: the offset only decides where the caller's own next read or write
+/// lands.
+pub const SYS_SEEK: u64 = 50;
+
 /// Packs a user and group id into the one word [`SYS_GETID`] returns.
 #[must_use]
 pub const fn identity_word(uid: u32, gid: u32) -> u64 {
@@ -428,6 +437,7 @@ mod tests {
         assert_eq!(SYS_RMDIR, 47);
         assert_eq!(SYS_RENAME, 48);
         assert_eq!(SYS_SYNC, 49);
+        assert_eq!(SYS_SEEK, 50);
         assert_eq!(READDIR_ENTRY, 0);
         assert_eq!(READDIR_END, 1);
     }

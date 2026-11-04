@@ -22,6 +22,7 @@ use zc_abi::{
     SYS_RMDIR,
     SYS_RENAME,
     SYS_SYNC,
+    SYS_SEEK,
     SYS_YIELD,
     SYS_SESSION,
 };
@@ -308,6 +309,7 @@ fn exercise_mechanisms(alloc: &mut FrameAllocator<'_>, usable: u64) {
         (SYS_RMDIR, Action::Rmdir),
         (SYS_RENAME, Action::Rename),
         (SYS_SYNC, Action::Sync),
+        (SYS_SEEK, Action::Seek),
         (SYS_LOG_READ, Action::LogRead),
         (SYS_CHMOD, Action::Chmod),
         (SYS_SURFACE_CREATE, Action::SurfaceCreate),

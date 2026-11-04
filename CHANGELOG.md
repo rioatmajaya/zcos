@@ -328,6 +328,16 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **A file offset is explicit and movable** (F7i, core system): `SYS_SEEK`
+  (50) sets an open descriptor's offset, so a file can be re-read, written at a
+  chosen position, or appended. The offset lives in the descriptor, so both
+  filesystems share the behavior and no format changed; a seek past the end is
+  allowed and a later write fills the gap. The call needs only an open
+  descriptor, because the offset decides where the caller's own next read or
+  write lands. The shell gains `append <file> <text>`, which stats the file for
+  its size and seeks there before writing. The three checksums remain
+  `0xd616ad79aaefb099`, `0x6d66e82d0f2d6fb8`, and `0x78ebd6d359914da7`. See
+  [ADR 0067](docs/adr/0067-a-file-offset-is-explicit-and-movable.md).
 - **A persistent removal is a log record** (F7g–F7j, core system): `zcfs` gains
   a `KIND_UNLINK` record, so `SYS_UNLINK` now works on `/data` instead of
   reporting failure. `Volume::unlink` appends a payload-free record naming the

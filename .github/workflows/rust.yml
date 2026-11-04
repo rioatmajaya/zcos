@@ -63,7 +63,7 @@ jobs:
         grep -q "task 1: consumer received 2000" build/boot.log
         grep -q "task 1: hello verified" build/boot.log
         grep -q "task 0: manifest ok" build/boot.log
-        grep -q "task 2: Commands: help echo cat ls stat write rm mkdir rmdir mv sync tmp persist chmod mount umount id svc ps dmesg poweroff exit" build/boot.log
+        grep -q "task 2: Commands: help echo cat ls stat write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc ps dmesg poweroff exit" build/boot.log
         grep -q "task 2: hello os" build/boot.log
         grep -q "task 2: hello from the ZC OS initramfs" build/boot.log
         grep -q "task 2: hello.txt: file, 31 bytes" build/boot.log
@@ -158,6 +158,10 @@ jobs:
         # under its new name.
         grep -q "task 2: mv: moved /tmp/a -> /tmp/b" build/boot.log
         grep -q "task 2: /tmp/b: file, 4 bytes, mode 0644, uid 1 gid 1" build/boot.log
+        # `append` seeks to the current end, so the bytes grow instead of
+        # overwriting from offset zero.
+        grep -q "task 2: append: ok" build/boot.log
+        grep -q "task 2: AB" build/boot.log
         grep -q "task 4: blk: zcfs stopped" build/boot.log
         grep -q "user: 10 address spaces" build/boot.log
         grep -q "device: 3 roles, 7 grants (blk 0, kbd 4, devmgr 3)" build/boot.log

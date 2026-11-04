@@ -584,7 +584,10 @@ trustworthy core.
    record, so `rm /data/probe` survives an explicit remount, and `SYS_SYNC`
    flushes and stamps the volume clean on demand
    ([ADR 0066](adr/0066-a-persistent-removal-is-a-log-record.md)). Persistent
-   directories and rename remain. The three proof checksums still hold.
+   directories and rename remain. A descriptor's offset is now explicit and
+   movable through `SYS_SEEK`, so a file can be updated in place or appended
+   ([ADR 0067](adr/0067-a-file-offset-is-explicit-and-movable.md)). The three
+   proof checksums still hold.
 5. Do not start the app catalog, widget toolkit, or host runner yet.
 6. Keep `build/zcos.img` human-testable and keep the three proof images locked.
 
