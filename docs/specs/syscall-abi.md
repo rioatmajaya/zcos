@@ -262,9 +262,12 @@ only where the bits allow; ownership is a later, on-disk-format decision.
 `SYS_RMDIR` (47) removes an **empty** directory, behind the same parent check
 `SYS_UNLINK` uses. A directory that still holds entries is refused, so a
 removal cannot orphan children; `SYS_UNLINK` still refuses a directory, so the
-two calls stay distinct. `tmpfs` implements it and reuses the freed slot; a
-filesystem without directories keeps the trait default, which reports failure
-rather than pretending the directory is gone.
+two calls stay distinct. `tmpfs` implements it and reuses the freed slot.
+`zcfs` appends a payload-free `RMDIR` record naming the node — the empty check
+runs on the live table *before* the append, so a failed call leaves no record
+a replay could not honour — and the removal replays after a remount, its slot
+free for a later create. A filesystem without directories keeps the trait
+default, which reports failure rather than pretending the directory is gone.
 
 `SYS_RENAME` (48) renames or moves an entry. It takes two paths — the old in
 `rdi`/`rsi` and the new in `rdx`/`r10` — resolves both parents, and checks write

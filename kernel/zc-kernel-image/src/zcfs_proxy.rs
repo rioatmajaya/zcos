@@ -44,11 +44,12 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering, compiler_fence};
 use zc_abi::{
     FS_EXCHANGE_DATA, FS_EXCHANGE_DATA_MAX, FS_EXCHANGE_NODE, FS_EXCHANGE_OFFSET, FS_EXCHANGE_OP,
     FS_EXCHANGE_PAYLOAD, FS_EXCHANGE_RESULT, FS_EXCHANGE_SEQ, FS_EXCHANGE_TASK, FS_OP_CREATE,
-    FS_OP_FLUSH, FS_OP_LIST, FS_OP_LOOKUP, FS_OP_MOUNT, FS_OP_READ, FS_OP_STAT, FS_OP_SYNC,
-    FS_OP_UNLINK, FS_OP_UNMOUNT,
+    FS_OP_FLUSH, FS_OP_LIST, FS_OP_LOOKUP, FS_OP_MOUNT, FS_OP_READ, FS_OP_RMDIR, FS_OP_STAT,
+    FS_OP_SYNC, FS_OP_UNLINK, FS_OP_UNMOUNT,
     FS_OP_WRITE, FS_STATUS_BAD_BUFFER, FS_STATUS_BAD_FD, FS_STATUS_BAD_PATH, FS_STATUS_CORRUPT,
-    FS_STATUS_IO, FS_STATUS_NOT_A_DIRECTORY, FS_STATUS_NOT_FOUND, FS_STATUS_NOT_SUPPORTED,
-    FS_STATUS_NO_SPACE, FS_STATUS_OK, FS_STATUS_TABLE_FULL, KIND_DIR, STAT_LEN, Stat,
+    FS_STATUS_IO, FS_STATUS_NOT_A_DIRECTORY, FS_STATUS_NOT_EMPTY, FS_STATUS_NOT_FOUND,
+    FS_STATUS_NOT_SUPPORTED, FS_STATUS_NO_SPACE, FS_STATUS_OK, FS_STATUS_TABLE_FULL, KIND_DIR,
+    STAT_LEN, Stat,
 };
 use zc_kernel::perms::Identity;
 use zc_kernel::vfs::{FileSystem, NodeId, VfsError};
@@ -394,6 +395,15 @@ impl FileSystem for Proxy {
         decode(reply.status).map(|()| reply.result)
     }
 
+    fn rmdir(&self, dir: NodeId, name: &[u8], _owner: Identity) -> Result<(), VfsError> {
+        let me = FS_CALLER.load(Ordering::Relaxed);
+        // The domain resolves the child and asks the table: nonzero content
+        // keeps the directory alive (`FS_STATUS_NOT_EMPTY`), a missing name is
+        // `NotFound`, and an `RMDIR` record lands only for a real removal.
+        let reply = exchange(me, FS_OP_RMDIR, dir, 0, name, name.len() as u32, &mut [])?;
+        decode(reply.status)
+    }
+
     fn sync(&self) -> Result<(), VfsError> {
         sync()
     }
@@ -565,6 +575,8 @@ fn decode(status: u32) -> Result<(), VfsError> {
         FS_STATUS_OK => Ok(()),
         FS_STATUS_NOT_FOUND => Err(VfsError::NotFound),
         FS_STATUS_NOT_A_DIRECTORY => Err(VfsError::NotADirectory),
+        // A directory removal found the directory still holding entries.
+        FS_STATUS_NOT_EMPTY => Err(VfsError::NotEmpty),
         FS_STATUS_BAD_PATH => Err(VfsError::BadPath),
         FS_STATUS_NOT_SUPPORTED => Err(VfsError::NotSupported),
         FS_STATUS_CORRUPT => Err(VfsError::Corrupt),

@@ -171,6 +171,23 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Fixed
 
+- **A full COM1 receive ring kept its newest bytes** (kernel). The headless
+  boot harness re-sends the whole scripted command body whenever the guest
+  looks idle, so a slow boot queues passes worth of bytes in the 2048-byte
+  COM1 receive ring while the shell consumes serial input one byte per
+  syscall. The ring's drop-the-incoming-byte policy then kept shedding the
+  freshly appended bytes — eventually the terminating `exit` — so the pass
+  a shell ran could end mid-script with torn lines, and the guest watchdog
+  fired at ~5020 ticks in the failing runs. Growing the script by three
+  `rmdir` commands made the loss deterministic and wedged `--fm`; the loss
+  point moved with timing, so no filesystem change ever reproved it. The
+  receive ring now follows the terminal rule the feeder assumes: a full
+  ring sheds its *oldest* byte, which for a stream of retransmissions is
+  the redundant head of an earlier pass, never the terminator, and the
+  poll drains the whole UART FIFO every tick instead of stopping at the
+  first full ring. See `StreamRing` beside `ByteRing` in
+  kernel/zc-kernel/src/irq.rs. The driver-domain ring at `INPUT_RING_VIRT`
+  and the per-window queues keep their drop-the-newest rules.
 - **A faulting or stopped service kept its runtime authority** (F4). Fault,
   exit, and service stop released IRQ claims, the keyboard ring, and I/O ports,
   but left brokered MMIO regions, pixel surfaces, window links, and the
@@ -328,6 +345,19 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **A persistent directory removal is its own record** (F7i, core system):
+  `SYS_RMDIR` now works on `/data`. zcfs gains the payload-free `KIND_RMDIR`
+  record, naming the node in the header exactly as `UNLINK` names a file, and
+  the block domain serves it as `FS_OP_RMDIR` (13) with the unlink shape. The
+  empty check runs on the live table *before* the append, so a failed call
+  writes nothing a replay could not honour; the replay rejects a file or a
+  non-empty directory named by the record as a malformed log and clamps the
+  head like any other inconsistency. A new `FS_STATUS_NOT_EMPTY` (11) carries
+  the refusal honestly instead of misreporting corruption. The scripted boot
+  unmounts, remounts, rmdirs `/data/atlas`, then unmounts and remounts again
+  to show it still gone. The three checksums remain
+  `0xd616ad79aaefb099`, `0x6d66e82d0f2d6fb8`, and `0x78ebd6d359914da7`. See
+  [ADR 0069](docs/adr/0069-a-persistent-directory-removal-is-its-own-record.md).
 - **A persistent volume holds directories** (F7i, core system): `SYS_MKDIR`
   now works on `/data`. A zcfs `CREATE` record already carried the parent and
   the mode, with the type bit deciding the replayed kind, so the kernel proxy

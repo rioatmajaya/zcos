@@ -77,6 +77,12 @@ pub const FS_OP_LIST: u32 = 10;
 pub const FS_OP_UNLINK: u32 = 11;
 /// Request opcode: write back, flush, and stamp the volume clean.
 pub const FS_OP_SYNC: u32 = 12;
+/// Request opcode: remove an empty directory.
+///
+/// The shape is the one `FS_OP_UNLINK` uses — the node field names the
+/// directory, the payload carries the name — and the domain resolves the
+/// child before deciding whether it is an empty directory at all.
+pub const FS_OP_RMDIR: u32 = 13;
 
 /// Reply status: the operation succeeded.
 pub const FS_STATUS_OK: u32 = 0;
@@ -100,6 +106,8 @@ pub const FS_STATUS_BAD_BUFFER: u32 = 8;
 pub const FS_STATUS_NO_SPACE: u32 = 9;
 /// Reply status: the block device reported an error.
 pub const FS_STATUS_IO: u32 = 10;
+/// Reply status: the directory still holds entries.
+pub const FS_STATUS_NOT_EMPTY: u32 = 11;
 
 /// Interrupt source index of the PS/2 keyboard line.
 ///
@@ -265,6 +273,10 @@ mod tests {
             FS_OP_MOUNT,
             FS_OP_UNMOUNT,
             FS_OP_STOP,
+            FS_OP_LIST,
+            FS_OP_UNLINK,
+            FS_OP_SYNC,
+            FS_OP_RMDIR,
         ];
         for (index, op) in ops.iter().enumerate() {
             assert_eq!(*op as usize, index + 1);
@@ -281,6 +293,7 @@ mod tests {
             FS_STATUS_BAD_BUFFER,
             FS_STATUS_NO_SPACE,
             FS_STATUS_IO,
+            FS_STATUS_NOT_EMPTY,
         ];
         for (index, status) in statuses.iter().enumerate() {
             assert_eq!(*status as usize, index);

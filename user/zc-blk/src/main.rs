@@ -31,10 +31,11 @@ use core::sync::atomic::{Ordering, compiler_fence};
 use zc_abi::{
     DIRENT_LEN, DirEntry, FS_EXCHANGE_DATA, FS_EXCHANGE_NODE, FS_EXCHANGE_OFFSET, FS_EXCHANGE_OP,
     FS_EXCHANGE_PAYLOAD, FS_EXCHANGE_RESULT, FS_EXCHANGE_VIRT, FS_OP_CREATE, FS_OP_FLUSH,
-    FS_OP_LIST, FS_OP_LOOKUP, FS_OP_MOUNT, FS_OP_READ, FS_OP_STAT, FS_OP_STOP, FS_OP_SYNC,
-    FS_OP_UNLINK, FS_OP_UNMOUNT,
+    FS_OP_LIST, FS_OP_LOOKUP, FS_OP_MOUNT, FS_OP_READ, FS_OP_RMDIR, FS_OP_STAT, FS_OP_STOP,
+    FS_OP_SYNC, FS_OP_UNLINK, FS_OP_UNMOUNT,
     FS_OP_WRITE, FS_STATUS_BAD_BUFFER, FS_STATUS_BAD_PATH, FS_STATUS_CORRUPT,
-    FS_STATUS_NOT_A_DIRECTORY, FS_STATUS_NOT_FOUND, FS_STATUS_NOT_SUPPORTED, FS_STATUS_NO_SPACE,
+    FS_STATUS_NOT_A_DIRECTORY, FS_STATUS_NOT_EMPTY, FS_STATUS_NOT_FOUND, FS_STATUS_NOT_SUPPORTED,
+    FS_STATUS_NO_SPACE,
     FS_STATUS_OK, FS_STATUS_TABLE_FULL, INFO_LEN, INFO_QUEUE0, INFO_VIRT, IPC_DISCOVERY, IPC_FS,
     IPC_FS_REPLY, QUEUE_VIRT, STAT_LEN,
 };
@@ -936,6 +937,7 @@ fn status_of(error: ZcfsError) -> u32 {
     match error {
         ZcfsError::NotFound => FS_STATUS_NOT_FOUND,
         ZcfsError::NotADirectory => FS_STATUS_NOT_A_DIRECTORY,
+        ZcfsError::NotEmpty => FS_STATUS_NOT_EMPTY,
         ZcfsError::BadPath => FS_STATUS_BAD_PATH,
         ZcfsError::TableFull => FS_STATUS_TABLE_FULL,
         ZcfsError::NoSpace => FS_STATUS_NO_SPACE,
@@ -1116,6 +1118,28 @@ fn serve_op(
                     log("blk: synced\n");
                     FS_STATUS_OK
                 }
+                Err(error) => status_of(error),
+            }
+        }
+        FS_OP_RMDIR => {
+            // The shape is the one `FS_OP_UNLINK` uses: the node field names
+            // the directory, the payload is the name, and the domain resolves
+            // the child itself, because the empty check is a table question.
+            if payload_len == 0 || payload_len > zcfs::NAME_MAX {
+                return FS_STATUS_BAD_PATH;
+            }
+            ex_read_bytes(&mut buffer[..payload_len]);
+            let child = match volume.lookup(node, &buffer[..payload_len]) {
+                Ok(found) => found,
+                Err(error) => return status_of(error),
+            };
+            let mut io = CacheIo {
+                device: &mut *device,
+                cache: &mut *cache,
+                flush_offered,
+            };
+            match volume.rmdir(&mut io, child) {
+                Ok(()) => FS_STATUS_OK,
                 Err(error) => status_of(error),
             }
         }

@@ -100,6 +100,83 @@ impl<const CAP: usize> Default for ByteRing<CAP> {
     }
 }
 
+/// A byte ring that keeps the *newest* bytes when it overflows.
+///
+/// The kernel's COM1 receive path uses this instead of [`ByteRing`]: the
+/// scripted boot harness re-sends its whole command body while the guest is
+/// busy, so a full receive ring tends to hold retransmissions. Dropping the
+/// byte at the head sheds the redundant beginnings of earlier passes, which
+/// the consumer was never going to parse; dropping the newest byte, as
+/// [`ByteRing`] does, would shed the freshly appended terminator — one byte
+/// a consumer can never recover. The two rules must never swap: the shared
+/// driver ring still favours the oldest keystrokes for a live session,
+/// where nothing retransmits.
+pub struct StreamRing<const CAP: usize> {
+    bytes: [u8; CAP],
+    /// Index of the oldest surviving byte.
+    head: usize,
+    /// Number of surviving bytes.
+    len: usize,
+}
+
+impl<const CAP: usize> StreamRing<CAP> {
+    /// Creates an empty ring.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            bytes: [0; CAP],
+            head: 0,
+            len: 0,
+        }
+    }
+
+    /// Appends one byte, dropping the oldest byte when the ring is full.
+    ///
+    /// The append always succeeds: a full ring advances its head so the
+    /// newest byte lands where the oldest began. The surviving window keeps
+    /// its internal order, so a consumer reading from the head still reads
+    /// what it slurped in sequence.
+    pub fn push(&mut self, byte: u8) {
+        if CAP == 0 {
+            return;
+        }
+        let slot = (self.head + self.len) % CAP;
+        self.bytes[slot] = byte;
+        if self.len < CAP {
+            self.len += 1;
+        } else {
+            self.head = (self.head + 1) % CAP;
+        }
+    }
+
+    /// Removes the oldest surviving byte, or `None` when empty.
+    pub fn pop(&mut self) -> Option<u8> {
+        if self.len == 0 {
+            return None;
+        }
+        let byte = self.bytes[self.head];
+        self.head = (self.head + 1) % CAP.max(1);
+        self.len -= 1;
+        Some(byte)
+    }
+
+    /// Returns whether the ring holds no byte.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Returns the number of surviving bytes.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+}
+
+impl<const CAP: usize> Default for StreamRing<CAP> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Why a claim request was refused.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrqError {
@@ -380,6 +457,41 @@ mod tests {
         assert!(size_of::<SharedInputRing>() <= 4096);
         assert_eq!(align_of::<SharedInputRing>(), align_of::<usize>());
         assert_eq!(INPUT_CAP, 2048);
+    }
+
+    #[test]
+    fn a_full_stream_ring_sheds_the_oldest_byte_and_keeps_the_tail() {
+        // The COM1 ring's whole point under a flood: the pushed order wins.
+        let mut ring = StreamRing::<4>::new();
+        for byte in [1u8, 2, 3, 4] {
+            ring.push(byte);
+        }
+        assert_eq!(ring.len(), 4);
+        // Overflow drops the oldest byte, not the newest: five and six take
+        // over the slots one and two held, and the survivors stay in order.
+        ring.push(5);
+        ring.push(6);
+        assert_eq!(ring.len(), 4);
+        assert_eq!(ring.pop(), Some(3));
+        assert_eq!(ring.pop(), Some(4));
+        // Over-and-over overflow keeps the ring available: later pushes land
+        // and the wrap catches exactly where it left off.
+        for byte in [7u8, 8] {
+            ring.push(byte);
+        }
+        assert_eq!(ring.pop(), Some(5));
+        assert_eq!(ring.pop(), Some(6));
+        assert_eq!(ring.pop(), Some(7));
+        assert_eq!(ring.pop(), Some(8));
+        assert!(ring.is_empty());
+    }
+
+    #[test]
+    fn a_zero_capacity_stream_ring_holds_nothing() {
+        let mut ring = StreamRing::<0>::new();
+        ring.push(1);
+        assert!(ring.is_empty());
+        assert_eq!(ring.pop(), None);
     }
 
     #[test]

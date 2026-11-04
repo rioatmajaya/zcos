@@ -107,6 +107,7 @@ copying through four-word messages. All fields are little-endian.
 | 4 | `FS_OP_WRITE` | 9 | `FS_OP_STOP` |
 | 5 | `FS_OP_CREATE` | 10 | `FS_OP_LIST` |
 | 11 | `FS_OP_UNLINK` | 12 | `FS_OP_SYNC` |
+| 13 | `FS_OP_RMDIR` | | |
 
 `FS_OP_STOP` is sent by the shell directly on `IPC_FS`; the domain flushes and
 exits **without replying**.
@@ -115,6 +116,13 @@ exits **without replying**.
 domain looks the name up, appends a durable `UNLINK` record, and drops the
 node, so the removal replays after a remount and the freed slot can be reused
 by a later create.
+
+`FS_OP_RMDIR` carries the directory in `NODE` and the name in the payload — the
+shape `FS_OP_UNLINK` uses. The domain resolves the child, checks that it is an
+empty directory, appends a payload-free `RMDIR` record, and drops the node, so
+the removal replays after a remount. A directory with entries answers
+`FS_STATUS_NOT_EMPTY`; the empty check runs on the live table before the
+record is written, so a failed call writes nothing.
 
 `FS_OP_SYNC` writes back every dirty sector, flushes the device, and stamps the
 superblock clean. It is what `SYS_SYNC` sends; unlike `FS_OP_UNMOUNT` it keeps
@@ -143,6 +151,7 @@ filesystem's table order, which for zcfs is creation and replay order.
 | 3 | `FS_STATUS_BAD_PATH` | 9 | `FS_STATUS_NO_SPACE` |
 | 4 | `FS_STATUS_NOT_SUPPORTED` | 10 | `FS_STATUS_IO` |
 | 5 | `FS_STATUS_CORRUPT` | | |
+| 11 | `FS_STATUS_NOT_EMPTY` | | |
 
 ### Mount id
 

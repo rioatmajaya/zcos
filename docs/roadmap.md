@@ -499,7 +499,10 @@ VFS → write path → journaling → `fsck`**.
   the `cat` after it show a seek-to-end append, and `task 2: mkdir: made
   /data/atlas` with the `stat` before *and after* an explicit
   `umount`/`mount` shows a directory on the persistent volume surviving a
-  replay from disk. The `devfs`, `tmpfs`, and `zcfs` host tests pass.
+  replay from disk. `task 2: rmdir: removed /data/atlas` and the following
+  `stat: no such file` after another `umount`/`mount` show the durable
+  removal of that empty directory. The `devfs`, `tmpfs`, and `zcfs` host
+  tests pass.
 - F7j: `stat /tmp/scratch` prints the mode and owner the kernel decides from,
   `task 2: /tmp/scratch: file, 8 bytes, mode 0644, uid 1 gid 1`, and the
   unprivileged shell's `chmod` round trip is observable: `task 2: chmod: ok`

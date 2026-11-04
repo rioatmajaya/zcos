@@ -152,12 +152,24 @@ impl Write for TaskWriter {
     }
 }
 
+/// Byte capacity of the receive ring.
+///
+/// Sized like [`zc_kernel::irq::INPUT_CAP`] so one retransmitted scripted
+/// body passes whole; with overwrite-oldest semantics an even longer body
+/// only sheds bytes from its own head, never the terminator.
+const INPUT_RING_CAP: usize = 2048;
+
 /// Receive ring drained by the timer poll.
 ///
-/// Bytes from COM1 and from the keyboard driver domain share one ring, so a
-/// task reading serial input sees one stream regardless of origin. The ring
-/// type is shared with the driver domain across the privilege boundary.
-static mut INPUT_RING: zc_kernel::irq::SharedInputRing = zc_kernel::irq::SharedInputRing::new();
+/// COM1 input alone lands here. The keyboard driver domain drains its own
+/// ring page — mapped into the domain at `INPUT_RING_VIRT` — toward the
+/// window clients, so the two streams never share a buffer. Unlike that
+/// shared ring, this one keeps its newest bytes when it fills: the headless
+/// harness re-sends the whole command body while the guest is busy, so a
+/// full receive ring holds retransmissions and the byte that must survive
+/// overflow is the newly appended terminator the shell cannot recover.
+static mut INPUT_RING: zc_kernel::irq::StreamRing<INPUT_RING_CAP> =
+    zc_kernel::irq::StreamRing::new();
 
 /// Reads one pending byte without blocking.
 ///
@@ -169,17 +181,17 @@ fn try_read_byte() -> Option<u8> {
     Some(inb(COM1))
 }
 
-/// Moves pending COM1 bytes into the receive ring.
+/// Moves every pending COM1 byte into the receive ring.
 ///
-/// Called once per timer tick; bytes arriving faster than the ring are
-/// dropped newest-first so early keystrokes survive bursts.
+/// Called once per timer tick. The ring sheds its own oldest byte when it
+/// fills, so the whole UART FIFO can drain every tick: the loop never stops
+/// early, and a burst the ring cannot hold sheds retransmission tails
+/// rather than the line the shell is waiting on.
 pub fn poll_input() {
     // SAFETY: owned here; the poll runs with interrupts masked.
     let ring = unsafe { &mut *core::ptr::addr_of_mut!(INPUT_RING) };
     while let Some(byte) = try_read_byte() {
-        if !ring.push(byte) {
-            break;
-        }
+        ring.push(byte);
     }
 }
 

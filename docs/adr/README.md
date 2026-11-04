@@ -75,6 +75,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0066](0066-a-persistent-removal-is-a-log-record.md) | A persistent removal is a log record | Accepted |
 | [0067](0067-a-file-offset-is-explicit-and-movable.md) | A file offset is explicit and movable | Accepted |
 | [0068](0068-a-persistent-volume-holds-directories.md) | A persistent volume holds directories | Accepted |
+| [0069](0069-a-persistent-directory-removal-is-its-own-record.md) | A persistent directory removal is its own record | Accepted |
 
 ## Adding a decision
 

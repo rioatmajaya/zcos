@@ -62,6 +62,8 @@ pub const KIND_DATA: u32 = 2;
 
 /// Record kind that removes a node.
 pub const KIND_UNLINK: u32 = 3;
+/// Record kind: clears an **empty** directory, payload-free.
+pub const KIND_RMDIR: u32 = 4;
 
 /// Node id of the root directory.
 pub const ROOT_NODE: u64 = 1;
@@ -96,6 +98,8 @@ pub enum ZcfsError {
     NotFound,
     /// A directory operation was applied to a node that is not a directory.
     NotADirectory,
+    /// The directory is not empty, so a removal would orphan its children.
+    NotEmpty,
     /// A name is empty, too long, or not usable.
     BadPath,
     /// The in-memory table has no free slot.
@@ -596,6 +600,50 @@ impl<const N: usize> Table<N> {
         Ok(())
     }
 
+    /// Returns whether `node` is a directory with no entries.
+    ///
+    /// Entries keep their directory alive: a removal cannot orphan children.
+    /// The implicit root context of node zero carries no record of its own to
+    /// remove, but its children keep it non-empty just the same.
+    pub fn is_empty_directory(&self, node: u64) -> bool {
+        self.is_directory(node)
+            && !self
+                .nodes
+                .iter()
+                .any(|child| child.used && child.parent == node)
+    }
+
+    /// Clears `node`, an **empty** directory, freeing its slot.
+    ///
+    /// Records arrive in log order, so an `RMDIR` naming a non-empty
+    /// directory means the log is inconsistent: the children's own removal
+    /// records must already have replayed. During replay that is a
+    /// [`ZcfsError::Corrupt`] head to clamp; live it means the caller raced
+    /// with someone adding entries.
+    fn apply_rmdir(&mut self, node: u64) -> Result<(), ZcfsError> {
+        let index = self
+            .nodes
+            .iter()
+            .position(|slot| slot.used && slot.node_id == node)
+            .ok_or(ZcfsError::NotFound)?;
+        if self.nodes[index].kind != KIND_DIR {
+            // A file is removed by `unlink`, not `rmdir`.
+            return Err(ZcfsError::NotADirectory);
+        }
+        if self
+            .nodes
+            .iter()
+            .any(|child| child.used && child.parent == node)
+        {
+            // A removal cannot orphan children, so a record naming a
+            // non-empty directory is malformed.
+            return Err(ZcfsError::NotEmpty);
+        }
+        self.nodes[index] = Node::EMPTY;
+        self.count -= 1;
+        Ok(())
+    }
+
     /// Clears every slot in place, without a whole-table temporary.
     fn reset(&mut self) {
         for slot in self.nodes.iter_mut() {
@@ -722,6 +770,11 @@ impl<const N: usize> Volume<N> {
                     // A removal carries no payload: the node in the header is
                     // the node that goes.
                     self.table.apply_unlink(header.node)?;
+                }
+                KIND_RMDIR => {
+                    // A directory removal is the same payload-free shape,
+                    // naming the empty directory that goes.
+                    self.table.apply_rmdir(header.node)?;
                 }
                 _ => break,
             }
@@ -871,6 +924,23 @@ impl<const N: usize> Volume<N> {
         self.table.stat(node)?;
         self.append(io, KIND_UNLINK, node, &[])?;
         self.table.apply_unlink(node)
+    }
+
+    /// Removes `node`, an **empty** directory, appending an `RMDIR` record.
+    pub fn rmdir(&mut self, io: &mut impl BlockIo, node: u64) -> Result<(), ZcfsError> {
+        let (kind, _, _) = self.table.stat(node)?;
+        // Files belong to `unlink`, so the kinds never meet.
+        if kind != KIND_DIR {
+            return Err(ZcfsError::NotADirectory);
+        }
+        // The empty check is live-table work and happens before the append:
+        // entries keep their directory alive, and a call that fails must not
+        // leave behind a record a replay could not honour.
+        if !self.table.is_empty_directory(node) {
+            return Err(ZcfsError::NotEmpty);
+        }
+        self.append(io, KIND_RMDIR, node, &[])?;
+        self.table.apply_rmdir(node)
     }
 
     /// Marks the volume cleanly unmounted.
@@ -1131,6 +1201,85 @@ mod tests {
             volume.create(&mut io, ROOT_NODE, b"bare", MODE_DIR | 0o755),
             Err(ZcfsError::Corrupt)
         );
+    }
+
+    #[test]
+    fn an_empty_directory_survives_its_rmdir() {
+        let (mut io, mut volume) = seeded();
+        let atlas = volume
+            .create(&mut io, ROOT_NODE, b"atlas", MODE_DIR | 0o755)
+            .expect("mkdir");
+        volume.mark_clean(&mut io).expect("clean");
+
+        let mut reloaded = Volume::<8>::mount(0, &mut io).expect("remount");
+        reloaded.rmdir(&mut io, atlas).expect("rmdir");
+        assert_eq!(
+            reloaded.lookup(ROOT_NODE, b"atlas"),
+            Err(ZcfsError::NotFound)
+        );
+        reloaded.mark_clean(&mut io).expect("clean");
+
+        // The removal is a log record, so a third mount still finds nothing,
+        // and the freed slot serves a later creation instead of reviving the
+        // node.
+        let mut reloaded = Volume::<8>::mount(0, &mut io).expect("remount again");
+        assert_eq!(
+            reloaded.lookup(ROOT_NODE, b"atlas"),
+            Err(ZcfsError::NotFound)
+        );
+        let fresh = reloaded
+            .create(&mut io, ROOT_NODE, b"atlas", MODE_FILE | 0o644)
+            .expect("recreate");
+        assert_ne!(fresh, atlas);
+        assert_eq!(reloaded.stat(fresh).expect("stat").0, KIND_FILE);
+    }
+
+    #[test]
+    fn rmdir_refuses_files_and_unremoved_children() {
+        let (mut io, mut volume) = seeded();
+        // A missing node and a file both refuse: missing names `NotFound`,
+        // like `unlink`, and a file belongs to `unlink` anyway.
+        assert_eq!(volume.rmdir(&mut io, 99), Err(ZcfsError::NotFound));
+        assert_eq!(
+            volume.rmdir(&mut io, ROOT_NODE + 1),
+            Err(ZcfsError::NotADirectory)
+        );
+        // Entries keep their directory alive, including the root's own.
+        assert_eq!(
+            volume.rmdir(&mut io, ROOT_NODE),
+            Err(ZcfsError::NotEmpty)
+        );
+
+        let atlas = volume
+            .create(&mut io, ROOT_NODE, b"atlas", MODE_DIR | 0o755)
+            .expect("mkdir");
+        let note = volume
+            .create(&mut io, atlas, b"note", MODE_FILE | 0o644)
+            .expect("create");
+        assert_eq!(volume.rmdir(&mut io, atlas), Err(ZcfsError::NotEmpty));
+        volume.unlink(&mut io, note).expect("unlink the child");
+        volume.rmdir(&mut io, atlas).expect("rmdir now");
+        // A removed directory resolves no names anymore.
+        assert_eq!(
+            volume.lookup(atlas, b"note"),
+            Err(ZcfsError::NotADirectory)
+        );
+    }
+
+    #[test]
+    fn an_rmdir_loses_to_a_crash_like_any_record() {
+        let (mut io, mut volume) = seeded();
+        let atlas = volume
+            .create(&mut io, ROOT_NODE, b"atlas", MODE_DIR | 0o755)
+            .expect("mkdir");
+        volume.mark_clean(&mut io).expect("clean");
+        let bytes = io.bytes.clone();
+
+        // A crash that loses every write of the rmdir leaves the directory
+        // standing: the record simply never happened.
+        let mut dead = CrashIo::from_image(&bytes, 0);
+        let volume = Volume::<8>::mount(0, &mut dead).expect("mount");
+        assert_eq!(volume.lookup(ROOT_NODE, b"atlas"), Ok(atlas));
     }
 
     #[test]

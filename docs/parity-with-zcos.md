@@ -587,8 +587,11 @@ trustworthy core.
    ([ADR 0066](adr/0066-a-persistent-removal-is-a-log-record.md)), and
    `mkdir` works on `/data`: the proxy adds the directory type bit to the
    same `CREATE` record, so the tree shape is durable
-   ([ADR 0068](adr/0068-a-persistent-volume-holds-directories.md)). Persistent
-   directory removal and rename records, and owner records, remain. A
+   ([ADR 0068](adr/0068-a-persistent-volume-holds-directories.md)). An empty
+   directory can be removed for real too: `zcfs` appends an `RMDIR` record,
+   and the empty check runs before the write
+   ([ADR 0069](adr/0069-a-persistent-directory-removal-is-its-own-record.md)).
+   Persistent rename records, and owner records, remain. A
    descriptor's offset is now explicit and
    movable through `SYS_SEEK`, so a file can be updated in place or appended
    ([ADR 0067](adr/0067-a-file-offset-is-explicit-and-movable.md)). The three

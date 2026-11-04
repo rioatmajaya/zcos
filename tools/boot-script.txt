@@ -21,6 +21,11 @@ ls /data/atlas
 umount
 mount
 stat /data/atlas
+rmdir /data/atlas
+stat /data/atlas
+umount
+mount
+stat /data/atlas
 tmp
 stat /tmp/scratch
 chmod /tmp/scratch 0000
