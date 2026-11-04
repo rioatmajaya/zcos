@@ -496,8 +496,10 @@ VFS → write path → journaling → `fsck`**.
   `task 2: rmdir: removed /tmp/dir` show a non-empty directory refused and an
   empty one removed. `task 2: mv: moved /tmp/a -> /tmp/b` and the following
   `stat` show a rename within the same filesystem. `task 2: append: ok` and
-  the `cat` after it show a seek-to-end append. The `devfs` and `tmpfs` host
-  tests pass.
+  the `cat` after it show a seek-to-end append, and `task 2: mkdir: made
+  /data/atlas` with the `stat` before *and after* an explicit
+  `umount`/`mount` shows a directory on the persistent volume surviving a
+  replay from disk. The `devfs`, `tmpfs`, and `zcfs` host tests pass.
 - F7j: `stat /tmp/scratch` prints the mode and owner the kernel decides from,
   `task 2: /tmp/scratch: file, 8 bytes, mode 0644, uid 1 gid 1`, and the
   unprivileged shell's `chmod` round trip is observable: `task 2: chmod: ok`

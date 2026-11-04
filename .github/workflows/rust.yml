@@ -113,6 +113,11 @@ jobs:
         grep -q "task 2: rm: removed /data/probe" build/boot.log
         grep -q "task 2: umount: /data ok" build/boot.log
         grep -q "task 2: mount: /data ok" build/boot.log
+        # `mkdir` on /data rides the same `CREATE` record the proxy already
+        # uses, with the directory type bit in the mode, so the directory
+        # survives the explicit umount/mount pair as a durable node.
+        grep -q "task 2: mkdir: made /data/atlas" build/boot.log
+        grep -q "task 2: /data/atlas: dir, 0 bytes, mode 0755, uid 0 gid 0" build/boot.log
         grep -q "task 2: tmp: ok" build/boot.log
         grep -q "task 2: /dev/blk: char device" build/boot.log
         grep -q "task 2: uid=1 gid=1" build/boot.log

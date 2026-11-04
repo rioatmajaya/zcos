@@ -574,7 +574,8 @@ trustworthy core.
    filesystem now holds directories too, so a file can live below one and each
    directory lists only its own children
    ([ADR 0063](adr/0063-the-scratch-filesystem-is-hierarchical.md)); `zcfs`
-   keeps its flat namespace for now. A directory can then be removed once it is
+   catches up below, since its `CREATE` records already carried the parent
+   and the mode's type bit. A directory can then be removed once it is
    empty (`SYS_RMDIR`, [ADR 0064](adr/0064-a-directory-is-removed-only-when-empty.md)),
    so the scratch tree can be built up and torn down. An entry can also be
    renamed or moved within one filesystem (`SYS_RENAME`,
@@ -583,8 +584,12 @@ trustworthy core.
    persistent volume can now remove a file too: `zcfs` appends an `UNLINK`
    record, so `rm /data/probe` survives an explicit remount, and `SYS_SYNC`
    flushes and stamps the volume clean on demand
-   ([ADR 0066](adr/0066-a-persistent-removal-is-a-log-record.md)). Persistent
-   directories and rename remain. A descriptor's offset is now explicit and
+   ([ADR 0066](adr/0066-a-persistent-removal-is-a-log-record.md)), and
+   `mkdir` works on `/data`: the proxy adds the directory type bit to the
+   same `CREATE` record, so the tree shape is durable
+   ([ADR 0068](adr/0068-a-persistent-volume-holds-directories.md)). Persistent
+   directory removal and rename records, and owner records, remain. A
+   descriptor's offset is now explicit and
    movable through `SYS_SEEK`, so a file can be updated in place or appended
    ([ADR 0067](adr/0067-a-file-offset-is-explicit-and-movable.md)). The three
    proof checksums still hold.

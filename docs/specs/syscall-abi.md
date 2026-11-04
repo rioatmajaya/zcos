@@ -250,7 +250,14 @@ as `SYS_CREATE` does, and the caller owns the new directory. The mode is fixed
 at `0755`; a caller that wants another uses `SYS_CHMOD` afterwards. `tmpfs` now
 keeps directories, so its scratch space is hierarchical: a file below a
 directory resolves through the VFS's own path walk, and each directory lists
-only its children. `SYS_UNLINK` still refuses a directory.
+only its children. `SYS_UNLINK` still refuses a directory. `zcfs` implements
+it through the same `CREATE` record a file uses — the record already carries
+the parent and the mode, and the type bit decides the replayed kind — so
+`mkdir` adds the bit in the proxy and no new opcode or record appears. It is
+idempotent exactly as on `tmpfs`: a directory that owns the name is returned,
+a file in the way is refused. The persistent node still reports root, so a
+created `0755` directory accepts search and listing from anyone but writes
+only where the bits allow; ownership is a later, on-disk-format decision.
 
 `SYS_RMDIR` (47) removes an **empty** directory, behind the same parent check
 `SYS_UNLINK` uses. A directory that still holds entries is refused, so a

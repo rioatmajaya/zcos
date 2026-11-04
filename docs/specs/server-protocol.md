@@ -120,6 +120,12 @@ by a later create.
 superblock clean. It is what `SYS_SYNC` sends; unlike `FS_OP_UNMOUNT` it keeps
 the replayed table, so serving continues after it.
 
+`FS_OP_CREATE` carries the directory in `NODE`, the name in the payload, and
+the on-disk mode in `OFFSET`. The type bit inside the mode decides whether the
+replayed node is a file or a directory, so `create` and `mkdir` ride one
+opcode and no new one appears. The reply's `result` is the new node's id — the
+record's sequence number — so ids stay stable across a remount.
+
 `FS_OP_LIST` carries the directory in `NODE` and the entry index in `OFFSET`.
 The reply payload is one `zc_abi::DirEntry` (264 bytes: kind, name length, and
 a 256-byte name), or empty when the index is past the last child. The kernel

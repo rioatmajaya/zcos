@@ -328,6 +328,16 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **A persistent volume holds directories** (F7i, core system): `SYS_MKDIR`
+  now works on `/data`. A zcfs `CREATE` record already carried the parent and
+  the mode, with the type bit deciding the replayed kind, so the kernel proxy
+  serves `mkdir` on the same opcode, adding the bit to the caller's permission
+  bits — no new opcode, no new record kind, replay unchanged. `mkdir` is
+  idempotent exactly as on tmpfs: a directory that owns the name is returned,
+  a file in the way is refused. The scripted boot creates `/data/atlas`, stats
+  it, unmounts and remounts, and stats it again. The three checksums remain
+  `0xd616ad79aaefb099`, `0x6d66e82d0f2d6fb8`, and `0x78ebd6d359914da7`. See
+  [ADR 0068](docs/adr/0068-a-persistent-volume-holds-directories.md).
 - **A file offset is explicit and movable** (F7i, core system): `SYS_SEEK`
   (50) sets an open descriptor's offset, so a file can be re-read, written at a
   chosen position, or appended. The offset lives in the descriptor, so both

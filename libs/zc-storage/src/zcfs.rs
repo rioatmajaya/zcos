@@ -1071,6 +1071,69 @@ mod tests {
     }
 
     #[test]
+    fn a_created_directory_survives_a_remount() {
+        let (mut io, mut volume) = seeded();
+        // The type bit in the mode decides the replayed kind, so a directory
+        // is one `CREATE` record like any other node: no new record kind, no
+        // new opcode. The permission bits reach the disk; the mode is masked
+        // on replay, so the persisted mode is the caller's, minus the type.
+        let atlas = volume
+            .create(&mut io, ROOT_NODE, b"atlas", MODE_DIR | 0o755)
+            .expect("mkdir");
+        volume.mark_clean(&mut io).expect("clean");
+
+        let mut reloaded = Volume::<8>::mount(0, &mut io).expect("remount");
+        assert_eq!(reloaded.lookup(ROOT_NODE, b"atlas"), Ok(atlas));
+        let (kind, mode, size) = reloaded.stat(atlas).expect("stat");
+        assert_eq!(kind, KIND_DIR);
+        assert_eq!(mode, 0o755);
+        assert_eq!(size, 0);
+        // The directory lists among its parent's children, next to the file.
+        assert_eq!(
+            reloaded.read_dir(ROOT_NODE, 0),
+            Ok(Some((KIND_FILE, b"probe".as_slice())))
+        );
+        assert_eq!(
+            reloaded.read_dir(ROOT_NODE, 1),
+            Ok(Some((KIND_DIR, b"atlas".as_slice())))
+        );
+        assert_eq!(reloaded.read_dir(ROOT_NODE, 2), Ok(None));
+
+        // A child created below the directory replays there too, so the tree
+        // shape is durable and not only the node itself.
+        let note = reloaded
+            .create(&mut io, atlas, b"note", MODE_FILE | 0o644)
+            .expect("create");
+        reloaded.write(&mut io, note, 0, b"ZCDIR\n").expect("write");
+        reloaded.mark_clean(&mut io).expect("clean");
+
+        let reloaded = Volume::<8>::mount(0, &mut io).expect("remount again");
+        assert_eq!(reloaded.lookup(atlas, b"note"), Ok(note));
+        let mut buffer = [0u8; 6];
+        assert_eq!(reloaded.read(note, 0, &mut buffer), Ok(6));
+        assert_eq!(&buffer, b"ZCDIR\n");
+    }
+
+    #[test]
+    fn create_refuses_a_name_that_is_taken() {
+        let (mut io, mut volume) = seeded();
+        // The proxy makes `mkdir` idempotent on top of this rule, so a racing
+        // duplicate can only be rejected, never recorded twice.
+        assert_eq!(
+            volume.create(&mut io, ROOT_NODE, b"probe", MODE_FILE | 0o644),
+            Err(ZcfsError::Corrupt)
+        );
+        assert_eq!(
+            volume.create(&mut io, ROOT_NODE, b"bare", MODE_DIR | 0o755),
+            Ok(4)
+        );
+        assert_eq!(
+            volume.create(&mut io, ROOT_NODE, b"bare", MODE_DIR | 0o755),
+            Err(ZcfsError::Corrupt)
+        );
+    }
+
+    #[test]
     fn unlink_refuses_a_directory_and_a_missing_node() {
         let (mut io, mut volume) = seeded();
         // The root is a directory; directories belong to `rmdir`, not `unlink`.

@@ -48,7 +48,7 @@ use zc_abi::{
     FS_OP_UNLINK, FS_OP_UNMOUNT,
     FS_OP_WRITE, FS_STATUS_BAD_BUFFER, FS_STATUS_BAD_FD, FS_STATUS_BAD_PATH, FS_STATUS_CORRUPT,
     FS_STATUS_IO, FS_STATUS_NOT_A_DIRECTORY, FS_STATUS_NOT_FOUND, FS_STATUS_NOT_SUPPORTED,
-    FS_STATUS_NO_SPACE, FS_STATUS_OK, FS_STATUS_TABLE_FULL, STAT_LEN, Stat,
+    FS_STATUS_NO_SPACE, FS_STATUS_OK, FS_STATUS_TABLE_FULL, KIND_DIR, STAT_LEN, Stat,
 };
 use zc_kernel::perms::Identity;
 use zc_kernel::vfs::{FileSystem, NodeId, VfsError};
@@ -58,6 +58,13 @@ const ROOT_NODE: u64 = 1;
 
 /// Mode new files are created with: a regular file with `rw-r--r--`.
 pub const CREATE_MODE: u32 = 0o100_644;
+
+/// Directory type bit in the on-disk mode, mirroring `zcfs::MODE_DIR`. The
+/// kernel-image does not depend on zc-storage, and a replayed node's kind
+/// comes from this bit in the recorded mode, so `mkdir` needs no new opcode.
+const MKDIR_TYPE: u32 = 0o040_000;
+/// Permission mask in the on-disk mode, mirroring `zcfs::MODE_PERM`.
+const ON_DISK_PERM: u32 = 0o777;
 
 /// Tasks the bridge keeps a replay log for; matches the scheduler's table.
 const MAX_TASKS: usize = zc_kernel::service::TASK_COUNT;
@@ -347,6 +354,44 @@ impl FileSystem for Proxy {
         let me = FS_CALLER.load(Ordering::Relaxed);
         let reply = exchange(me, FS_OP_UNLINK, dir, 0, name, name.len() as u32, &mut [])?;
         decode(reply.status)
+    }
+
+    fn mkdir(
+        &self,
+        dir: NodeId,
+        name: &[u8],
+        mode: u32,
+        _owner: Identity,
+    ) -> Result<NodeId, VfsError> {
+        let me = FS_CALLER.load(Ordering::Relaxed);
+        // A directory that already owns the name is returned unchanged, the
+        // way tmpfs is idempotent; a file in the way is refused rather than
+        // replaced. The domain's `FS_OP_CREATE` would report the collision as
+        // an error on its own, but this check makes the two filesystems agree
+        // instead of relying on the race they would expose.
+        if let Ok(existing) = self.lookup(dir, name) {
+            let stat = self.stat(existing)?;
+            return if stat.kind == KIND_DIR {
+                Ok(existing)
+            } else {
+                Err(VfsError::NotADirectory)
+            };
+        }
+        // A `CREATE` record already covers directories: the record carries the
+        // parent and the mode, and the type bit decides the replayed kind, so
+        // `mkdir` rides the same opcode `create` uses and no new record or
+        // opcode appears. The caller's permission bits reach the disk; the
+        // owner does not yet (ADR 0066), so the directory reports root.
+        let reply = exchange(
+            me,
+            FS_OP_CREATE,
+            dir,
+            u64::from(MKDIR_TYPE | (mode & ON_DISK_PERM)),
+            name,
+            name.len() as u32,
+            &mut [],
+        )?;
+        decode(reply.status).map(|()| reply.result)
     }
 
     fn sync(&self) -> Result<(), VfsError> {
