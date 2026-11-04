@@ -291,6 +291,15 @@ pub const SYS_RMDIR: u64 = 47;
 /// not. Returns `0` or `u64::MAX`.
 pub const SYS_RENAME: u64 = 48;
 
+/// Writes back and flushes every mounted filesystem.
+///
+/// Takes no arguments. Mounts with no cache report success without doing
+/// anything; the zcfs volume writes back its cache and stamps itself clean, so
+/// a crash after a successful `SYS_SYNC` needs no recovery. Needs no authority:
+/// durability is a property of the mount, not of the caller. Returns `0` or
+/// `u64::MAX` when a filesystem reports a device error.
+pub const SYS_SYNC: u64 = 49;
+
 /// Packs a user and group id into the one word [`SYS_GETID`] returns.
 #[must_use]
 pub const fn identity_word(uid: u32, gid: u32) -> u64 {
@@ -418,6 +427,7 @@ mod tests {
         assert_eq!(SYS_MKDIR, 46);
         assert_eq!(SYS_RMDIR, 47);
         assert_eq!(SYS_RENAME, 48);
+        assert_eq!(SYS_SYNC, 49);
         assert_eq!(READDIR_ENTRY, 0);
         assert_eq!(READDIR_END, 1);
     }

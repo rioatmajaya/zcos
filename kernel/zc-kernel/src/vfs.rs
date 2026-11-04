@@ -176,6 +176,15 @@ pub trait FileSystem {
         Err(VfsError::NotSupported)
     }
 
+    /// Writes back and flushes the filesystem.
+    ///
+    /// Data that is already durable is untouched, but anything still in a
+    /// write-back cache is pushed to the device. A filesystem with no cache
+    /// has nothing to do, so the default is a no-op success.
+    fn sync(&self) -> Result<(), VfsError> {
+        Ok(())
+    }
+
     /// Removes the **empty** directory `name` from directory `dir`.
     ///
     /// The VFS has already checked that the caller may write the parent. The
@@ -388,6 +397,18 @@ impl MountTable {
         old_mount
             .fs
             .rename(old_dir, old_name, new_dir, new_name, owner)
+    }
+
+    /// Writes back and flushes every mounted filesystem.
+    ///
+    /// The table keeps resources separate from permissions, so this needs no
+    /// identity: durability is a property of the mount, not of the caller. A
+    /// filesystem with no cache reports success without doing anything.
+    pub fn sync(&self) -> Result<(), VfsError> {
+        for mount in self.mounts.iter().flatten() {
+            mount.fs.sync()?;
+        }
+        Ok(())
     }
 
     /// Reads the `index`-th entry of the directory `path` names.

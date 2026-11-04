@@ -63,7 +63,7 @@ jobs:
         grep -q "task 1: consumer received 2000" build/boot.log
         grep -q "task 1: hello verified" build/boot.log
         grep -q "task 0: manifest ok" build/boot.log
-        grep -q "task 2: Commands: help echo cat ls stat write tmp persist chmod mount umount id svc poweroff exit" build/boot.log
+        grep -q "task 2: Commands: help echo cat ls stat write rm mkdir rmdir mv sync tmp persist chmod mount umount id svc ps dmesg poweroff exit" build/boot.log
         grep -q "task 2: hello os" build/boot.log
         grep -q "task 2: hello from the ZC OS initramfs" build/boot.log
         grep -q "task 2: hello.txt: file, 31 bytes" build/boot.log
@@ -105,6 +105,14 @@ jobs:
         grep -q "task 2: write: ok" build/boot.log
         grep -q "task 2: /data/probe: file, 10 bytes" build/boot.log
         grep -q "vfs: persistence ok" build/boot.log
+        # `sync` flushes the zcfs cache and stamps the volume clean.
+        grep -q "task 2: sync: ok" build/boot.log
+        grep -q "task 4: blk: synced" build/boot.log
+        # `rm` on /data appends a durable unlink record; the remount replays
+        # it, so the file stays gone after the explicit umount/mount pair.
+        grep -q "task 2: rm: removed /data/probe" build/boot.log
+        grep -q "task 2: umount: /data ok" build/boot.log
+        grep -q "task 2: mount: /data ok" build/boot.log
         grep -q "task 2: tmp: ok" build/boot.log
         grep -q "task 2: /dev/blk: char device" build/boot.log
         grep -q "task 2: uid=1 gid=1" build/boot.log

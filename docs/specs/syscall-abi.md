@@ -23,8 +23,8 @@ filesystem exchange page (see [`server-protocol.md`](server-protocol.md)).
 
 ## Syscall table
 
-Numbers are stable and never reused. `SYS_RENAME` (48) is the highest
-assigned number; 49 and above are rejected.
+Numbers are stable and never reused. `SYS_SYNC` (49) is the highest
+assigned number; 50 and above are rejected.
 
 Two numbers are **declared but not yet implemented**: `SYS_YIELD` (0) and
 `SYS_MAP_FRAME` (4) are recognized by the dispatch table but have no handler, so
@@ -82,6 +82,7 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 46 | `SYS_MKDIR` | path ptr, length | 0 | `u64::MAX` |
 | 47 | `SYS_RMDIR` | path ptr, length | 0 | `u64::MAX` |
 | 48 | `SYS_RENAME` | old ptr, old length, new ptr, new length (`r10`) | 0 | `u64::MAX` |
+| 49 | `SYS_SYNC` | — | 0 | `u64::MAX` |
 
 ### Clock
 
@@ -238,10 +239,10 @@ own the node or be root, because changing a mode is an act on the file itself.
 directory: a filesystem that publishes directories returns `u64::MAX` for one.
 The file's own mode is not consulted — POSIX `unlink` works on the directory
 entry — so a read-only file in a writable directory can be removed by whoever
-may write that directory. `tmpfs` implements it and reuses a freed slot, so
-create/remove churn cannot exhaust the fixed volume; the other filesystems keep
-the trait default, which reports `u64::MAX` rather than pretending the entry
-is gone.
+may write that directory. `tmpfs` blanks the node and reuses its slot, and
+`zcfs` appends a durable `UNLINK` record, so the removal replays after a
+remount; a filesystem that cannot remove keeps the trait default, which reports
+`u64::MAX` rather than pretending the entry is gone.
 
 `SYS_MKDIR` (46) creates a directory. It resolves and checks the parent exactly
 as `SYS_CREATE` does, and the caller owns the new directory. The mode is fixed
@@ -264,8 +265,15 @@ one from the source are each an act of authority. Both paths must name the same
 filesystem: a cross-mount move would be a copy, so it is refused rather than
 half-done. Replacing an existing file is allowed; replacing a directory, or
 moving a directory into its own subtree, is refused. `tmpfs` implements it and
-moves the node rather than its bytes, so the other filesystems keep the trait
-default and report failure.
+moves the node rather than its bytes; a filesystem that cannot rename keeps the
+trait default and reports failure.
+
+`SYS_SYNC` (49) writes back and flushes every mounted filesystem. Mounts with
+no write-back cache are a no-op; the zcfs volume writes back every dirty sector,
+flushes the device, and stamps the superblock clean, so a crash after a
+successful sync needs no recovery. It takes no arguments and needs no
+authority: durability is a property of the mount, not of the caller. A device
+error returns `u64::MAX`.
 
 ### `SYS_WINDOW_CLOSE`
 

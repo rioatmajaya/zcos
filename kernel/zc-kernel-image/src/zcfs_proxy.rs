@@ -44,7 +44,8 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering, compiler_fence};
 use zc_abi::{
     FS_EXCHANGE_DATA, FS_EXCHANGE_DATA_MAX, FS_EXCHANGE_NODE, FS_EXCHANGE_OFFSET, FS_EXCHANGE_OP,
     FS_EXCHANGE_PAYLOAD, FS_EXCHANGE_RESULT, FS_EXCHANGE_SEQ, FS_EXCHANGE_TASK, FS_OP_CREATE,
-    FS_OP_FLUSH, FS_OP_LIST, FS_OP_LOOKUP, FS_OP_MOUNT, FS_OP_READ, FS_OP_STAT, FS_OP_UNMOUNT,
+    FS_OP_FLUSH, FS_OP_LIST, FS_OP_LOOKUP, FS_OP_MOUNT, FS_OP_READ, FS_OP_STAT, FS_OP_SYNC,
+    FS_OP_UNLINK, FS_OP_UNMOUNT,
     FS_OP_WRITE, FS_STATUS_BAD_BUFFER, FS_STATUS_BAD_FD, FS_STATUS_BAD_PATH, FS_STATUS_CORRUPT,
     FS_STATUS_IO, FS_STATUS_NOT_A_DIRECTORY, FS_STATUS_NOT_FOUND, FS_STATUS_NOT_SUPPORTED,
     FS_STATUS_NO_SPACE, FS_STATUS_OK, FS_STATUS_TABLE_FULL, STAT_LEN, Stat,
@@ -242,6 +243,13 @@ pub fn unmount() -> Result<(), VfsError> {
     decode(reply.status)
 }
 
+/// Asks the domain to write back, flush, and stamp the volume clean.
+pub fn sync() -> Result<(), VfsError> {
+    let me = FS_CALLER.load(Ordering::Relaxed);
+    let reply = exchange(me, FS_OP_SYNC, 0, 0, &[], 0, &mut [])?;
+    decode(reply.status)
+}
+
 impl FileSystem for Proxy {
     fn name(&self) -> &str {
         "zcfs"
@@ -328,6 +336,21 @@ impl FileSystem for Proxy {
             &mut [],
         )?;
         decode(reply.status).map(|()| reply.result)
+    }
+
+    fn unlink(
+        &self,
+        dir: NodeId,
+        name: &[u8],
+        _owner: Identity,
+    ) -> Result<(), VfsError> {
+        let me = FS_CALLER.load(Ordering::Relaxed);
+        let reply = exchange(me, FS_OP_UNLINK, dir, 0, name, name.len() as u32, &mut [])?;
+        decode(reply.status)
+    }
+
+    fn sync(&self) -> Result<(), VfsError> {
+        sync()
     }
 }
 

@@ -60,6 +60,9 @@ pub const KIND_CREATE: u32 = 1;
 /// Record kind that carries file content.
 pub const KIND_DATA: u32 = 2;
 
+/// Record kind that removes a node.
+pub const KIND_UNLINK: u32 = 3;
+
 /// Node id of the root directory.
 pub const ROOT_NODE: u64 = 1;
 
@@ -572,6 +575,27 @@ impl<const N: usize> Table<N> {
         Ok(())
     }
 
+    /// Removes `node`, freeing its slot for a later creation.
+    ///
+    /// A missing node is an error rather than a silent success: during
+    /// replay it means the log is inconsistent, and live it means the name
+    /// was already gone.
+    fn apply_unlink(&mut self, node: u64) -> Result<(), ZcfsError> {
+        // Directories are removed by `rmdir`, a separate decision; an unlink
+        // record naming one is a malformed log entry.
+        if self.is_directory(node) {
+            return Err(ZcfsError::NotADirectory);
+        }
+        let slot = self
+            .nodes
+            .iter_mut()
+            .find(|slot| slot.used && slot.node_id == node)
+            .ok_or(ZcfsError::NotFound)?;
+        *slot = Node::EMPTY;
+        self.count -= 1;
+        Ok(())
+    }
+
     /// Clears every slot in place, without a whole-table temporary.
     fn reset(&mut self) {
         for slot in self.nodes.iter_mut() {
@@ -693,6 +717,11 @@ impl<const N: usize> Volume<N> {
                         break;
                     };
                     self.table.apply_data(header.node, offset, data)?;
+                }
+                KIND_UNLINK => {
+                    // A removal carries no payload: the node in the header is
+                    // the node that goes.
+                    self.table.apply_unlink(header.node)?;
                 }
                 _ => break,
             }
@@ -826,6 +855,22 @@ impl<const N: usize> Volume<N> {
         self.append(io, KIND_DATA, node, &payload[..len])?;
         self.table.apply_data(node, offset, data)?;
         Ok(data.len())
+    }
+
+    /// Removes `node`, appending an `UNLINK` record.
+    ///
+    /// The node is recorded by id in the record header, so no payload travels.
+    /// After a remount the node is gone and its slot is free, so a later
+    /// `create` of the same name starts fresh rather than reviving the old
+    /// bytes.
+    pub fn unlink(&mut self, io: &mut impl BlockIo, node: u64) -> Result<(), ZcfsError> {
+        if self.table.is_directory(node) {
+            return Err(ZcfsError::NotADirectory);
+        }
+        // The in-memory table must know the node, or the log is inconsistent.
+        self.table.stat(node)?;
+        self.append(io, KIND_UNLINK, node, &[])?;
+        self.table.apply_unlink(node)
     }
 
     /// Marks the volume cleanly unmounted.
@@ -982,7 +1027,7 @@ mod tests {
         let mut io = formatted();
         let mut volume = Volume::<8>::mount(0, &mut io).expect("mount");
         volume
-            .create(&mut io, 0, b"/", MODE_DIR | 0o755)
+            .create(&mut io, 0, b"/", MODE_DIR | 0o777)
             .expect("root");
         let probe = volume
             .create(&mut io, ROOT_NODE, b"probe", MODE_FILE | 0o644)
@@ -992,6 +1037,68 @@ mod tests {
             .expect("write");
         volume.mark_clean(&mut io).expect("clean");
         (io, volume)
+    }
+
+    #[test]
+    fn unlink_is_durable_across_a_remount() {
+        let (mut io, mut volume) = seeded();
+        let scratch = volume
+            .create(&mut io, ROOT_NODE, b"scratch", MODE_FILE | 0o644)
+            .expect("create");
+        volume.write(&mut io, scratch, 0, b"gone").expect("write");
+        assert!(volume.lookup(ROOT_NODE, b"scratch").is_ok());
+
+        volume.unlink(&mut io, scratch).expect("unlink");
+        assert_eq!(
+            volume.lookup(ROOT_NODE, b"scratch"),
+            Err(ZcfsError::NotFound)
+        );
+        volume.mark_clean(&mut io).expect("clean");
+
+        // The removal is a log record, so it survives the remount; the create
+        // that follows starts a fresh node instead of reviving the old bytes.
+        let mut reloaded = Volume::<8>::mount(0, &mut io).expect("remount");
+        assert_eq!(
+            reloaded.lookup(ROOT_NODE, b"scratch"),
+            Err(ZcfsError::NotFound)
+        );
+        assert!(reloaded.lookup(ROOT_NODE, b"probe").is_ok());
+        let fresh = reloaded
+            .create(&mut io, ROOT_NODE, b"scratch", MODE_FILE | 0o644)
+            .expect("recreate");
+        assert_ne!(fresh, scratch);
+        assert_eq!(reloaded.stat(fresh).expect("stat").2, 0);
+    }
+
+    #[test]
+    fn unlink_refuses_a_directory_and_a_missing_node() {
+        let (mut io, mut volume) = seeded();
+        // The root is a directory; directories belong to `rmdir`, not `unlink`.
+        assert_eq!(
+            volume.unlink(&mut io, ROOT_NODE),
+            Err(ZcfsError::NotADirectory)
+        );
+        assert_eq!(
+            volume.unlink(&mut io, 99),
+            Err(ZcfsError::NotFound)
+        );
+    }
+
+    #[test]
+    fn an_unlink_loses_to_a_crash_like_any_record() {
+        let (mut io, mut volume) = seeded();
+        let scratch = volume
+            .create(&mut io, ROOT_NODE, b"scratch", MODE_FILE | 0o644)
+            .expect("create");
+        volume.write(&mut io, scratch, 0, b"gone").expect("write");
+        volume.mark_clean(&mut io).expect("clean");
+        let bytes = io.bytes.clone();
+
+        // A crash that loses every write of the unlink leaves the file in
+        // place: the record simply never happened.
+        let mut dead = CrashIo::from_image(&bytes, 0);
+        let volume = Volume::<8>::mount(0, &mut dead).expect("mount");
+        assert!(volume.lookup(ROOT_NODE, b"scratch").is_ok());
     }
 
     /// Builds a reader over a byte image, for remounting after a simulated

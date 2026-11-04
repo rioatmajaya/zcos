@@ -14,7 +14,7 @@ use zc_abi::{
     SYS_SERVICE_READY, SYS_SERVICE_START, SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_SESSION,
     SYS_STAT,
     SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY,
-    SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TASK_INFO, SYS_TERM_READ, SYS_UMOUNT, SYS_UNLINK,
+    SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TASK_INFO, SYS_TERM_READ, SYS_UMOUNT, SYS_UNLINK, SYS_SYNC,
     SYS_WINDOW_CLOSE, SYS_WINDOW_ID,
     SYS_WINDOW_READ, SYS_WRITE, SYS_YIELD, SyscallError,
 };
@@ -93,6 +93,8 @@ pub enum Action {
     Rmdir,
     /// Rename or move an entry within one filesystem.
     Rename,
+    /// Write back and flush every mounted filesystem.
+    Sync,
     /// Change a file's permission bits.
     Chmod,
     /// Allocate a pixel surface and its backing frames.
@@ -180,6 +182,7 @@ pub const fn dispatch(number: u64) -> Result<Action, SyscallError> {
         SYS_MKDIR => Ok(Action::Mkdir),
         SYS_RMDIR => Ok(Action::Rmdir),
         SYS_RENAME => Ok(Action::Rename),
+        SYS_SYNC => Ok(Action::Sync),
         _ => Err(SyscallError::InvalidNumber),
     }
 }
@@ -239,12 +242,13 @@ mod tests {
         assert_eq!(dispatch(SYS_MKDIR), Ok(Action::Mkdir));
         assert_eq!(dispatch(SYS_RMDIR), Ok(Action::Rmdir));
         assert_eq!(dispatch(SYS_RENAME), Ok(Action::Rename));
+        assert_eq!(dispatch(SYS_SYNC), Ok(Action::Sync));
     }
 
     #[test]
     fn unknown_numbers_are_rejected() {
-        // The last assigned number is SYS_RENAME (48), so probe past it.
-        assert_eq!(dispatch(49), Err(SyscallError::InvalidNumber));
+        // The last assigned number is SYS_SYNC (49), so probe past it.
+        assert_eq!(dispatch(50), Err(SyscallError::InvalidNumber));
         assert_eq!(
             dispatch(u64::MAX),
             Err(SyscallError::InvalidNumber)

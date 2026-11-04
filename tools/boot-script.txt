@@ -9,6 +9,12 @@ write /data/probe ZCPERSIST1
 stat /data/probe
 persist
 ls /data
+sync
+rm /data/probe
+stat /data/probe
+umount
+mount
+stat /data/probe
 tmp
 stat /tmp/scratch
 chmod /tmp/scratch 0000

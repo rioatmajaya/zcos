@@ -106,9 +106,19 @@ copying through four-word messages. All fields are little-endian.
 | 3 | `FS_OP_READ` | 8 | `FS_OP_UNMOUNT` |
 | 4 | `FS_OP_WRITE` | 9 | `FS_OP_STOP` |
 | 5 | `FS_OP_CREATE` | 10 | `FS_OP_LIST` |
+| 11 | `FS_OP_UNLINK` | 12 | `FS_OP_SYNC` |
 
 `FS_OP_STOP` is sent by the shell directly on `IPC_FS`; the domain flushes and
 exits **without replying**.
+
+`FS_OP_UNLINK` carries the directory in `NODE` and the name in the payload. The
+domain looks the name up, appends a durable `UNLINK` record, and drops the
+node, so the removal replays after a remount and the freed slot can be reused
+by a later create.
+
+`FS_OP_SYNC` writes back every dirty sector, flushes the device, and stamps the
+superblock clean. It is what `SYS_SYNC` sends; unlike `FS_OP_UNMOUNT` it keeps
+the replayed table, so serving continues after it.
 
 `FS_OP_LIST` carries the directory in `NODE` and the entry index in `OFFSET`.
 The reply payload is one `zc_abi::DirEntry` (264 bytes: kind, name length, and

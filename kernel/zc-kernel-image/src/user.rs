@@ -1308,6 +1308,28 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 }
             }
         }
+        Ok(Action::Sync) => {
+            // SAFETY: mounted once during setup before any task runs.
+            let mounts = unsafe { &*core::ptr::addr_of!(MOUNTS) };
+            // Durability is a property of the mount, not of the caller, so no
+            // identity is checked. A filesystem with no cache is a no-op; the
+            // zcfs proxy can need a blocking round trip, so the call replays
+            // like any other filesystem operation.
+            match mounts.sync() {
+                Ok(()) => {
+                    regs.set_result(0);
+                    0
+                }
+                Err(VfsError::WouldBlock) => {
+                    tasks.unblock_all();
+                    block_with_retry(tasks, regs, frame, 0)
+                }
+                Err(_) => {
+                    regs.set_result(u64::MAX);
+                    0
+                }
+            }
+        }
         Ok(Action::Chmod) => {
             let me = tasks.current();
             let path = match validate_user_slice(tasks, regs.rdi, regs.rsi) {

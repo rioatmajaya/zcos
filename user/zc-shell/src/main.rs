@@ -2,9 +2,9 @@
 //!
 //! Reads keystrokes with blocking serial reads, edits a single line with
 //! backspace support, and runs `help`, `echo`, `cat`, `ls`, `stat`, `write`,
-//! `rm`, `mkdir`, `rmdir`, `mv`, `tmp`, `persist`, `chmod`, `mount`, `umount`,
-//! `id`, `svc`, `ps`, `dmesg`, and `exit`. Output goes through the log syscall,
-//! so the transcript appears in the kernel serial log.
+//! `rm`, `mkdir`, `rmdir`, `mv`, `sync`, `tmp`, `persist`, `chmod`, `mount`,
+//! `umount`, `id`, `svc`, `ps`, `dmesg`, and `exit`. Output goes through the
+//! log syscall, so the transcript appears in the kernel serial log.
 //!
 //! `id` asks the kernel for this task's user and group ids plus its session.
 //! The shell runs as an unprivileged user, so `id` is the observable side of
@@ -34,7 +34,9 @@
 //! replays the log from the disk with a cold cache, so a matching read cannot
 //! have come from RAM. `tmp` is the same round trip against the `tmpfs` mount,
 //! where nothing can reach a disk at all; `rm` removes that scratch file
-//! through the same VFS permission path a create uses.
+//! through the same VFS permission path a create uses. `sync` flushes the
+//! mounted filesystems on demand, and `rm` on `/data` appends a durable
+//! removal record that the next remount replays.
 //!
 //! The shell runs as an unprivileged user (see `zc_kernel::service::OWNERS`),
 //! so `chmod` on a file it owns is a real permission change: the scripted boot
@@ -51,7 +53,7 @@ use zc_user::{
     identity_gid, identity_uid, log, log_parts, log_read, mount, open, poweroff, read, readdir,
     send_to, serial_read, service_faults, service_health, service_is_ready, service_is_up,
     service_restarts, session, stat, task_exit_with, task_info, umount, unlink, mkdir, rmdir,
-    rename, write,
+    rename, sync, write,
 };
 
 /// Contents `persist` writes and expects to read back.
@@ -291,7 +293,7 @@ fn run(line: &[u8]) -> bool {
     }
     match argv[0] {
         b"help" => {
-            log("Commands: help echo cat ls stat write rm mkdir rmdir mv tmp persist chmod mount umount id svc ps dmesg poweroff exit\n");
+            log("Commands: help echo cat ls stat write rm mkdir rmdir mv sync tmp persist chmod mount umount id svc ps dmesg poweroff exit\n");
         }
         b"echo" => {
             for index in 1..count {
@@ -538,6 +540,15 @@ fn run(line: &[u8]) -> bool {
                 log("umount: /data ok\n");
             } else {
                 log("umount: /data failed\n");
+            }
+        }
+        b"sync" => {
+            // Flush every mounted filesystem: zcfs writes back its cache and
+            // stamps itself clean, so a crash after this needs no recovery.
+            if sync() == 0 {
+                log("sync: ok\n");
+            } else {
+                log("sync: failed\n");
             }
         }
         b"tmp" => {

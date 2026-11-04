@@ -19,7 +19,8 @@ pub use zc_abi::{
     SYS_READDIR, SYS_RECV, SYS_RECV_FROM, SYS_RENAME, SYS_RMDIR, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ,
     SYS_SERVICE_HEALTH, SYS_SERVICE_READY, SYS_SERVICE_START, SYS_SERVICE_STATUS,
     SYS_SERVICE_STOP, SYS_SESSION, SYS_STAT, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP,
-    SYS_TASK_EXIT, SYS_TASK_INFO, SYS_TERM_READ, SYS_UMOUNT, SYS_UNLINK, SYS_WINDOW_CLOSE, SYS_WINDOW_ID,
+    SYS_TASK_EXIT, SYS_TASK_INFO, SYS_TERM_READ, SYS_UMOUNT, SYS_UNLINK, SYS_SYNC, SYS_WINDOW_CLOSE,
+    SYS_WINDOW_ID,
     SYS_WINDOW_READ,
     SYS_WRITE, SYS_YIELD,
     SERVICE_STATE_READY, SERVICE_STATE_UP, MmioInfo, ServiceSpec, Stat, SurfaceInfo, SyscallError,
@@ -426,6 +427,12 @@ pub fn rename(old: &str, new: &str) -> u64 {
         new.as_ptr() as u64,
         new.len() as u64,
     )
+}
+
+/// Writes back and flushes every mounted filesystem, returning 0 or `u64::MAX`.
+#[inline(always)]
+pub fn sync() -> u64 {
+    syscall0(SYS_SYNC)
 }
 
 /// Changes `path`'s permission bits to `mode`, returning 0 or `u64::MAX`.

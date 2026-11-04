@@ -142,7 +142,7 @@ the 2026-10-20 changelog records the Linux entries being removed.
 
 | Capability | Reference | Current | Status and gap |
 |---|---|---|---|
-| Native filesystem | ZCFS, journaled, persistent `/user` | zcfs, log-structured records, dual superblock, crash recovery, fsck | ✅ Different format, comparable durability goal. Current has strong crash tests. |
+| Native filesystem | ZCFS, journaled, persistent `/user` | zcfs, log-structured records (create, data, unlink), dual superblock, crash recovery, fsck, on-demand `sync` | ✅ Different format, comparable durability goal. Current has strong crash tests. |
 | In-memory / pseudo filesystems | RAMFS, ISO9660 | ramfs, tmpfs, devfs | 🟡 Current has a better writable RAM proof and device namespace; no ISO9660. |
 | Foreign filesystems | ZCFS / RAMFS / ISO9660 are the documented set | FAT32 read-only, ext2 read-only, zcfs read-write | 🟡 Current has more read-only formats but no ISO9660; both are narrower than a daily-driver rootfs. |
 | Block layer | AHCI, ATA, NVMe, virtio-blk; block service | virtio-blk only; four-slot write-back cache | 🟡 Only one transport is proven. AHCI/NVMe are required for hardware parity. |
@@ -580,7 +580,11 @@ trustworthy core.
    renamed or moved within one filesystem (`SYS_RENAME`,
    [ADR 0065](adr/0065-a-rename-moves-a-node-within-one-filesystem.md)),
    completing the ordinary namespace operations for the scratch filesystem. The
-   three proof checksums still hold.
+   persistent volume can now remove a file too: `zcfs` appends an `UNLINK`
+   record, so `rm /data/probe` survives an explicit remount, and `SYS_SYNC`
+   flushes and stamps the volume clean on demand
+   ([ADR 0066](adr/0066-a-persistent-removal-is-a-log-record.md)). Persistent
+   directories and rename remain. The three proof checksums still hold.
 5. Do not start the app catalog, widget toolkit, or host runner yet.
 6. Keep `build/zcos.img` human-testable and keep the three proof images locked.
 

@@ -468,7 +468,11 @@ VFS → write path → journaling → `fsck`**.
   and stat paths, and `task 4: blk: zcfs stopped` shows the domain flush and
   exit on `exit`.
 - F7g: `task 4: blk: zcfs recovered` in the boot log, proving the guest clamped
-  the torn, over-claiming tail the host formatter planted. The two host tests
+  the torn, over-claiming tail the host formatter planted. The `KIND_UNLINK`
+  record is the third kind the same replay rule covers: an appended removal is
+  durable before the superblock points at it, so a crash loses either nothing
+  or only the unreferenced record, and a remount of `rm /data/probe` still
+  finds nothing. The two host tests
   `a_superblock_that_over_claims_is_clamped_on_mount` and
   `crash_at_every_step_keeps_the_tree_consistent` pass, and
   `tools/check-disk-zcfs.sh` reports `recovery: head 4 -> 3 ok` for the planted

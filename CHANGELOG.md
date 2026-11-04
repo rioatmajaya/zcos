@@ -328,6 +328,22 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **A persistent removal is a log record** (F7g–F7j, core system): `zcfs` gains
+  a `KIND_UNLINK` record, so `SYS_UNLINK` now works on `/data` instead of
+  reporting failure. `Volume::unlink` appends a payload-free record naming the
+  node, then clears the slot and decrements the table, so replay arrives at the
+  same tree and a later create reuses the freed slot; a directory named by the
+  record is refused, since directory removal is a separate decision. The block
+  domain serves it as `FS_OP_UNLINK` (11), replay handles the kind, and host
+  tests cover the durable removal, the directory refusal, and a power loss that
+  loses the record. `SYS_SYNC` (49) and `FS_OP_SYNC` (12) write back, flush, and
+  stamp the volume clean on demand through a new `FileSystem::sync`; the shell
+  gains `sync`. The zcfs root is now `0777` like the tmpfs root so the
+  unprivileged shell can create and remove names in `/data`. The scripted boot
+  runs `sync`, removes `/probe`, remounts, and still finds nothing. The three
+  checksums remain `0xd616ad79aaefb099`, `0x6d66e82d0f2d6fb8`, and
+  `0x78ebd6d359914da7`. See
+  [ADR 0066](docs/adr/0066-a-persistent-removal-is-a-log-record.md).
 - **The VFS can rename or move an entry** (F7i, core system): `FileSystem`
   gains `rename` and `SYS_RENAME` (48) renames or moves a path. Both paths must
   name the same filesystem, so a cross-mount move is refused rather than

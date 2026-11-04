@@ -31,7 +31,8 @@ use core::sync::atomic::{Ordering, compiler_fence};
 use zc_abi::{
     DIRENT_LEN, DirEntry, FS_EXCHANGE_DATA, FS_EXCHANGE_NODE, FS_EXCHANGE_OFFSET, FS_EXCHANGE_OP,
     FS_EXCHANGE_PAYLOAD, FS_EXCHANGE_RESULT, FS_EXCHANGE_VIRT, FS_OP_CREATE, FS_OP_FLUSH,
-    FS_OP_LIST, FS_OP_LOOKUP, FS_OP_MOUNT, FS_OP_READ, FS_OP_STAT, FS_OP_STOP, FS_OP_UNMOUNT,
+    FS_OP_LIST, FS_OP_LOOKUP, FS_OP_MOUNT, FS_OP_READ, FS_OP_STAT, FS_OP_STOP, FS_OP_SYNC,
+    FS_OP_UNLINK, FS_OP_UNMOUNT,
     FS_OP_WRITE, FS_STATUS_BAD_BUFFER, FS_STATUS_BAD_PATH, FS_STATUS_CORRUPT,
     FS_STATUS_NOT_A_DIRECTORY, FS_STATUS_NOT_FOUND, FS_STATUS_NOT_SUPPORTED, FS_STATUS_NO_SPACE,
     FS_STATUS_OK, FS_STATUS_TABLE_FULL, INFO_LEN, INFO_QUEUE0, INFO_VIRT, IPC_DISCOVERY, IPC_FS,
@@ -1068,6 +1069,26 @@ fn serve_op(
                 Err(error) => status_of(error),
             }
         }
+        FS_OP_UNLINK => {
+            // The node field names the directory; the payload is the name.
+            if payload_len == 0 || payload_len > zcfs::NAME_MAX {
+                return FS_STATUS_BAD_PATH;
+            }
+            ex_read_bytes(&mut buffer[..payload_len]);
+            let child = match volume.lookup(node, &buffer[..payload_len]) {
+                Ok(found) => found,
+                Err(error) => return status_of(error),
+            };
+            let mut io = CacheIo {
+                device: &mut *device,
+                cache: &mut *cache,
+                flush_offered,
+            };
+            match volume.unlink(&mut io, child) {
+                Ok(()) => FS_STATUS_OK,
+                Err(error) => status_of(error),
+            }
+        }
         FS_OP_FLUSH => {
             let mut io = CacheIo {
                 device: &mut *device,
@@ -1076,6 +1097,25 @@ fn serve_op(
             };
             match io.flush() {
                 Ok(()) => FS_STATUS_OK,
+                Err(error) => status_of(error),
+            }
+        }
+        FS_OP_SYNC => {
+            let mut io = CacheIo {
+                device: &mut *device,
+                cache: &mut *cache,
+                flush_offered,
+            };
+            if let Err(error) = io.flush() {
+                return status_of(error);
+            }
+            // Like a clean unmount, a sync stamps the volume clean: the data
+            // is durable, so a crash right after needs no recovery.
+            match volume.mark_clean(&mut io) {
+                Ok(()) => {
+                    log("blk: synced\n");
+                    FS_STATUS_OK
+                }
                 Err(error) => status_of(error),
             }
         }

@@ -71,6 +71,12 @@ pub const FS_OP_STOP: u32 = 9;
 /// index. The reply payload is one [`crate::DirEntry`] record, or empty at the
 /// end of the listing — the same `Option` shape `FileSystem::read_dir` uses.
 pub const FS_OP_LIST: u32 = 10;
+/// Request opcode: remove a name from a directory.
+///
+/// The node field names the directory and the payload carries the name.
+pub const FS_OP_UNLINK: u32 = 11;
+/// Request opcode: write back, flush, and stamp the volume clean.
+pub const FS_OP_SYNC: u32 = 12;
 
 /// Reply status: the operation succeeded.
 pub const FS_STATUS_OK: u32 = 0;
