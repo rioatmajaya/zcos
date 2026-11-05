@@ -345,6 +345,18 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **A reap returns the frames a spawn took** (F7k, core system): `SYS_WAIT`
+  now releases the memory a spawned task owns before its slot is reused —
+  four private page-table levels, the image pages, and the stack. A spawn
+  records those frames in a bounded `FrameLedger` as it allocates them, so
+  teardown never walks a boot task's page tables and never frees shared kernel
+  or framebuffer tables. A failed spawn releases the partial record before
+  returning, and the allocator's recycle stack grows to 192 frames so two
+  worst-case reaps fit without an allocation between them. The boot proof
+  shows `reclaimed 6 frames` for each spawned proof task (four tables, one
+  image page, one stack). The three checksums remain
+  `0xd616ad79aaefb099`, `0x6d66e82d0f2d6fb8`, and `0x78ebd6d359914da7`. See
+  [ADR 0071](docs/adr/0071-a-reap-returns-the-frames-a-spawn-took.md).
 - **A task is spawned by name and waited by slot** (F7k, core system):
   `SYS_SPAWN` (51) builds a task from an image name in the boot initramfs
   using the same address-space builder and ELF loader as the bring-up,

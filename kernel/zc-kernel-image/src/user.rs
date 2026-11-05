@@ -18,7 +18,7 @@ use zc_abi::{
 use zc_kernel::capability::{Capability, CapabilityTable, Rights};
 use zc_kernel::gdt::{USER_CS, USER_RFLAGS, USER_SS};
 use zc_kernel::ipc::Endpoint;
-use zc_kernel::memory::{FrameAllocator, PAGE_SIZE, PhysFrame};
+use zc_kernel::memory::{FrameAllocator, FrameLedger, PAGE_SIZE, PhysFrame};
 use zc_kernel::perms::{self, Access};
 use zc_kernel::ramfs::RamFs;
 use zc_kernel::service;
@@ -134,6 +134,14 @@ const SPAWN_STACK_TOP: u64 = STACK_A_TOP;
 
 /// Fresh stack frame a runtime-spawned task maps at [`SPAWN_STACK_TOP`].
 const SPAWN_STACK_PAGE: u64 = SPAWN_STACK_TOP - PAGE_SIZE;
+
+/// Most pages one task image can occupy, matching [`map_elf`]'s page table.
+const ELF_MAX_PAGES: usize = 64;
+
+/// Frames one spawn records: four private table levels, the image pages, and
+/// one stack page. The ledger is sized so the worst-case spawn never refuses a
+/// frame it already allocated.
+const SPAWN_FRAME_CAP: usize = 4 + ELF_MAX_PAGES + 1;
 
 /// File names of the bring-up tasks inside the initramfs.
 const PRODUCER_NAME: &str = "producer.elf";
@@ -554,6 +562,15 @@ static mut SAVED_BOOT_INFO: u64 = 0;
 /// are shared, read-only policy at the page-directory level; a spawned task
 /// still needs a window capability before it can draw.
 static mut FB_TABLES: [u64; 2] = [0; 2];
+
+/// Frames each slot's runtime spawn allocated and still owns.
+///
+/// A boot task has an empty ledger: its address space shares kernel and
+/// framebuffer tables the spawn never allocated, and walking its page table
+/// would free mappings it only borrowed. A successful [`SYS_WAIT`] releases
+/// the slot's ledger before the index can be spawned into again.
+static mut SPAWN_FRAMES: [FrameLedger<SPAWN_FRAME_CAP>; TASK_COUNT] =
+    [FrameLedger::new(); TASK_COUNT];
 
 /// Physical base of the device manager's DMA window, or zero when none was
 /// provisioned. Written once at spawn, read by the coherence check after no
@@ -1239,16 +1256,36 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 return 0;
             };
             let alloc = crate::frames();
+            // Every frame this spawn takes is recorded so a reaped slot can
+            // return exactly what it owns, never a shared table it borrowed.
+            let mut frames = FrameLedger::<SPAWN_FRAME_CAP>::new();
             let Some(stack) = alloc.allocate() else {
                 regs.set_result(u64::MAX);
                 return 0;
             };
+            if !frames.push(stack) {
+                let _ = alloc.free(stack);
+                regs.set_result(u64::MAX);
+                return 0;
+            }
             // SAFETY: the saved tables were built once at setup and are not
             // mutated afterwards; the framebuffer window is shared policy.
-            let (cr3, pt) = new_address_space(alloc, unsafe { &*addr_of!(FB_TABLES) });
-            let entry = match map_elf(name, bytes, alloc, pt) {
+            let Some((cr3, pt)) =
+                new_address_space_logged(alloc, unsafe { &*addr_of!(FB_TABLES) }, &mut frames)
+            else {
+                frames.release(alloc);
+                let _ = crate::serial::print(format_args!(
+                    "spawn: task {me} found no page-table frame\n",
+                ));
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            let entry = match map_elf(name, bytes, alloc, pt, &mut frames) {
                 Ok(entry) => entry,
                 Err(_) => {
+                    // The address space is private to this attempt and no task
+                    // has run in it, so every recorded frame is still ours.
+                    frames.release(alloc);
                     let _ = crate::serial::print(format_args!(
                         "spawn: task {me} cannot map {name}\n",
                     ));
@@ -1282,6 +1319,10 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             unsafe {
                 (*addr_of_mut!(CAPS))[slot] = CapabilityTable::<8>::new();
                 (*addr_of_mut!(FDS))[slot] = DescriptorTable::new();
+                // The ledger becomes the slot's record at the same moment the
+                // slot becomes runnable; a wait observes it only after this
+                // handler returns, so no task ever sees a partial record.
+                (*addr_of_mut!(SPAWN_FRAMES))[slot] = frames;
             }
             match tasks.spawn_with_session(SyscallRegs::EMPTY, init_frame, cr3, owner, session) {
                 Ok(index) => {
@@ -1296,6 +1337,7 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                     // The slot was free a moment ago and nothing ran since,
                     // so this is unreachable; answer with the failure code
                     // rather than a panic a syscall must not cause.
+                    let _ = reclaim_spawn_frames(slot);
                     let _ = crate::serial::print(format_args!(
                         "spawn: task {me} could not claim slot {slot}\n",
                     ));
@@ -1348,9 +1390,18 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 regs.set_result(u64::MAX);
                 return 0;
             }
+            let reclaimed = reclaim_spawn_frames(slot);
             let _ = crate::serial::print(format_args!(
                 "wait: task {me} reaped task {slot} status {status}\n",
             ));
+            if reclaimed > 0 {
+                // A boot task keeps an empty ledger: its address space shares
+                // tables the spawn never allocated. Only a runtime spawn has
+                // frames of its own to return.
+                let _ = crate::serial::print(format_args!(
+                    "wait: task {me} reclaimed {reclaimed} frames from task {slot}\n",
+                ));
+            }
             regs.set_result(u64::from(status));
             0
         }
@@ -3495,17 +3546,26 @@ fn child_table(table: u64, index: usize, what: &'static str) -> u64 {
     entry & TABLE_MASK
 }
 
-/// Allocates and zeroes one page-table level.
-fn new_table(alloc: &mut FrameAllocator<'_>) -> u64 {
-    let Some(frame) = alloc.allocate() else {
-        crate::fail("user setup found no page-table frame");
-    };
+/// Allocates and zeroes one page-table level, recording the frame.
+///
+/// Returns `None` when the allocator is empty or the caller's ledger is full.
+/// A frame taken for a full ledger goes straight back, so the caller can
+/// release everything already recorded without leaking this one.
+fn new_table_logged<const N: usize>(
+    alloc: &mut FrameAllocator<'_>,
+    frames: &mut FrameLedger<N>,
+) -> Option<u64> {
+    let frame = alloc.allocate()?;
+    if !frames.push(frame) {
+        let _ = alloc.free(frame);
+        return None;
+    }
     let phys = frame.start_address();
     // SAFETY: fresh frame inside the identity map.
     unsafe {
         core::slice::from_raw_parts_mut(phys as *mut u8, PAGE_SIZE as usize).fill(0);
     }
-    phys
+    Some(phys)
 }
 
 /// Copies one 4 KiB page-table level.
@@ -3522,16 +3582,56 @@ unsafe fn copy_table(dst_phys: u64, src_phys: u64) {
     }
 }
 
+/// Returns a reaped slot's spawn frames to the allocator.
+///
+/// Only frames recorded by the runtime spawn path are released: a boot task's
+/// address space shares kernel and framebuffer tables and may map the input
+/// ring, surfaces, or a DMA window, none of which the slot allocated. A slot
+/// that was never spawned keeps an empty ledger, so this returns zero.
+fn reclaim_spawn_frames(slot: usize) -> usize {
+    let alloc = crate::frames();
+    // SAFETY: spawn writes the slot's ledger before the slot becomes runnable
+    // and wait reads it only after the slot is dead; both run with interrupts
+    // masked. `get_mut` also keeps a bad index from indexing out of bounds.
+    unsafe {
+        match (*addr_of_mut!(SPAWN_FRAMES)).get_mut(slot) {
+            Some(frames) => frames.release(alloc),
+            None => 0,
+        }
+    }
+}
+
+/// Builds a boot task's address space, stopping the boot if a frame is
+/// missing.
+///
+/// The scratch ledger is dropped: the boot keeps every frame it took, so there
+/// is nothing to return on this path.
+fn new_address_space(
+    alloc: &mut FrameAllocator<'_>,
+    fb_tables: &[u64; 2],
+) -> (u64, u64) {
+    let mut frames = FrameLedger::<4>::new();
+    match new_address_space_logged(alloc, fb_tables, &mut frames) {
+        Some(space) => space,
+        None => crate::fail("user setup found no page-table frame"),
+    }
+}
+
 /// Builds one task's private top levels sharing everything above them.
 ///
 /// Clones PML4, PDPT, and PD from the running kernel tables, links the
 /// shared framebuffer tables, and returns `(cr3, user_pt)`. The loader
 /// tables are never modified, so the kernel keeps its identity mapping
 /// untouched and no TLB flush is required.
-fn new_address_space(
+///
+/// Every private table frame is recorded in `frames`, so a runtime caller can
+/// return them when the task is reaped. Shared kernel and framebuffer tables
+/// are copied by reference and are deliberately absent from the ledger.
+fn new_address_space_logged<const N: usize>(
     alloc: &mut FrameAllocator<'_>,
     fb_tables: &[u64; 2],
-) -> (u64, u64) {
+    frames: &mut FrameLedger<N>,
+) -> Option<(u64, u64)> {
     let base = VirtAddr::new(USER_CODE_VIRT);
     let fb_base = VirtAddr::new(FB_VIRT);
     if base.pdpt_index() != 0 || fb_base.pdpt_index() != 0 {
@@ -3544,10 +3644,10 @@ fn new_address_space(
     let kpdpt = child_table(kpml4, base.pml4_index(), "user setup found no pdpt");
     let kpd = child_table(kpdpt, base.pdpt_index(), "user setup found no page directory");
 
-    let pml4 = new_table(alloc);
-    let pdpt = new_table(alloc);
-    let pd = new_table(alloc);
-    let pt = new_table(alloc);
+    let pml4 = new_table_logged(alloc, frames)?;
+    let pdpt = new_table_logged(alloc, frames)?;
+    let pd = new_table_logged(alloc, frames)?;
+    let pt = new_table_logged(alloc, frames)?;
     // SAFETY: all six frames are identity-mapped table pages.
     unsafe {
         copy_table(pml4, kpml4);
@@ -3567,7 +3667,7 @@ fn new_address_space(
         set_table_entry(pd, fb_index, fb_tables[0] | USER_PAGE_FLAGS);
         set_table_entry(pd, fb_index + 1, fb_tables[1] | USER_PAGE_FLAGS);
     }
-    (pml4, pt)
+    Some((pml4, pt))
 }
 
 /// Maps the user code and data frames, loads both tasks, and enters ring 3.
@@ -3831,7 +3931,13 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
     let mut index = 0;
     while index < TASK_COUNT {
         let (cr3, pt) = new_address_space(alloc, &fb_tables);
-        entries[index] = match map_elf(names[index], binaries[index], alloc, pt) {
+        entries[index] = match map_elf(
+            names[index],
+            binaries[index],
+            alloc,
+            pt,
+            &mut FrameLedger::<SPAWN_FRAME_CAP>::new(),
+        ) {
             Ok(entry) => entry,
             Err(error) => crate::fail(error.message()),
         };
@@ -4504,11 +4610,15 @@ impl ElfMapError {
 /// split layouts (code straddling a segment boundary) stay intact.
 /// Segments outside the image window, in the stack zone, or an entry
 /// point outside the loaded segments stops the boot.
+///
+/// Every frame the image takes is recorded in `frames`, in the order it was
+/// allocated, so a spawn can return the image's share on a later reap.
 fn map_elf(
     name: &str,
     bytes: &[u8],
     alloc: &mut FrameAllocator<'_>,
     pt_phys: u64,
+    frames: &mut FrameLedger<SPAWN_FRAME_CAP>,
 ) -> Result<u64, ElfMapError> {
     let image = zc_elf::parse(bytes).map_err(|_| ElfMapError::InvalidImage)?;
     // First pass: validate every segment and collect the entry point.
@@ -4541,7 +4651,7 @@ fn map_elf(
     // Second pass: one frame per virtual page, then copy each segment's
     // file bytes at its page offset so shared pages merge correctly.
     // A virtual page number plus its frame address per entry.
-    let mut pages: [(u64, u64); 64] = [(0, 0); 64];
+    let mut pages: [(u64, u64); ELF_MAX_PAGES] = [(0, 0); ELF_MAX_PAGES];
     let mut page_count = 0usize;
     for segment in image.segments() {
         let vaddr = segment.vaddr;
@@ -4559,6 +4669,13 @@ fn map_elf(
                 let Some(frame) = alloc.allocate() else {
                     return Err(ElfMapError::OutOfFrames);
                 };
+                if !frames.push(frame) {
+                    // The caller's ledger is sized for this cap, so this is
+                    // unreachable; returning the frame keeps a bad size from
+                    // leaking it.
+                    let _ = alloc.free(frame);
+                    return Err(ElfMapError::TooLarge);
+                }
                 // SAFETY: fresh frame inside the identity map.
                 unsafe {
                     core::slice::from_raw_parts_mut(

@@ -77,6 +77,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0068](0068-a-persistent-volume-holds-directories.md) | A persistent volume holds directories | Accepted |
 | [0069](0069-a-persistent-directory-removal-is-its-own-record.md) | A persistent directory removal is its own record | Accepted |
 | [0070](0070-a-task-is-spawned-by-name-and-waited-by-slot.md) | A task is spawned by name and waited by slot | Accepted |
+| [0071](0071-a-reap-returns-the-frames-a-spawn-took.md) | A reap returns the frames a spawn took | Accepted |
 
 ## Adding a decision
 

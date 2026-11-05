@@ -179,6 +179,12 @@ jobs:
         grep -q "task 2: spawn: task 0 running producer.elf" build/boot.log
         grep -q "task 2: ps: slot 0 gen 2 uid=1 gid=1 up" build/boot.log
         grep -q "task 2: spawn: task 1 running consumer.elf" build/boot.log
+        # A reap returns the frames only a runtime spawn owns: four private
+        # table levels, one image page, and one stack page for each proof
+        # image. The bring-up pair has an empty ledger, so its first waits
+        # print no reclaim line at all.
+        grep -q "wait: task 2 reclaimed 6 frames from task 0" build/boot.log
+        grep -q "wait: task 2 reclaimed 6 frames from task 1" build/boot.log
         # A missing image and a supervised slot both fail closed; the kernel
         # logs the reason and the shell reports the neutral failure.
         grep -q "spawn: task 2 found no image nothere.elf" build/boot.log

@@ -132,7 +132,7 @@ the 2026-10-20 changelog records the Linux entries being removed.
 | Scheduling | 256 priority queues, affinity-aware, SMP load balancing | bounded round-robin over a fixed task table, single CPU | 🟡 No priorities, no SMP scheduler, no per-CPU run queues. |
 | IPC | synchronous endpoints, shared memory, notifications, poll | channels, blocking send/receive, shared exchange page, `SYS_SEND_TO`/`SYS_RECV_FROM` | 🟡 Enough for current services; no general shared-memory API or notification object. |
 | Capabilities | `libcap` rights over process/thread/endpoint/shm/IRQ/I/O/block; SOF manifests; signed policy | generation-safe tables, explicit rights, delegation, per-task I/O bitmap, port/IRQ claims | 🟡 Current delegation is strong, but there is no signed object or policy layer. |
-| Process model | `fork`/`exec`/`spawn`/`wait`, signals, process registry, sessions | fixed 10 task slots; spawn by image name (`SYS_SPAWN`), block-and-reap by slot (`SYS_WAIT`), per-slot generations and exit status (`SYS_TASK_INFO`), `SYS_TASK_EXIT`, service revive; no fork/exec or signals | 🟡 A ZC-native process model now creates, waits, and reaps tasks, and inherited identity and session make the registry meaningful; `fork`/`exec` and signals are absent, and the table stays bounded. |
+| Process model | `fork`/`exec`/`spawn`/`wait`, signals, process registry, sessions | fixed 10 task slots; spawn by image name (`SYS_SPAWN`), block-and-reap by slot (`SYS_WAIT`, returning the spawn's frames), per-slot generations and exit status (`SYS_TASK_INFO`), `SYS_TASK_EXIT`, service revive; no fork/exec or signals | 🟡 A ZC-native process model now creates, waits, reaps, and reclaims tasks, and inherited identity and session make the registry meaningful; `fork`/`exec` and signals are absent, and the table stays bounded. |
 | Syscall surface | about 70+ calls, including process, signal, network, library, Linux compatibility | 53 numbers, highest `SYS_WAIT` (52), two reserved but unimplemented | 🟡 The current ABI is coherent; it is simply much smaller. Add calls only with specs and tests. |
 | Fault isolation | ring-3 faults kill only the domain; init supervises services | same principle; `initd` supervises `blk` and `kbd` | 🟡 The mechanism is at parity; the service catalog is much smaller. |
 | Linux personality | kernel-level POSIX translator for static x86_64 ELF (`busybox`, `tcc`), sockets `ENOSYS` | none | ⛔ Do not copy the kernel placement. If needed later, build a userspace personality domain. |
@@ -564,9 +564,10 @@ trustworthy core.
    records an exit status that the registry reports, so a slot's record says
    how its incarnation ended ([ADR 0060](adr/0060-a-clean-exit-records-a-status.md));
    `SYS_SPAWN` now builds a task from a named initramfs image and `SYS_WAIT`
-   blocks on a slot, returns that status, and reaps the record, which is the
-   ZC-native process model
-   ([ADR 0070](adr/0070-a-task-is-spawned-by-name-and-waited-by-slot.md)).
+   blocks on a slot, returns that status, reaps the record, and returns the
+   frames the spawn allocated, which is the ZC-native process model
+   ([ADR 0070](adr/0070-a-task-is-spawned-by-name-and-waited-by-slot.md),
+   [ADR 0071](adr/0071-a-reap-returns-the-frames-a-spawn-took.md)).
    Tasks now also belong to a session, fixed at spawn and visible through
    `SYS_SESSION` and `ps`, which records the system/desktop grouping a future
    login would create

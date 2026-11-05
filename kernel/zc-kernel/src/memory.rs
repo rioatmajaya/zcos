@@ -32,7 +32,12 @@ impl PhysFrame {
 ///
 /// Early boot only needs a small reserve: recycled frames cover the page-table
 /// and IPC setup path before the ownership-aware allocator takes over.
-pub const RECYCLED_FRAMES: usize = 64;
+///
+/// The size is also a teardown budget. One spawned task can own at most 69
+/// frames — four table levels, 64 image pages, and one stack page — so two
+/// reaps back to back must fit without an allocation in between. 192 covers
+/// those 138 with room for frames a surface teardown already parked.
+pub const RECYCLED_FRAMES: usize = 192;
 
 /// Maximum virtual ranges the allocator will refuse to hand out.
 ///
@@ -267,6 +272,83 @@ impl<'a> FrameAllocator<'a> {
     #[must_use]
     pub const fn recycled_count(&self) -> usize {
         self.recycled_count
+    }
+}
+
+/// A bounded record of frames one operation owns until its teardown.
+///
+/// The allocator has no dynamic metadata, so an operation that takes several
+/// frames — a task spawn, for example — records each one here as it is
+/// allocated. Teardown then returns the ledger instead of walking page tables,
+/// which keeps shared mappings (the kernel identity map, framebuffer tables,
+/// surfaces) out of the release path.
+///
+/// `N` is the caller's worst-case count. A push past it is refused rather than
+/// growing; the caller must size it to the operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FrameLedger<const N: usize> {
+    frames: [PhysFrame; N],
+    len: usize,
+}
+
+impl<const N: usize> FrameLedger<N> {
+    /// Creates an empty ledger.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            frames: [PhysFrame::from_address(0); N],
+            len: 0,
+        }
+    }
+
+    /// Records `frame`, returning `false` when the ledger is full.
+    pub fn push(&mut self, frame: PhysFrame) -> bool {
+        if self.len >= N {
+            return false;
+        }
+        self.frames[self.len] = frame;
+        self.len += 1;
+        true
+    }
+
+    /// Returns the recorded frames in allocation order.
+    #[must_use]
+    pub fn frames(&self) -> &[PhysFrame] {
+        &self.frames[..self.len]
+    }
+
+    /// Returns how many frames are recorded.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Returns whether no frame is recorded.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Returns recorded frames to `alloc`, keeping whatever it refused.
+    ///
+    /// Returns how many frames the allocator accepted. A full recycle stack
+    /// leaves the rest in the ledger, so the caller retains ownership and can
+    /// retry once the next allocation drains it. Recording order is kept, so a
+    /// retry returns the same frames.
+    pub fn release(&mut self, alloc: &mut FrameAllocator<'_>) -> usize {
+        let mut released = 0;
+        let mut kept = 0;
+        for index in 0..self.len {
+            let frame = self.frames[index];
+            if alloc.free(frame) {
+                released += 1;
+            } else {
+                self.frames[kept] = frame;
+                kept += 1;
+            }
+        }
+        self.len = kept;
+        released
     }
 }
 
@@ -515,5 +597,61 @@ mod tests {
 
         assert_eq!(usable_bytes(&regions), PAGE_SIZE * 3);
         assert_eq!(usable_bytes(&[]), 0);
+    }
+
+    #[test]
+    fn a_frame_ledger_returns_every_recorded_frame() {
+        let regions = [region(0x1000, PAGE_SIZE * 8, MemoryKind::Usable)];
+        let mut allocator = FrameAllocator::new(&regions);
+        let mut ledger = FrameLedger::<8>::new();
+        let mut last = PhysFrame::from_address(0);
+        for _ in 0..5 {
+            let frame = allocator.allocate().expect("frame");
+            last = frame;
+            assert!(ledger.push(frame));
+        }
+        assert_eq!(ledger.len(), 5);
+
+        assert_eq!(ledger.release(&mut allocator), 5);
+        assert!(ledger.is_empty());
+        assert_eq!(allocator.recycled_count(), 5);
+        // The recycle stack is LIFO, so the last recorded frame returns first.
+        assert_eq!(allocator.allocate(), Some(last));
+    }
+
+    #[test]
+    fn a_full_frame_ledger_refuses_instead_of_growing() {
+        let mut ledger = FrameLedger::<2>::new();
+        assert!(ledger.push(PhysFrame::from_address(0x1000)));
+        assert!(ledger.push(PhysFrame::from_address(0x2000)));
+        assert!(!ledger.push(PhysFrame::from_address(0x3000)));
+        assert_eq!(ledger.len(), 2);
+        assert_eq!(ledger.frames().len(), 2);
+    }
+
+    #[test]
+    fn a_full_recycler_leaves_frames_in_the_ledger_for_retry() {
+        let regions = [region(0x1000, PAGE_SIZE, MemoryKind::Usable)];
+        let mut allocator = FrameAllocator::new(&regions);
+        // Fill the recycle stack with distinct aligned frames. Allocating
+        // first would just pop the previous one back, because the stack is
+        // LIFO.
+        for index in 0..RECYCLED_FRAMES as u64 {
+            assert!(allocator.free(PhysFrame::from_address(0x10_0000 + index * PAGE_SIZE)));
+        }
+        assert_eq!(allocator.recycled_count(), RECYCLED_FRAMES);
+
+        // An aligned frame the allocator never handed out is fine for the
+        // ledger; the full recycle stack is what the release must survive.
+        let extra = PhysFrame::from_address(0x20_0000);
+        let mut ledger = FrameLedger::<2>::new();
+        assert!(ledger.push(extra));
+        assert_eq!(ledger.release(&mut allocator), 0);
+        assert_eq!(ledger.len(), 1);
+
+        // Draining one recycled frame makes room for the retry.
+        assert!(allocator.allocate().is_some());
+        assert_eq!(ledger.release(&mut allocator), 1);
+        assert!(ledger.is_empty());
     }
 }

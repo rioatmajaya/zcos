@@ -315,11 +315,14 @@ is alive the call blocks the same way a full send or empty receive does; any
 exit or fault unblocks every waiter, and the replay either blocks again or
 observes the dead slot. Once the slot is dead, the call returns the status the
 slot recorded and consumes its registry record — the reap — so the index
-becomes free for a later `SYS_SPAWN`. The same `WRITE` grant gates both calls:
-a caller trusted to add work to the table is trusted to account for how it
-ends. Waiting on the caller's own slot is refused, and so is waiting on a
-supervised service slot, because `initd` owns those lifecycles through the
-service syscalls and fault events. Every refusal returns `u64::MAX`.
+becomes free for a later `SYS_SPAWN`. It also returns the frames the spawn
+allocated (four private table levels, the image pages, and one stack page) to
+the frame allocator; a boot task keeps no such record, so waiting on one
+reclaims none. The same `WRITE` grant gates both calls: a caller trusted to
+add work to the table is trusted to account for how it ends. Waiting on the
+caller's own slot is refused, and so is waiting on a supervised service slot,
+because `initd` owns those lifecycles through the service syscalls and fault
+events. Every refusal returns `u64::MAX`.
 
 ### `SYS_WINDOW_CLOSE`
 

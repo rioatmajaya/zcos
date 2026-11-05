@@ -59,5 +59,7 @@ it.
   either. Concurrency is bounded by the table, but cumulative frame use is not;
   reclaiming a dead task's frames needs a teardown path in the address-space
   builder, which this increment does not add.
+  [ADR 0071](0071-a-reap-returns-the-frames-a-spawn-took.md) adds that
+  teardown.
 - This is parity of capability, not of implementation or ABI: no reference
   source, ABI, or pixel output is copied.
