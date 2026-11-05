@@ -184,6 +184,18 @@ pub const fn service_status_grant(id: u32) -> Capability {
     Capability::new(service_cap(id), Rights::READ)
 }
 
+/// Capability object granting authority over the task lifecycle.
+///
+/// `WRITE` authorizes both [`zc_abi::SYS_SPAWN`] and [`zc_abi::SYS_WAIT`]: a
+/// caller trusted to add work to the table is also trusted to account for how
+/// that work ends. The lifecycle namespace sets bit 28 (see
+/// [`zc_abi::spawn_cap`]), so the object cannot be confused with an MMIO
+/// region, a surface object, a service id, or a port range.
+#[must_use]
+pub const fn spawn_grant() -> Capability {
+    Capability::new(zc_abi::spawn_cap(), Rights::WRITE)
+}
+
 /// Port grants the block driver holds at spawn: none.
 ///
 /// Its BAR window arrives at runtime, delegated by the manager over
@@ -206,6 +218,14 @@ pub const INITD_SETUP_GRANTS: usize = 2;
 /// One `READ` grant per catalog service, so the `svc` command can report
 /// whether a service is up without gaining the right to start or stop it.
 pub const SHELL_SETUP_GRANTS: usize = 2;
+
+/// Process-lifecycle grants the shell holds at spawn.
+///
+/// One `WRITE` grant on the lifecycle object, covering both `spawn` and
+/// `wait`. Kept apart from [`SHELL_SETUP_GRANTS`] because that count is one
+/// grant per catalog service, while this one exists once regardless of how
+/// many services the catalog names.
+pub const SHELL_LIFECYCLE_GRANTS: usize = 1;
 
 /// Port and memory grants the device manager holds at spawn.
 ///
@@ -405,5 +425,22 @@ mod tests {
         // A diagnostic role must not be able to start or stop the service.
         assert!(!status.rights().contains(Rights::WRITE));
         assert_eq!(SHELL_SETUP_GRANTS, zc_abi::SERVICE_CATALOG.len());
+    }
+
+    #[test]
+    fn one_lifecycle_grant_covers_spawn_and_wait() {
+        let lifecycle = spawn_grant();
+        assert_eq!(lifecycle.object(), zc_abi::spawn_cap());
+        assert!(lifecycle.rights().contains(Rights::WRITE));
+        // Reaping is the other half of the same authority; a caller that may
+        // not reap must not be handed the right to create work either.
+        assert!(!lifecycle.rights().contains(Rights::READ));
+        // The bit-28 namespace stays disjoint from every other object kind.
+        assert_ne!(lifecycle.object(), service_grant(0).object());
+        assert_ne!(lifecycle.object(), service_status_grant(0).object());
+        assert_ne!(lifecycle.object(), port_grant(0, 1).object());
+        assert_ne!(lifecycle.object(), irq_grant(zc_abi::IRQ_KEYBOARD).object());
+        assert_ne!(lifecycle.object(), zc_abi::SURFACE_FACTORY);
+        assert_eq!(SHELL_LIFECYCLE_GRANTS, 1);
     }
 }

@@ -52,5 +52,16 @@ stat /dev/blk
 id
 svc
 ps
+help
+wait 0
+wait 1
+spawn producer.elf
+ps
+spawn consumer.elf
+wait 0
+wait 1
+spawn nothere.elf
+wait 4
+ps
 dmesg
 exit

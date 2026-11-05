@@ -132,8 +132,8 @@ the 2026-10-20 changelog records the Linux entries being removed.
 | Scheduling | 256 priority queues, affinity-aware, SMP load balancing | bounded round-robin over a fixed task table, single CPU | 🟡 No priorities, no SMP scheduler, no per-CPU run queues. |
 | IPC | synchronous endpoints, shared memory, notifications, poll | channels, blocking send/receive, shared exchange page, `SYS_SEND_TO`/`SYS_RECV_FROM` | 🟡 Enough for current services; no general shared-memory API or notification object. |
 | Capabilities | `libcap` rights over process/thread/endpoint/shm/IRQ/I/O/block; SOF manifests; signed policy | generation-safe tables, explicit rights, delegation, per-task I/O bitmap, port/IRQ claims | 🟡 Current delegation is strong, but there is no signed object or policy layer. |
-| Process model | `fork`/`exec`/`spawn`/`wait`, signals, process registry, sessions | fixed 10 task slots; a read-only registry with per-slot generations and exit status (`SYS_TASK_INFO`), `SYS_TASK_EXIT`, service revive; no fork/exec/wait | ❌ Spawn and wait are still absent, but the registry records identity and outcome, which is the foundation they need. The launcher cannot become a real app launcher while only two client slots exist. |
-| Syscall surface | about 70+ calls, including process, signal, network, library, Linux compatibility | 43 numbers, highest `SYS_SERVICE_HEALTH` (42), two reserved but unimplemented | 🟡 The current ABI is coherent; it is simply much smaller. Add calls only with specs and tests. |
+| Process model | `fork`/`exec`/`spawn`/`wait`, signals, process registry, sessions | fixed 10 task slots; spawn by image name (`SYS_SPAWN`), block-and-reap by slot (`SYS_WAIT`), per-slot generations and exit status (`SYS_TASK_INFO`), `SYS_TASK_EXIT`, service revive; no fork/exec or signals | 🟡 A ZC-native process model now creates, waits, and reaps tasks, and inherited identity and session make the registry meaningful; `fork`/`exec` and signals are absent, and the table stays bounded. |
+| Syscall surface | about 70+ calls, including process, signal, network, library, Linux compatibility | 53 numbers, highest `SYS_WAIT` (52), two reserved but unimplemented | 🟡 The current ABI is coherent; it is simply much smaller. Add calls only with specs and tests. |
 | Fault isolation | ring-3 faults kill only the domain; init supervises services | same principle; `initd` supervises `blk` and `kbd` | 🟡 The mechanism is at parity; the service catalog is much smaller. |
 | Linux personality | kernel-level POSIX translator for static x86_64 ELF (`busybox`, `tcc`), sockets `ENOSYS` | none | ⛔ Do not copy the kernel placement. If needed later, build a userspace personality domain. |
 | Linux driver strategy | many hand-written drivers, some in ring 0 | ring-3 driver domains with brokered authority | ✅ Keep the current boundary. Do not regress to ring-0 drivers for feature speed. |
@@ -196,7 +196,7 @@ The current tree has:
 | Capability | Reference | Current | Status and gap |
 |---|---|---|---|
 | Service catalog | 19 endpoints, driver catalog, loader sandbox | 2 supervised services in one ABI catalog with boot order | ❌ Most service roles are absent, and the catalog is compile-time only. |
-| Discovery / loading | service discovery by name, driver match rules, dynamic spawn | fixed task indices, compile-time binaries, `SYS_SERVICE_START`/`STOP`; `SYS_SERVICE_HEALTH` reports restart and fault counters | 🟡 Lifecycle policy and mechanism counters exist; discovery, packaging, and failure-rate routing do not. |
+| Discovery / loading | service discovery by name, driver match rules, dynamic spawn | runtime task creation by initramfs name (`SYS_SPAWN`), fixed boot indices, `SYS_SERVICE_START`/`STOP`; `SYS_SERVICE_HEALTH` reports restart and fault counters | 🟡 Runtime spawn exists, but services are still a compile-time catalog with no manifest-driven loader, driver match, or packaging. |
 | Logging | `logd` | kernel diagnostic ring readable through `SYS_LOG_READ` and the shell's `dmesg`; task logs remain serial-only | 🟡 The kernel half is user-visible and bounded; there is still no persistent or task-facing log service. |
 | Clipboard | `clipboardd` | none | ❌ |
 | Process/session manager | `procmgr`, sessions, job control | fixed slots | ❌ |
@@ -560,12 +560,16 @@ trustworthy core.
    restart budget remains userspace policy. The task table now numbers each
    incarnation with a generation exposed through `SYS_TASK_INFO` and the
    shell's `ps`, so a revived slot is distinguishable from its predecessor
-   ([ADR 0059](adr/0059-a-task-slot-carries-a-generation.md)); spawn and wait
-   are still absent. A clean exit now records an exit status that the registry
-   reports, so a slot's record says how its incarnation ended
-   ([ADR 0060](adr/0060-a-clean-exit-records-a-status.md)). Tasks now also
-   belong to a session, fixed at spawn and visible through `SYS_SESSION` and
-   `ps`, which records the system/desktop grouping a future login would create
+   ([ADR 0059](adr/0059-a-task-slot-carries-a-generation.md)). A clean exit
+   records an exit status that the registry reports, so a slot's record says
+   how its incarnation ended ([ADR 0060](adr/0060-a-clean-exit-records-a-status.md));
+   `SYS_SPAWN` now builds a task from a named initramfs image and `SYS_WAIT`
+   blocks on a slot, returns that status, and reaps the record, which is the
+   ZC-native process model
+   ([ADR 0070](adr/0070-a-task-is-spawned-by-name-and-waited-by-slot.md)).
+   Tasks now also belong to a session, fixed at spawn and visible through
+   `SYS_SESSION` and `ps`, which records the system/desktop grouping a future
+   login would create
    ([ADR 0061](adr/0061-sessions-group-tasks-as-spawn-time-data.md)); there is
    still no credential check or login. The VFS can now remove a file through
    `SYS_UNLINK`, gated by the same parent-directory authority as `create`, and

@@ -15,6 +15,20 @@
 /// constant, so userspace can enumerate the registry without guessing.
 pub const TASK_SLOTS: usize = 10;
 
+/// Capability object id granting authority over the task lifecycle.
+///
+/// [`SYS_SPAWN`](crate::SYS_SPAWN) and [`SYS_WAIT`](crate::SYS_WAIT) both need
+/// `WRITE` on this object, so creating tasks and consuming exit records is one
+/// authority, not two: a caller trusted to add work to the table is trusted to
+/// account for how its work ends. The bit-28 namespace is its own, disjoint
+/// from MMIO regions (bit 27), surface objects (bit 29), service ids (bit 30),
+/// and port ranges (bit 31), so the grant can never be mistaken for one of
+/// those `u32` object ids.
+#[must_use]
+pub const fn spawn_cap() -> u32 {
+    0x1000_0000
+}
+
 /// Bit in [`TaskInfo::flags`]: the slot holds a live task.
 pub const TASK_STATE_ALIVE: u32 = 1;
 
@@ -195,5 +209,24 @@ mod tests {
         };
         assert_eq!(info.write_into(&mut [0u8; 4]), None);
         assert_eq!(TaskInfo::read_from(&[0u8; 4]), None);
+    }
+
+    #[test]
+    fn the_spawn_cap_owns_a_disjoint_namespace_bit() {
+        assert_eq!(spawn_cap(), 0x1000_0000);
+        // The lifecycle object is not any small IRQ source number and never
+        // reads as one of the other tagged namespaces.
+        assert_ne!(spawn_cap(), 0);
+        assert_ne!(spawn_cap(), 1);
+        assert_ne!(spawn_cap(), 2);
+        assert_ne!(spawn_cap(), 3);
+        // MMIO regions set bit 27; surface objects set bit 29; services bit 30;
+        // ports bit 31. The spawn namespace keeps only bit 28.
+        assert_eq!(spawn_cap() & 0x1000_0000, 0x1000_0000);
+        assert_eq!(spawn_cap() & !0x1000_0000, 0);
+        assert_ne!(spawn_cap(), crate::SURFACE_FACTORY);
+        assert_ne!(spawn_cap(), crate::service_cap(0));
+        assert_ne!(spawn_cap(), crate::port_cap(0, 0));
+        assert_ne!(spawn_cap(), crate::MMIO_CAP_TAG);
     }
 }

@@ -23,8 +23,8 @@ filesystem exchange page (see [`server-protocol.md`](server-protocol.md)).
 
 ## Syscall table
 
-Numbers are stable and never reused. `SYS_SEEK` (50) is the highest
-assigned number; 51 and above are rejected.
+Numbers are stable and never reused. `SYS_WAIT` (52) is the highest
+assigned number; 53 and above are rejected.
 
 Two numbers are **declared but not yet implemented**: `SYS_YIELD` (0) and
 `SYS_MAP_FRAME` (4) are recognized by the dispatch table but have no handler, so
@@ -84,6 +84,8 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 48 | `SYS_RENAME` | old ptr, old length, new ptr, new length (`r10`) | 0 | `u64::MAX` |
 | 49 | `SYS_SYNC` | — | 0 | `u64::MAX` |
 | 50 | `SYS_SEEK` | descriptor, absolute offset | 0 | `u64::MAX` |
+| 51 | `SYS_SPAWN` | name ptr, name length | child task slot | `u64::MAX` |
+| 52 | `SYS_WAIT` | task slot | the slot's recorded exit status | `u64::MAX` |
 
 ### Clock
 
@@ -294,6 +296,30 @@ gap. Only an open descriptor is required — the offset decides where the
 caller's own next read or write lands, so no separate permission is checked.
 The shell's `append` uses it: it stats the file for its size, seeks there, and
 writes, so bytes grow instead of being overwritten from zero.
+
+`SYS_SPAWN` (51) creates one task from an image in the boot initramfs: `rdi`
+and `rsi` point at the image name and its length, for example `producer.elf`.
+The kernel builds a fresh address space with the same ELF loader the boot used,
+maps one fresh stack page, and selects the lowest empty task slot — one whose
+previous occupant has already been reaped. The child inherits the caller's
+identity and session (ADR 0053, ADR 0061), starts with an empty capability
+table and no open descriptors, and inherits nothing else. Calling requires
+`WRITE` on the process-lifecycle grant (`spawn_cap`), which the shell holds.
+Window-client images (`win.elf`, `fm.elf`) are refused because their slot,
+compositor link, surface, and input session are part of the boot layout. A
+missing or unmappable image, a window-client name, or a full table returns
+`u64::MAX`.
+
+`SYS_WAIT` (52) waits for the task slot named in `rdi` to end. While the slot
+is alive the call blocks the same way a full send or empty receive does; any
+exit or fault unblocks every waiter, and the replay either blocks again or
+observes the dead slot. Once the slot is dead, the call returns the status the
+slot recorded and consumes its registry record — the reap — so the index
+becomes free for a later `SYS_SPAWN`. The same `WRITE` grant gates both calls:
+a caller trusted to add work to the table is trusted to account for how it
+ends. Waiting on the caller's own slot is refused, and so is waiting on a
+supervised service slot, because `initd` owns those lifecycles through the
+service syscalls and fault events. Every refusal returns `u64::MAX`.
 
 ### `SYS_WINDOW_CLOSE`
 

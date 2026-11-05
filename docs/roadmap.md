@@ -194,8 +194,9 @@ scheduler heartbeat per AP.
       ([ADR 0050](adr/0050-the-microkernel-revokes-runtime-resources.md)).
 - [x] The bounded 10-slot task table is documented as a capacity, not a
       process model ([ADR 0050](adr/0050-the-microkernel-revokes-runtime-resources.md)).
-- [ ] *(follow-up, not required for F4 to pass)* POSIX-style process model
-      (fork/exec/wait) or a documented ZC-native equivalent.
+- [x] ZC-native process model: `SYS_SPAWN` starts a task from a named
+      initramfs image and `SYS_WAIT` blocks on a slot then reaps its exit
+      status ([ADR 0070](adr/0070-a-task-is-spawned-by-name-and-waited-by-slot.md)).
 - [ ] *(follow-up)* Signals or an event-notification mechanism.
 
 **Pass criteria.** `task 0: producer sent 2000` and `task 1: consumer
@@ -375,14 +376,15 @@ VFS → write path → journaling → `fsck`**.
       The task table then numbers each incarnation with a generation exposed
       through `SYS_TASK_INFO` and the shell's `ps`, so a revived service keeps
       its slot but is distinguishable from the run it replaced (see
-      [ADR 0059](adr/0059-a-task-slot-carries-a-generation.md)); spawn and wait
-      remain the open part of the process model. A clean exit then records a
-      status the registry reports, so a slot's record says how its incarnation
-      ended even before `wait` exists (see
-      [ADR 0060](adr/0060-a-clean-exit-records-a-status.md)). Tasks are also
-      grouped into a system session and a desktop session, fixed at spawn and
-      visible through `SYS_SESSION` and `ps`; this is the grouping a future
-      `login` will populate, not a login itself (see
+      [ADR 0059](adr/0059-a-task-slot-carries-a-generation.md)). A clean exit
+      then records a status the registry reports, so a slot's record says how
+      its incarnation ended (see
+      [ADR 0060](adr/0060-a-clean-exit-records-a-status.md)), and `SYS_WAIT`
+      consumes that record as the reap half of the process model (see
+      [ADR 0070](adr/0070-a-task-is-spawned-by-name-and-waited-by-slot.md)).
+      Tasks are also grouped into a system session and a desktop session, fixed
+      at spawn and visible through `SYS_SESSION` and `ps`; this is the grouping
+      a future `login` will populate, not a login itself (see
       [ADR 0061](adr/0061-sessions-group-tasks-as-spawn-time-data.md)).
 - [x] F7g: crash consistency. `Volume::mount_into` replays the log and then
       **clamps `head_seq` to the last record that actually replayed**, reporting
@@ -441,6 +443,19 @@ VFS → write path → journaling → `fsck`**.
       and reuses its slot, so `rm /tmp/scratch` is observable and the scratch
       volume cannot fill up from create/remove churn (see
       [ADR 0062](adr/0062-file-removal-is-directory-authority.md)).
+- [x] F7k: a ZC-native process model. `SYS_SPAWN` builds a task from an image
+      name in the boot initramfs, using the same ELF loader and address-space
+      builder as the bring-up; the child inherits the caller's identity and
+      session but no authority and no descriptors. `SYS_WAIT` blocks on a slot
+      and, once it is dead, returns the recorded exit status and reaps the
+      record, freeing the index for the next spawn. One lifecycle capability
+      (`WRITE` on a bit-28 object) gates both calls; window clients and
+      supervised service slots are refused. The slot's generation counter
+      survives the reap, so a spawned incarnation never reuses a number (see
+      [ADR 0070](adr/0070-a-task-is-spawned-by-name-and-waited-by-slot.md)).
+- [ ] *(follow-up)* Reclaim a reaped task's address space and stack frames;
+      today the reap frees the slot record only, so repeated spawn/reap cycles
+      grow frame use until reboot.
 
 **Pass criteria (machine).**
 

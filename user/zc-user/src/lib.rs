@@ -19,8 +19,8 @@ pub use zc_abi::{
     SYS_READDIR, SYS_RECV, SYS_RECV_FROM, SYS_RENAME, SYS_RMDIR, SYS_SEEK, SYS_SEND, SYS_SEND_TO,
     SYS_SERIAL_READ, SYS_SERVICE_HEALTH, SYS_SERVICE_READY, SYS_SERVICE_START, SYS_SERVICE_STATUS,
     SYS_SERVICE_STOP, SYS_SESSION, SYS_STAT, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP,
-    SYS_TASK_EXIT, SYS_TASK_INFO, SYS_TERM_READ, SYS_UMOUNT, SYS_UNLINK, SYS_SYNC, SYS_WINDOW_CLOSE,
-    SYS_WINDOW_ID,
+    SYS_SPAWN, SYS_TASK_EXIT, SYS_TASK_INFO, SYS_TERM_READ, SYS_UMOUNT, SYS_UNLINK, SYS_SYNC,
+    SYS_WAIT, SYS_WINDOW_CLOSE, SYS_WINDOW_ID,
     SYS_WINDOW_READ,
     SYS_WRITE, SYS_YIELD,
     SERVICE_STATE_READY, SERVICE_STATE_UP, MmioInfo, ServiceSpec, Stat, SurfaceInfo, SyscallError,
@@ -439,6 +439,26 @@ pub fn seek(fd: u64, offset: u64) -> u64 {
 #[inline(always)]
 pub fn sync() -> u64 {
     syscall0(SYS_SYNC)
+}
+
+/// Creates a task from the initramfs image `name`.
+///
+/// Takes `WRITE` on the process-lifecycle grant. Returns the child's slot
+/// index, or `u64::MAX` when the image is missing, unmappable, a window
+/// client, or the task table is full.
+#[inline(always)]
+pub fn spawn(name: &str) -> u64 {
+    syscall2(SYS_SPAWN, name.as_ptr() as u64, name.len() as u64)
+}
+
+/// Waits for task `slot` to end and consumes its exit record.
+///
+/// Blocks while the slot is alive. Returns the status the slot recorded, or
+/// `u64::MAX` for a supervised, own, unknown, or already reaped slot. A
+/// successful return frees the slot for a later [`spawn`].
+#[inline(always)]
+pub fn wait(slot: u64) -> u64 {
+    syscall1(SYS_WAIT, slot)
 }
 
 /// Changes `path`'s permission bits to `mode`, returning 0 or `u64::MAX`.

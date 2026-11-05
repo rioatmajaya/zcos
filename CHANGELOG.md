@@ -345,6 +345,23 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **A task is spawned by name and waited by slot** (F7k, core system):
+  `SYS_SPAWN` (51) builds a task from an image name in the boot initramfs
+  using the same address-space builder and ELF loader as the bring-up,
+  gives it one fresh stack frame, and places it in the lowest empty slot. The
+  child inherits the caller's identity and session but starts with an empty
+  capability table and no open descriptors; window clients are refused because
+  their slot, compositor link, surface, and input session belong to the boot
+  layout. `SYS_WAIT` (52) blocks while the named slot is alive, then returns
+  the recorded exit status and reaps the registry record so the index can be
+  spawned again. One lifecycle capability — `WRITE` on a bit-28 object —
+  gates both calls, and the shell holds it. A per-slot generation counter
+  survives the reap, so a later incarnation never reuses a number. The
+  scripted boot reaps its producer/consumer pair, spawns fresh copies into
+  slots 0 and 1, proves the pair runs over the shared endpoint, waits for
+  both, and reaps them again. The three checksums remain
+  `0xd616ad79aaefb099`, `0x6d66e82d0f2d6fb8`, and `0x78ebd6d359914da7`. See
+  [ADR 0070](docs/adr/0070-a-task-is-spawned-by-name-and-waited-by-slot.md).
 - **A persistent directory removal is its own record** (F7i, core system):
   `SYS_RMDIR` now works on `/data`. zcfs gains the payload-free `KIND_RMDIR`
   record, naming the node in the header exactly as `UNLINK` names a file, and

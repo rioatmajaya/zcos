@@ -246,6 +246,8 @@ pub enum TaskError {
     UnknownTask,
     /// No task is alive.
     NoTasks,
+    /// The slot still holds a live task, so it cannot be reaped.
+    StillRunning,
 }
 
 /// A bounded table of tasks with round-robin switching.
@@ -257,6 +259,12 @@ pub struct TaskTable<const N: usize> {
     tasks: [Option<Task>; N],
     current: usize,
     switches: u64,
+    /// The generation each slot hands out at its next occupation.
+    ///
+    /// Reaping empties a slot, so the record is not enough: this counter is
+    /// what keeps every incarnation of the same index monotonic, because a
+    /// slot freed by a reap must never hand out a generation it already used.
+    next_generation: [u32; N],
 }
 
 impl<const N: usize> TaskTable<N> {
@@ -267,6 +275,7 @@ impl<const N: usize> TaskTable<N> {
             tasks: [None; N],
             current: 0,
             switches: 0,
+            next_generation: [1; N],
         }
     }
 
@@ -299,6 +308,11 @@ impl<const N: usize> TaskTable<N> {
         let Some(index) = self.tasks.iter().position(|slot| slot.is_none()) else {
             return Err(TaskError::TableFull);
         };
+        // The slot's counter hands out each occupation's generation, so a
+        // spawn into a slot a previous tenant reaped keeps the history
+        // monotonic instead of starting over at generation 1.
+        let generation = self.next_generation[index];
+        self.next_generation[index] = self.next_generation[index].saturating_add(1);
         self.tasks[index] = Some(Task {
             regs,
             frame,
@@ -307,7 +321,7 @@ impl<const N: usize> TaskTable<N> {
             ready: false,
             cr3,
             owner,
-            generation: 1,
+            generation,
             exit_status: 0,
             session,
         });
@@ -497,8 +511,10 @@ impl<const N: usize> TaskTable<N> {
         task.ready = false;
         // A revive is a new incarnation: the generation rises so a reference
         // to the previous one can be detected as stale, and the old exit
-        // status does not carry over.
-        task.generation = task.generation.saturating_add(1);
+        // status does not carry over. The slot's counter supplies it, so a
+        // revive that follows a reap stays monotonic too.
+        task.generation = self.next_generation[index];
+        self.next_generation[index] = self.next_generation[index].saturating_add(1);
         task.exit_status = 0;
         Ok(())
     }
@@ -515,6 +531,27 @@ impl<const N: usize> TaskTable<N> {
         task.alive = false;
         task.blocked = false;
         task.ready = false;
+        Ok(())
+    }
+
+    /// Removes a dead slot's record, making the index free for a later spawn.
+    ///
+    /// This is the reap half of the wait contract: a caller that consumed the
+    /// exit status has no further use for the record, and only dropping the
+    /// record lets [`spawn_with_session`](Self::spawn_with_session) claim the
+    /// slot again. A live slot is refused, because a wait must never end a
+    /// running task, and an empty slot is refused like any unknown index.
+    ///
+    /// Only the registry record is dropped: the task's address space, code,
+    /// and stack frames stay allocated until reboot, because the address-space
+    /// builder has no teardown path yet.
+    pub fn reap(&mut self, index: usize) -> Result<(), TaskError> {
+        match self.tasks.get(index) {
+            Some(Some(task)) if !task.alive => {}
+            Some(Some(_)) => return Err(TaskError::StillRunning),
+            _ => return Err(TaskError::UnknownTask),
+        }
+        self.tasks[index] = None;
         Ok(())
     }
 
@@ -883,16 +920,66 @@ mod task_table_tests {
     fn a_generation_saturates_instead_of_wrapping() {
         let mut table = TaskTable::<1>::new();
         let zero = table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000, Identity::ROOT).unwrap();
-        // Drive the counter near its ceiling, then confirm it clamps.
-        table.tasks[zero].as_mut().unwrap().generation = u32::MAX - 1;
+        // Drive the slot's counter near its ceiling, then confirm it clamps.
+        table.next_generation[zero] = u32::MAX - 1;
+        table.tasks[zero].as_mut().unwrap().generation = u32::MAX - 2;
         table
             .respawn(zero, SyscallRegs::EMPTY, frame(0x200))
             .unwrap();
-        assert_eq!(table.generation_of(zero), Some(u32::MAX));
+        assert_eq!(table.generation_of(zero), Some(u32::MAX - 1));
         table
             .respawn(zero, SyscallRegs::EMPTY, frame(0x300))
             .unwrap();
         assert_eq!(table.generation_of(zero), Some(u32::MAX));
+        table
+            .respawn(zero, SyscallRegs::EMPTY, frame(0x400))
+            .unwrap();
+        assert_eq!(table.generation_of(zero), Some(u32::MAX));
+    }
+
+    #[test]
+    fn reap_clears_a_dead_slot_and_refuses_live_or_unknown_ones() {
+        let mut table = TaskTable::<2>::new();
+        let zero = table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000, Identity::ROOT).unwrap();
+        // A live slot cannot be reaped: a wait must never end a running task.
+        assert_eq!(table.reap(zero), Err(TaskError::StillRunning));
+        assert!(table.is_alive(zero));
+
+        // Once the task has exited, the reap succeeds and leaves no record.
+        table.mark_current_exit(9);
+        let mut regs = SyscallRegs::EMPTY;
+        let mut irq = IrqFrame::EMPTY;
+        let _ = table.exit_current(&mut regs, &mut irq);
+        assert!(!table.is_alive(zero));
+        assert_eq!(table.reap(zero), Ok(()));
+        assert_eq!(table.generation_of(zero), None);
+        assert_eq!(table.exit_status_of(zero), None);
+
+        // Reaping it again, or any empty index, is refused as unknown.
+        assert_eq!(table.reap(zero), Err(TaskError::UnknownTask));
+        assert_eq!(table.reap(9), Err(TaskError::UnknownTask));
+    }
+
+    #[test]
+    fn a_spawn_into_a_reaped_slot_carries_the_next_generation() {
+        let mut table = TaskTable::<2>::new();
+        let zero = table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000, Identity::ROOT).unwrap();
+        assert_eq!(table.generation_of(zero), Some(1));
+
+        table.mark_current_exit(0);
+        let mut regs = SyscallRegs::EMPTY;
+        let mut irq = IrqFrame::EMPTY;
+        let _ = table.exit_current(&mut regs, &mut irq);
+        table.reap(zero).unwrap();
+
+        // The reap freed the lowest slot, so the next spawn reclaims that
+        // index — and its generation rises instead of restarting at 1.
+        let again = table
+            .spawn(SyscallRegs::EMPTY, frame(0x700), 0x4000, Identity::ROOT)
+            .unwrap();
+        assert_eq!(again, zero);
+        assert_eq!(table.generation_of(again), Some(2));
+        assert_eq!(table.next_generation[again], 3);
     }
 
     #[test]

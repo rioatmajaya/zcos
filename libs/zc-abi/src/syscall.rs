@@ -309,6 +309,31 @@ pub const SYS_SYNC: u64 = 49;
 /// lands.
 pub const SYS_SEEK: u64 = 50;
 
+/// Creates one new task from a named initramfs image.
+///
+/// `rdi` and `rsi` point at the image name and its length (for instance
+/// `producer.elf`). The kernel builds a fresh address space with the same ELF
+/// loader the boot used, gives one stack page, and selects the lowest free
+/// task slot — one whose exit a [`SYS_WAIT`] caller has already consumed. The
+/// child inherits the caller's identity and session; it finds no authority
+/// beyond the fresh capability table its spawner may delegate into. Calling
+/// needs `WRITE` on [`crate::task::spawn_cap`], the process-lifecycle grant.
+/// Returns the child's task slot index, or `u64::MAX` for a missing
+/// or unmappable image, a window client's name, or a full table.
+pub const SYS_SPAWN: u64 = 51;
+
+/// Waits for a task slot to end and consumes its exit record.
+///
+/// `rdi` is the task slot. While the slot is alive the call blocks, as an IPC
+/// receive does, and retries when the slot's own exit or fault wakes every
+/// other task. Once any exit or fault has ended it, the call returns the
+/// status the slot recorded and — this is the reap — removes the slot record,
+/// so the slot index becomes free for a later [`SYS_SPAWN`]. Waiting on a
+/// supervised service is refused because `initd` owns that lifecycle through
+/// [`SYS_SERVICE_START`]; waiting on the caller's own slot is refused too.
+/// Every failure returns `u64::MAX`.
+pub const SYS_WAIT: u64 = 52;
+
 /// Packs a user and group id into the one word [`SYS_GETID`] returns.
 #[must_use]
 pub const fn identity_word(uid: u32, gid: u32) -> u64 {
@@ -438,6 +463,8 @@ mod tests {
         assert_eq!(SYS_RENAME, 48);
         assert_eq!(SYS_SYNC, 49);
         assert_eq!(SYS_SEEK, 50);
+        assert_eq!(SYS_SPAWN, 51);
+        assert_eq!(SYS_WAIT, 52);
         assert_eq!(READDIR_ENTRY, 0);
         assert_eq!(READDIR_END, 1);
     }

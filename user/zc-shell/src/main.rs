@@ -52,8 +52,8 @@ use zc_user::{
     READDIR_ENTRY, SERVICE_CATALOG, Stat, TASK_SLOTS, TaskInfo, chmod, close, create, getid,
     identity_gid, identity_uid, log, log_parts, log_read, mount, open, poweroff, read, readdir,
     send_to, serial_read, service_faults, service_health, service_is_ready, service_is_up,
-    service_restarts, session, stat, task_exit_with, task_info, umount, unlink, mkdir, rmdir,
-    rename, seek, sync, write,
+    service_restarts, session, spawn, stat, task_exit_with, task_info, umount, unlink, mkdir, rmdir,
+    rename, seek, sync, wait, write,
 };
 
 /// Contents `persist` writes and expects to read back.
@@ -237,6 +237,23 @@ fn parse_octal(text: &[u8]) -> Option<u32> {
     Some(value)
 }
 
+/// Parses up to three decimal digits into a task slot; `None` on any other
+/// byte. The kernel bounds the slot again, so this only rejects malformed
+/// command input before a syscall is made.
+fn parse_decimal(text: &[u8]) -> Option<u64> {
+    if text.is_empty() || text.len() > 3 {
+        return None;
+    }
+    let mut value = 0u64;
+    for &byte in text {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value * 10 + u64::from(byte - b'0');
+    }
+    Some(value)
+}
+
 /// Logs a raw byte slice as text.
 fn print_bytes(bytes: &[u8]) {
     let mut chunk = [0u8; 64];
@@ -293,7 +310,7 @@ fn run(line: &[u8]) -> bool {
     }
     match argv[0] {
         b"help" => {
-            log("Commands: help echo cat ls stat write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc ps dmesg poweroff exit\n");
+            log("Commands: help echo cat ls stat write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc ps spawn wait dmesg poweroff exit\n");
         }
         b"echo" => {
             for index in 1..count {
@@ -761,6 +778,50 @@ fn run(line: &[u8]) -> bool {
             out_bytes(b"ps: ");
             out_u64(alive);
             out_bytes(b" alive\n");
+            out_flush();
+        }
+        b"spawn" => {
+            if count < 2 {
+                log("usage: spawn <image>\n");
+                return false;
+            }
+            let name = core::str::from_utf8(argv[1]).unwrap_or("");
+            let slot = spawn(name);
+            if slot == u64::MAX {
+                // The kernel logs the exact reason (missing image, window
+                // client, no free slot); this message stays neutral, as
+                // `cat` does for a missing or denied file.
+                log("spawn: cannot spawn\n");
+                return false;
+            }
+            out_bytes(b"spawn: task ");
+            out_u64(slot);
+            out_bytes(b" running ");
+            out_bytes(argv[1]);
+            out_bytes(b"\n");
+            out_flush();
+        }
+        b"wait" => {
+            if count < 2 {
+                log("usage: wait <slot>\n");
+                return false;
+            }
+            let Some(slot) = parse_decimal(argv[1]) else {
+                log("wait: bad slot\n");
+                return false;
+            };
+            let status = wait(slot);
+            if status == u64::MAX {
+                // Supervised, own, unknown, and already reaped slots all fail
+                // closed; the kernel's audit line names which one it was.
+                log("wait: cannot wait\n");
+                return false;
+            }
+            out_bytes(b"wait: task ");
+            out_u64(slot);
+            out_bytes(b" exited status ");
+            out_u64(status);
+            out_bytes(b"\n");
             out_flush();
         }
         b"dmesg" => {

@@ -14,7 +14,8 @@ use zc_abi::{
     SYS_SERVICE_READY, SYS_SERVICE_START, SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_SESSION,
     SYS_STAT,
     SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY,
-    SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TASK_INFO, SYS_TERM_READ, SYS_UMOUNT, SYS_UNLINK, SYS_SYNC,
+    SYS_SPAWN, SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TASK_INFO, SYS_TERM_READ, SYS_UMOUNT, SYS_UNLINK,
+    SYS_SYNC, SYS_WAIT,
     SYS_WINDOW_CLOSE, SYS_WINDOW_ID,
     SYS_WINDOW_READ, SYS_WRITE, SYS_YIELD, SyscallError,
 };
@@ -97,6 +98,10 @@ pub enum Action {
     Sync,
     /// Move an open descriptor's offset.
     Seek,
+    /// Create a task from a named initramfs image.
+    Spawn,
+    /// Wait for a task slot to end and consume its exit record.
+    Wait,
     /// Change a file's permission bits.
     Chmod,
     /// Allocate a pixel surface and its backing frames.
@@ -186,6 +191,8 @@ pub const fn dispatch(number: u64) -> Result<Action, SyscallError> {
         SYS_RENAME => Ok(Action::Rename),
         SYS_SYNC => Ok(Action::Sync),
         SYS_SEEK => Ok(Action::Seek),
+        SYS_SPAWN => Ok(Action::Spawn),
+        SYS_WAIT => Ok(Action::Wait),
         _ => Err(SyscallError::InvalidNumber),
     }
 }
@@ -247,12 +254,14 @@ mod tests {
         assert_eq!(dispatch(SYS_RENAME), Ok(Action::Rename));
         assert_eq!(dispatch(SYS_SYNC), Ok(Action::Sync));
         assert_eq!(dispatch(SYS_SEEK), Ok(Action::Seek));
+        assert_eq!(dispatch(SYS_SPAWN), Ok(Action::Spawn));
+        assert_eq!(dispatch(SYS_WAIT), Ok(Action::Wait));
     }
 
     #[test]
     fn unknown_numbers_are_rejected() {
-        // The last assigned number is SYS_SEEK (50), so probe past it.
-        assert_eq!(dispatch(51), Err(SyscallError::InvalidNumber));
+        // The last assigned number is SYS_WAIT (52), so probe past it.
+        assert_eq!(dispatch(53), Err(SyscallError::InvalidNumber));
         assert_eq!(
             dispatch(u64::MAX),
             Err(SyscallError::InvalidNumber)

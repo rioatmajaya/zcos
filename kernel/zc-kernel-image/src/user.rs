@@ -125,6 +125,16 @@ const STACK_J_TOP: u64 = 0x40_E000;
 /// Second window-client stack page backing that top.
 const STACK_J_PAGE: u64 = STACK_J_TOP - PAGE_SIZE;
 
+/// Top of the user stack a runtime-spawned task receives.
+///
+/// Every task owns a private address space, so reusing task A's virtual stack
+/// page is safe: the child's page table maps only the fresh frame there, and
+/// no two tasks ever run with the same CR3.
+const SPAWN_STACK_TOP: u64 = STACK_A_TOP;
+
+/// Fresh stack frame a runtime-spawned task maps at [`SPAWN_STACK_TOP`].
+const SPAWN_STACK_PAGE: u64 = SPAWN_STACK_TOP - PAGE_SIZE;
+
 /// File names of the bring-up tasks inside the initramfs.
 const PRODUCER_NAME: &str = "producer.elf";
 /// Consumer binary name.
@@ -536,6 +546,14 @@ static mut START_TICKS: u64 = 0;
 
 /// Boot-info pointer saved for the post-user boot tail.
 static mut SAVED_BOOT_INFO: u64 = 0;
+
+/// Physical addresses of the two shared framebuffer page tables.
+///
+/// Saved at setup so a task spawned at runtime sees the same framebuffer the
+/// boot tasks do, built by the same [`new_address_space`] helper. The tables
+/// are shared, read-only policy at the page-directory level; a spawned task
+/// still needs a window capability before it can draw.
+static mut FB_TABLES: [u64; 2] = [0; 2];
 
 /// Physical base of the device manager's DMA window, or zero when none was
 /// provisioned. Written once at spawn, read by the coherence check after no
@@ -1151,6 +1169,189 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             } else {
                 u64::MAX
             });
+            0
+        }
+        Ok(Action::Spawn) => {
+            let me = tasks.current();
+            // SAFETY: owned here; traps cannot nest inside a handler.
+            let authorized =
+                unsafe { (*addr_of!(CAPS))[me].holds_object(zc_abi::spawn_cap(), Rights::WRITE) };
+            if !authorized {
+                let _ = crate::serial::print(format_args!(
+                    "spawn: task {me} denied (no lifecycle grant)\n",
+                ));
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            let Some(name_bytes) = validate_user_slice(tasks, regs.rdi, regs.rsi) else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            let Ok(name) = core::str::from_utf8(name_bytes) else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            // Window clients belong to the boot layout: their slot, stack,
+            // compositor link, surface, and input session are arranged before
+            // any task runs, so a runtime copy would come up orphaned.
+            if is_window_client_name(name) {
+                let _ = crate::serial::print(format_args!(
+                    "spawn: task {me} refused window client {name}\n",
+                ));
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            // SAFETY: the pointer was saved at boot and the archive outlives
+            // every task. A zero pointer can only mean setup never ran, which
+            // no syscall can observe, but the check keeps the dereference
+            // honest.
+            let boot_info = unsafe { SAVED_BOOT_INFO as *const BootInfo };
+            if boot_info.is_null() {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            let Some(bytes) = find_initramfs_file(boot_info, name) else {
+                let _ = crate::serial::print(format_args!(
+                    "spawn: task {me} found no image {name}\n",
+                ));
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            // Parse before taking any frame, so a malformed image costs
+            // nothing but the refusal. `map_elf` parses again; the second
+            // read is cheaper than a speculative address space.
+            if zc_elf::parse(bytes).is_err() {
+                let _ = crate::serial::print(format_args!(
+                    "spawn: task {me} found an invalid image {name}\n",
+                ));
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            // The spawn takes the lowest empty slot, the same one a reap
+            // freed; find it first so the child's fresh authority tables are
+            // reset before the slot becomes visible to a tick.
+            let Some(slot) = (0..TASK_COUNT).find(|&index| tasks.generation_of(index).is_none())
+            else {
+                let _ = crate::serial::print(format_args!(
+                    "spawn: task {me} found no free slot\n",
+                ));
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            let alloc = crate::frames();
+            let Some(stack) = alloc.allocate() else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            // SAFETY: the saved tables were built once at setup and are not
+            // mutated afterwards; the framebuffer window is shared policy.
+            let (cr3, pt) = new_address_space(alloc, unsafe { &*addr_of!(FB_TABLES) });
+            let entry = match map_elf(name, bytes, alloc, pt) {
+                Ok(entry) => entry,
+                Err(_) => {
+                    let _ = crate::serial::print(format_args!(
+                        "spawn: task {me} cannot map {name}\n",
+                    ));
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+            };
+            // SAFETY: the private table is identity-mapped and belongs to the
+            // not-yet-runnable child; no other task can observe it.
+            unsafe {
+                set_table_entry(
+                    pt,
+                    page_index(SPAWN_STACK_PAGE),
+                    stack.start_address() | USER_PAGE_FLAGS,
+                );
+            }
+            let owner = tasks.current_owner();
+            let session = tasks.current_session();
+            let init_frame = IrqFrame {
+                rip: entry,
+                cs: u64::from(USER_CS),
+                rflags: USER_RFLAGS,
+                rsp: SPAWN_STACK_TOP,
+                ss: u64::from(USER_SS),
+            };
+            // A child inherits identity and session only. Authority and
+            // descriptors start empty: nothing a previous occupant held can
+            // leak into the new incarnation.
+            // SAFETY: owned here; no task can run between the resets and the
+            // spawn because interrupts stay masked in this handler.
+            unsafe {
+                (*addr_of_mut!(CAPS))[slot] = CapabilityTable::<8>::new();
+                (*addr_of_mut!(FDS))[slot] = DescriptorTable::new();
+            }
+            match tasks.spawn_with_session(SyscallRegs::EMPTY, init_frame, cr3, owner, session) {
+                Ok(index) => {
+                    let generation = tasks.generation_of(index).unwrap_or(0);
+                    let _ = crate::serial::print(format_args!(
+                        "spawn: task {me} started {name} as task {index} gen {generation}\n",
+                    ));
+                    regs.set_result(index as u64);
+                    0
+                }
+                Err(_) => {
+                    // The slot was free a moment ago and nothing ran since,
+                    // so this is unreachable; answer with the failure code
+                    // rather than a panic a syscall must not cause.
+                    let _ = crate::serial::print(format_args!(
+                        "spawn: task {me} could not claim slot {slot}\n",
+                    ));
+                    regs.set_result(u64::MAX);
+                    0
+                }
+            }
+        }
+        Ok(Action::Wait) => {
+            let me = tasks.current();
+            // SAFETY: owned here; traps cannot nest inside a handler.
+            let authorized =
+                unsafe { (*addr_of!(CAPS))[me].holds_object(zc_abi::spawn_cap(), Rights::WRITE) };
+            if !authorized {
+                let _ = crate::serial::print(format_args!(
+                    "wait: task {me} denied (no lifecycle grant)\n",
+                ));
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            let slot = regs.rdi as usize;
+            if slot == me {
+                let _ = crate::serial::print(format_args!(
+                    "wait: task {me} refused its own slot\n",
+                ));
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            // A supervised service's lifecycle belongs to `initd` through the
+            // service syscalls and fault events; a plain wait must not consume
+            // the record the supervisor is about to act on.
+            if slot < TASK_COUNT && service::for_task(slot).is_some() {
+                let _ = crate::serial::print(format_args!(
+                    "wait: task {me} refused supervised task {slot}\n",
+                ));
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            if tasks.is_alive(slot) {
+                // Any exit or fault unblocks every task, so the replay after
+                // this wake either sees the slot dead or blocks again.
+                return block_with_retry(tasks, regs, frame, 0);
+            }
+            let Some(status) = tasks.exit_status_of(slot) else {
+                // Out of range or already reaped: no record to wait on.
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            if tasks.reap(slot).is_err() {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            let _ = crate::serial::print(format_args!(
+                "wait: task {me} reaped task {slot} status {status}\n",
+            ));
+            regs.set_result(u64::from(status));
             0
         }
         Ok(Action::Create) => {
@@ -3459,6 +3660,10 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
     let Some(fb_tables) = build_fb_tables(alloc) else {
         crate::fail("framebuffer tables unavailable");
     };
+    // SAFETY: written once here, before any task runs; a runtime spawn reads
+    // them later through `addr_of!`, never through a reference that could
+    // alias this write.
+    unsafe { addr_of_mut!(FB_TABLES).write(fb_tables); }
 
     // One page for the keyboard domain's shared input ring. It stays
     // unmapped in every address space until a task claims the source, so an
@@ -3626,7 +3831,10 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
     let mut index = 0;
     while index < TASK_COUNT {
         let (cr3, pt) = new_address_space(alloc, &fb_tables);
-        entries[index] = map_elf(names[index], binaries[index], alloc, pt);
+        entries[index] = match map_elf(names[index], binaries[index], alloc, pt) {
+            Ok(entry) => entry,
+            Err(error) => crate::fail(error.message()),
+        };
         // SAFETY: the loader's tables are identity-mapped.
         unsafe {
             set_table_entry(
@@ -3780,10 +3988,16 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
             let _ = caps[INITD_INDEX].insert(device::service_grant(spec.id));
             let _ = caps[service::SHELL_TASK].insert(device::service_status_grant(spec.id));
         }
+        // The shell also holds the process-lifecycle grant: `spawn` adds work
+        // to the task table and `wait` reaps how it ended, so one authority
+        // covers both halves of the contract.
+        let _ = caps[service::SHELL_TASK].insert(device::spawn_grant());
         let _ = crate::serial::print(format_args!(
-            "service: {} roles, {} grants (initd -> blk, kbd; shell -> status)\n",
+            "service: {} roles, {} grants (initd -> blk, kbd; shell -> status, spawn)\n",
             zc_abi::SERVICE_CATALOG.len(),
-            device::INITD_SETUP_GRANTS + device::SHELL_SETUP_GRANTS,
+            device::INITD_SETUP_GRANTS
+                + device::SHELL_SETUP_GRANTS
+                + device::SHELL_LIFECYCLE_GRANTS,
         ));
         // The display task alone may mint surfaces. The factory is a distinct
         // object id, so a surface capability can never be mistaken for it, and
@@ -4196,6 +4410,17 @@ fn check_user_range(pt: u64, ptr: u64, len: u64, max: u64) -> Option<()> {
     Some(())
 }
 
+/// Returns whether `name` names a window client image.
+///
+/// Window clients are bound to the boot layout: their task slot, compositor
+/// link, surface, and input session are arranged before any task runs, so a
+/// runtime spawn cannot reproduce them and refuses them by name. `fm.elf` is
+/// listed explicitly because it is only a window-client name in the
+/// `fm-proof` build, and a name refusal must not depend on a feature.
+fn is_window_client_name(name: &str) -> bool {
+    name == WINDOW_CLIENT_NAME || name == SECOND_WINDOW_CLIENT_NAME || name == "fm.elf"
+}
+
 /// Finds a file in the initramfs by name.
 ///
 /// Returns the file bytes, or `None` when the archive is missing the entry.
@@ -4235,6 +4460,42 @@ fn find_initramfs_file(boot_info: *const BootInfo, name: &str) -> Option<&'stati
     bytes.get(offset..offset + len)
 }
 
+/// Why an image could not be mapped into a task address space.
+///
+/// Runtime spawn must answer a bad image with a refusal, not halt the machine:
+/// the boot path is allowed to `fail`, a syscall is not. The variants keep the
+/// boot diagnostics distinct while the syscall turns every one into
+/// `u64::MAX`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ElfMapError {
+    InvalidImage,
+    SegmentOverflow,
+    OutsideWindow,
+    ReachesDmaQueue,
+    OverlapsStacks,
+    EntryUnmapped,
+    TooLarge,
+    OutOfFrames,
+    MissingPage,
+}
+
+impl ElfMapError {
+    /// Boot-time diagnostic text, unchanged from when `map_elf` halted.
+    const fn message(self) -> &'static str {
+        match self {
+            Self::InvalidImage => "user task ELF invalid",
+            Self::SegmentOverflow => "user segment overflows",
+            Self::OutsideWindow => "user segment outside mapping window",
+            Self::ReachesDmaQueue => "block domain image reaches its DMA queue",
+            Self::OverlapsStacks => "user segment overlaps stacks",
+            Self::EntryUnmapped => "user entry outside loaded segments",
+            Self::TooLarge => "user image too large",
+            Self::OutOfFrames => "user setup found no segment frame",
+            Self::MissingPage => "user page missing",
+        }
+    }
+}
+
 /// Loads one task ELF into user pages and returns its entry point.
 ///
 /// Every `PT_LOAD` segment lands in freshly allocated frames, zero-filled
@@ -4248,38 +4509,34 @@ fn map_elf(
     bytes: &[u8],
     alloc: &mut FrameAllocator<'_>,
     pt_phys: u64,
-) -> u64 {
-    let image = match zc_elf::parse(bytes) {
-        Ok(image) => image,
-        Err(_) => crate::fail("user task ELF invalid"),
-    };
+) -> Result<u64, ElfMapError> {
+    let image = zc_elf::parse(bytes).map_err(|_| ElfMapError::InvalidImage)?;
     // First pass: validate every segment and collect the entry point.
     let entry = image.entry();
     let mut entry_mapped = false;
     for segment in image.segments() {
         let vaddr = segment.vaddr;
-        let end = match vaddr.checked_add(segment.memsz) {
-            Some(end) => end,
-            None => crate::fail("user segment overflows"),
-        };
+        let end = vaddr
+            .checked_add(segment.memsz)
+            .ok_or(ElfMapError::SegmentOverflow)?;
         if vaddr < USER_CODE_VIRT || end > USER_WINDOW_END {
-            crate::fail("user segment outside mapping window");
+            return Err(ElfMapError::OutsideWindow);
         }
         // The block domain's DMA queue is mapped just above its image, so its
         // `.bss` must stop short of it. The window check above would allow an
         // image to grow over the queue and corrupt the ring silently.
         if name == BLK_NAME && end > zc_abi::QUEUE_VIRT {
-            crate::fail("block domain image reaches its DMA queue");
+            return Err(ElfMapError::ReachesDmaQueue);
         }
         if vaddr < STACK_ZONE_END && STACK_ZONE_START < end {
-            crate::fail("user segment overlaps stacks");
+            return Err(ElfMapError::OverlapsStacks);
         }
         if entry >= vaddr && entry < end {
             entry_mapped = true;
         }
     }
     if !entry_mapped {
-        crate::fail("user entry outside loaded segments");
+        return Err(ElfMapError::EntryUnmapped);
     }
     // Second pass: one frame per virtual page, then copy each segment's
     // file bytes at its page offset so shared pages merge correctly.
@@ -4297,10 +4554,10 @@ fn map_elf(
         loop {
             if !pages[..page_count].iter().any(|(vpn, _)| *vpn == page) {
                 if page_count >= pages.len() {
-                    crate::fail("user image too large");
+                    return Err(ElfMapError::TooLarge);
                 }
                 let Some(frame) = alloc.allocate() else {
-                    crate::fail("user setup found no segment frame");
+                    return Err(ElfMapError::OutOfFrames);
                 };
                 // SAFETY: fresh frame inside the identity map.
                 unsafe {
@@ -4336,16 +4593,15 @@ fn map_elf(
             let page = at & !(PAGE_SIZE - 1);
             let offset = (at - page) as usize;
             let take = remaining.min(PAGE_SIZE as usize - offset);
-            let phys = match pages[..page_count].iter().find(|(vpn, _)| *vpn == page) {
-                Some((_, phys)) => *phys,
-                None => crate::fail("user page missing"),
+            let Some((_, phys)) = pages[..page_count].iter().find(|(vpn, _)| *vpn == page) else {
+                return Err(ElfMapError::MissingPage);
             };
             // SAFETY: the parser validated the file range; the destination
             // is the zeroed frame mapped above.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     bytes.as_ptr().add(file_offset),
-                    (phys + offset as u64) as *mut u8,
+                    (*phys + offset as u64) as *mut u8,
                     take,
                 );
             }
@@ -4354,7 +4610,7 @@ fn map_elf(
             at += take as u64;
         }
     }
-    entry
+    Ok(entry)
 }
 
 /// Publishes the input domain's ring page.
