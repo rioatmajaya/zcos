@@ -53,7 +53,7 @@ use zc_user::{
     identity_gid, identity_uid, log, log_parts, log_read, mount, open, poweroff, read, readdir,
     send_to, serial_read, service_faults, service_health, service_is_ready, service_is_up,
     service_restarts, session, spawn, stat, task_exit_with, task_info, umount, unlink, mkdir, rmdir,
-    rename, seek, sync, wait, write,
+    rename, seek, sync, wait, write, kill,
 };
 
 /// Contents `persist` writes and expects to read back.
@@ -310,7 +310,7 @@ fn run(line: &[u8]) -> bool {
     }
     match argv[0] {
         b"help" => {
-            log("Commands: help echo cat ls stat write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc ps spawn wait dmesg poweroff exit\n");
+            log("Commands: help echo cat ls stat write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc ps spawn kill wait dmesg poweroff exit\n");
         }
         b"echo" => {
             for index in 1..count {
@@ -798,6 +798,39 @@ fn run(line: &[u8]) -> bool {
             out_u64(slot);
             out_bytes(b" running ");
             out_bytes(argv[1]);
+            out_bytes(b"\n");
+            out_flush();
+        }
+        b"kill" => {
+            if count < 2 {
+                log("usage: kill <slot> [status]\n");
+                return false;
+            }
+            let Some(slot) = parse_decimal(argv[1]) else {
+                log("kill: bad slot\n");
+                return false;
+            };
+            // A status is optional so `kill <slot>` means the conventional
+            // status 0; the proof passes 7 to show the value round-trips.
+            let status = if count >= 3 {
+                let Some(status) = parse_decimal(argv[2]) else {
+                    log("kill: bad status\n");
+                    return false;
+                };
+                status
+            } else {
+                0
+            };
+            if kill(slot, status) == u64::MAX {
+                // The kernel logs the exact reason (supervised, boot task,
+                // dead, own slot); this message stays neutral like `wait`'s.
+                log("kill: cannot kill\n");
+                return false;
+            }
+            out_bytes(b"kill: task ");
+            out_u64(slot);
+            out_bytes(b" status ");
+            out_u64(status);
             out_bytes(b"\n");
             out_flush();
         }

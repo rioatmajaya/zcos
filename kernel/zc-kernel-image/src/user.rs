@@ -572,6 +572,16 @@ static mut FB_TABLES: [u64; 2] = [0; 2];
 static mut SPAWN_FRAMES: [FrameLedger<SPAWN_FRAME_CAP>; TASK_COUNT] =
     [FrameLedger::new(); TASK_COUNT];
 
+/// Slots the runtime spawn path claimed and a wait has not reaped yet.
+///
+/// This is the provenance `SYS_KILL` checks: only a task created by
+/// [`SYS_SPAWN`] may be ended by a peer. The boot layout's slots keep `false`,
+/// because their lifecycle is arranged at setup and belongs to exit, fault, or
+/// the service supervisor — never to whichever task holds the lifecycle
+/// grant. A successful wait clears the bit with the same reap that releases
+/// the slot's frames.
+static mut SPAWNED: [bool; TASK_COUNT] = [false; TASK_COUNT];
+
 /// Physical base of the device manager's DMA window, or zero when none was
 /// provisioned. Written once at spawn, read by the coherence check after no
 /// task can run.
@@ -1321,8 +1331,10 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 (*addr_of_mut!(FDS))[slot] = DescriptorTable::new();
                 // The ledger becomes the slot's record at the same moment the
                 // slot becomes runnable; a wait observes it only after this
-                // handler returns, so no task ever sees a partial record.
+                // handler returns, so no task ever sees a partial record. The
+                // provenance bit is what a peer kill is checked against.
                 (*addr_of_mut!(SPAWN_FRAMES))[slot] = frames;
+                (*addr_of_mut!(SPAWNED))[slot] = true;
             }
             match tasks.spawn_with_session(SyscallRegs::EMPTY, init_frame, cr3, owner, session) {
                 Ok(index) => {
@@ -1338,6 +1350,8 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                     // so this is unreachable; answer with the failure code
                     // rather than a panic a syscall must not cause.
                     let _ = reclaim_spawn_frames(slot);
+                    // SAFETY: as above; the slot never became runnable.
+                    unsafe { (*addr_of_mut!(SPAWNED))[slot] = false };
                     let _ = crate::serial::print(format_args!(
                         "spawn: task {me} could not claim slot {slot}\n",
                     ));
@@ -1390,6 +1404,10 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 regs.set_result(u64::MAX);
                 return 0;
             }
+            // The reap ended the slot's runtime provenance with its record, so
+            // a later spawn into this index starts as a fresh runtime claim.
+            // SAFETY: owned here; no other task can run inside this handler.
+            unsafe { (*addr_of_mut!(SPAWNED))[slot] = false };
             let reclaimed = reclaim_spawn_frames(slot);
             let _ = crate::serial::print(format_args!(
                 "wait: task {me} reaped task {slot} status {status}\n",
@@ -1403,6 +1421,83 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 ));
             }
             regs.set_result(u64::from(status));
+            0
+        }
+        Ok(Action::Kill) => {
+            let me = tasks.current();
+            // SAFETY: owned here; traps cannot nest inside a handler.
+            let authorized =
+                unsafe { (*addr_of!(CAPS))[me].holds_object(zc_abi::spawn_cap(), Rights::WRITE) };
+            if !authorized {
+                let _ = crate::serial::print(format_args!(
+                    "kill: task {me} denied (no lifecycle grant)\n",
+                ));
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            let slot = regs.rdi as usize;
+            let status = regs.rsi as u32;
+            if slot == me {
+                let _ = crate::serial::print(format_args!(
+                    "kill: task {me} refused its own slot\n",
+                ));
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            if slot >= TASK_COUNT {
+                let _ = crate::serial::print(format_args!(
+                    "kill: task {me} refused unknown task {slot}\n",
+                ));
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            // A supervised service belongs to `initd` through the service
+            // syscalls and fault events, so a peer kill must not race that
+            // lifecycle.
+            if service::for_task(slot).is_some() {
+                let _ = crate::serial::print(format_args!(
+                    "kill: task {me} refused supervised task {slot}\n",
+                ));
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            if !tasks.is_alive(slot) {
+                let _ = crate::serial::print(format_args!(
+                    "kill: task {me} refused dead task {slot}\n",
+                ));
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            // Only the runtime spawn path claims a slot for a peer to end.
+            // Boot-layout tasks — the shell, initd, the window clients — are
+            // the machine's fixed scaffolding: killing one would tear down
+            // layout the boot arranged, and their lifecycle belongs to exit,
+            // fault, or the supervisor instead.
+            // SAFETY: bounds were checked above; no task runs inside this
+            // handler.
+            if !unsafe { (*addr_of!(SPAWNED))[slot] } {
+                let _ = crate::serial::print(format_args!(
+                    "kill: task {me} refused boot task {slot}\n",
+                ));
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            if tasks.kill(slot, status).is_err() {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            // The slot is dead, so its runtime authority must not survive it.
+            // Revoke before the next handler can run, exactly as the exit and
+            // fault paths do.
+            revoke_task_resources(slot);
+            let _ = crate::serial::print(format_args!(
+                "kill: task {me} killed task {slot} status {status}\n",
+            ));
+            // A waiter blocked in `SYS_WAIT` replays and observes the dead
+            // record; every other blocked task retries and blocks again if its
+            // condition still fails, the same wake exit uses.
+            tasks.unblock_all();
+            regs.set_result(0);
             0
         }
         Ok(Action::Create) => {
@@ -2172,7 +2267,7 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 // dies, exactly as the fault path does: a stale TSS bitmap
                 // entry, region, or surface would otherwise outlive the task.
                 revoke_task_resources(entry.task);
-                let _ = tasks.kill(entry.task);
+                let _ = tasks.kill(entry.task, 0);
                 let _ = crate::serial::print(format_args!(
                     "task {me}: service {} stopped, task {} killed\n",
                     entry.name, entry.task,

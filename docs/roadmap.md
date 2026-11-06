@@ -41,7 +41,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F4** | Thread + IPC | ✅ done | `task 0: producer sent 2000`, capability gates |
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 7 grants`, `task 6: devmgr: blk published`, `dma: window coherent ok` |
-| **F7** | VFS & penyimpanan | ✅ F7a–F7k done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch`; `wait: task 2 reclaimed 6 frames from task 0` |
+| **F7** | VFS & penyimpanan | ✅ F7a–F7k done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch`; `wait: task 2 reclaimed 6 frames from task 0`; `kill: task 2 killed task 0 status 7` |
 | **F8** | Desktop | 🔄 F8f, F8d-3a–3d, F8b-2–7, F8e-1–4, F8h-0/0b/1a/1b/1c-1/1c-2/1c-3/1c-4/1c-5/1c-6, F8h-2, F8h-3, live-input check, F8g-1 done | `cap: task 3 delegated 0x20000001 to task 8`; `client: terminal ready`; `client: font vfs ok`; `compositor: font vfs ok`; `font: vfs ok`; `client: window painted`; `client: vfs ok`; `client: pointer ok`; `client: click ok`; `client: ls ok`; `wm: window mapped`; `wm: pointer routed`; `wm: click ok`; `wm: ls ok`; `task 2: data/`; `task 2: kbd`; `task 2: probe`; `win1 entry`; `task 9: client: window 1 idle`; `compositor: window 1 launched` (default/fm run); `task 9: fm: ready` (default/fm run); `task 9: fm: listing ok` (default/fm run); `fm: listing ok` (fm run); `task 9: fm: pointer ok` (fm run); `task 9: fm: open ok` (fm run); `task 9: fm: preview ok` (fm run); `fm: open ok` (fm run); `fm: preview ok` (fm run); `clock: rtc ok` (default run); `compositor: clock live` (default run); `compositor: clock tick` (default run); `compositor: launcher switched window` (default live run); `wm: move ok`; `compositor: frame updated`; `compositor: cursor moved`; `compositor: window dragged`; `compositor: window minimized`; `compositor: window restored`; `compositor: window closed` (close run); `compositor: window erased` (close run); `wm: content ok`; `wm: vfs content ok`; `input: mouse loopback ok`; `input: mouse irq self-test ok`; `fb: cursor ok`; `fb: desktop checksum ok`; `initd: restarted kbd`; `kbd: serving`; `initd: kbd stopped`; `zc-abi` font/terminal/taskbar/cursor/wm/ui/session/vfs/fm host tests pass; `zc-storage` zcfs read_dir tests pass |
 | **F9** | Distribusi & daily driver | ⬜ planned | — |
 
@@ -195,8 +195,11 @@ scheduler heartbeat per AP.
 - [x] The bounded 10-slot task table is documented as a capacity, not a
       process model ([ADR 0050](adr/0050-the-microkernel-revokes-runtime-resources.md)).
 - [x] ZC-native process model: `SYS_SPAWN` starts a task from a named
-      initramfs image and `SYS_WAIT` blocks on a slot then reaps its exit
-      status ([ADR 0070](adr/0070-a-task-is-spawned-by-name-and-waited-by-slot.md)).
+      initramfs image, `SYS_KILL` ends a runtime spawn with a chosen status,
+      and `SYS_WAIT` blocks on a slot then reaps its exit status and frames
+      ([ADR 0070](adr/0070-a-task-is-spawned-by-name-and-waited-by-slot.md),
+      [ADR 0071](adr/0071-a-reap-returns-the-frames-a-spawn-took.md),
+      [ADR 0072](adr/0072-a-runtime-spawn-is-killed-by-its-spawner.md)).
 - [ ] *(follow-up)* Signals or an event-notification mechanism.
 
 **Pass criteria.** `task 0: producer sent 2000` and `task 1: consumer
@@ -450,12 +453,16 @@ VFS → write path → journaling → `fsck`**.
       and, once it is dead, returns the recorded exit status, reaps the
       record, frees the index for the next spawn, and returns the frames the
       spawn allocated — four private table levels, the image pages, and the
-      stack. One lifecycle capability (`WRITE` on a bit-28 object) gates both
-      calls; window clients and supervised service slots are refused. The
-      slot's generation counter survives the reap, so a spawned incarnation
-      never reuses a number (see
-      [ADR 0070](adr/0070-a-task-is-spawned-by-name-and-waited-by-slot.md) and
-      [ADR 0071](adr/0071-a-reap-returns-the-frames-a-spawn-took.md)).
+      stack. `SYS_KILL` ends a runtime spawn with a caller-chosen exit status,
+      revokes its runtime authority, and wakes waiters; a boot-layout task or
+      a supervised service is refused. One lifecycle capability (`WRITE` on a
+      bit-28 object) gates all three calls; window clients and supervised
+      service slots are refused as spawn or kill targets. The slot's
+      generation counter survives the reap, so a spawned incarnation never
+      reuses a number (see
+      [ADR 0070](adr/0070-a-task-is-spawned-by-name-and-waited-by-slot.md),
+      [ADR 0071](adr/0071-a-reap-returns-the-frames-a-spawn-took.md), and
+      [ADR 0072](adr/0072-a-runtime-spawn-is-killed-by-its-spawner.md)).
 - [x] *(follow-up)* Reclaim a reaped task's address space and stack frames. A
       spawn records its allocations in a bounded `FrameLedger`; a successful
       wait releases exactly that record, and a failed spawn releases what it
@@ -532,6 +539,12 @@ VFS → write path → journaling → `fsck`**.
   after restoring the mode. The `perms`, `task`, `service`, `vfs`, and `tmpfs`
   host tests pass, including the root bypass, the owner/group/other classes,
   and the cached-mode descriptor check.
+- F7k: the reaped pair's replacements show generation 2, then a runtime
+  consumer is killed with status 7: `kill: task 2 killed task 0 status 7`,
+  `task 2: ps: slot 0 gen 3 uid=1 gid=1 down status=7 sid=1`, and
+  `wait: task 2 reaped task 0 status 7` followed by `reclaimed 6 frames`.
+  A boot-layout task (`kill 7 7`) and a supervised service (`kill 4 7`) are
+  refused, and the `task`, `syscall`, and `zc-abi` host tests pass.
 - Boot log contains `vfs: mounted` with the filesystem name and mount point.
 - A CI boot writes a known pattern to `/data/probe`, unmounts, remounts, and
   reads it back with a matching checksum: `vfs: persistence ok`.

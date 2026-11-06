@@ -334,6 +334,20 @@ pub const SYS_SPAWN: u64 = 51;
 /// Every failure returns `u64::MAX`.
 pub const SYS_WAIT: u64 = 52;
 
+/// Ends a runtime-spawned task and records its exit status.
+///
+/// `rdi` is the task slot and `rsi` the status stored as the slot's exit
+/// status. The target must be alive and must have been created by
+/// [`SYS_SPAWN`]; the caller's own slot, a boot-layout task, and a supervised
+/// service slot are refused. Calling needs `WRITE` on
+/// [`crate::task::spawn_cap`], the same process-lifecycle grant spawn and wait
+/// use. On success the kernel revokes the target's runtime authority — IRQ and
+/// port claims, MMIO regions, surfaces, window links, and open descriptors —
+/// and wakes every blocked task, so a [`SYS_WAIT`] on the slot observes the
+/// death. The record and the spawn's frames stay until that wait reaps them.
+/// Returns `0`, or `u64::MAX` for every refusal.
+pub const SYS_KILL: u64 = 53;
+
 /// Packs a user and group id into the one word [`SYS_GETID`] returns.
 #[must_use]
 pub const fn identity_word(uid: u32, gid: u32) -> u64 {
@@ -465,6 +479,7 @@ mod tests {
         assert_eq!(SYS_SEEK, 50);
         assert_eq!(SYS_SPAWN, 51);
         assert_eq!(SYS_WAIT, 52);
+        assert_eq!(SYS_KILL, 53);
         assert_eq!(READDIR_ENTRY, 0);
         assert_eq!(READDIR_END, 1);
     }

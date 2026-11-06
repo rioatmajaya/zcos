@@ -345,6 +345,20 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **A runtime spawn can be killed by its spawner** (F7k, core system):
+  `SYS_KILL` ends a task created by `SYS_SPAWN`, records the caller-chosen
+  status as its exit status, revokes its runtime authority — IRQ and port
+  claims, MMIO regions, surfaces, window links, and descriptors — and wakes
+  every blocked task so a waiting peer observes the death. `SYS_WAIT` still
+  performs the reap and returns the killed status and the spawn's frames. The
+  caller needs the same lifecycle grant as spawn and wait; its own slot, a
+  boot-layout task, a supervised service, and an already-dead record are
+  refused, so a second kill never overwrites the first status. The boot proof
+  refuses `kill 7 7` and `kill 4 7`, then spawns a consumer, kills it with
+  status 7, shows `down status=7` in `ps`, and waits it with a six-frame
+  reclaim. The three checksums remain `0xd616ad79aaefb099`,
+  `0x6d66e82d0f2d6fb8`, and `0x78ebd6d359914da7`. See
+  [ADR 0072](docs/adr/0072-a-runtime-spawn-is-killed-by-its-spawner.md).
 - **A reap returns the frames a spawn took** (F7k, core system): `SYS_WAIT`
   now releases the memory a spawned task owns before its slot is reused —
   four private page-table levels, the image pages, and the stack. A spawn

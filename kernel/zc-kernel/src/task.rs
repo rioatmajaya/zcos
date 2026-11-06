@@ -519,18 +519,26 @@ impl<const N: usize> TaskTable<N> {
         Ok(())
     }
 
-    /// Terminates the slot at `index` without scheduling a successor.
+    /// Terminates a live slot at `index` and records `status` as its exit
+    /// status, without scheduling a successor.
     ///
     /// The caller is responsible for revoking the dead task's resources; this
-    /// only flips the slot's state. Returns [`TaskError::UnknownTask`] when the
-    /// index names no slot.
-    pub fn kill(&mut self, index: usize) -> Result<(), TaskError> {
+    /// only flips the slot's state and records the status a later
+    /// [`exit_status_of`](Self::exit_status_of) or [`reap`](Self::reap) caller
+    /// observes. A second kill is refused rather than overwriting the original
+    /// status. Returns [`TaskError::UnknownTask`] when the index names no slot
+    /// or the slot already ended.
+    pub fn kill(&mut self, index: usize, status: u32) -> Result<(), TaskError> {
         let Some(task) = self.tasks.get_mut(index).and_then(Option::as_mut) else {
             return Err(TaskError::UnknownTask);
         };
+        if !task.alive {
+            return Err(TaskError::UnknownTask);
+        }
         task.alive = false;
         task.blocked = false;
         task.ready = false;
+        task.exit_status = status;
         Ok(())
     }
 
@@ -878,10 +886,31 @@ mod task_table_tests {
         table.spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000, Identity::ROOT).unwrap();
         table.spawn(SyscallRegs::EMPTY, frame(0x200), 0x2000, Identity::ROOT).unwrap();
         assert!(table.is_alive(1));
-        table.kill(1).unwrap();
+        table.kill(1, 0).unwrap();
         assert!(!table.is_alive(1));
         assert_eq!(table.alive_count(), 1);
-        assert_eq!(table.kill(9), Err(TaskError::UnknownTask));
+        assert_eq!(table.kill(9, 0), Err(TaskError::UnknownTask));
+    }
+
+    #[test]
+    fn kill_records_the_status_and_refuses_a_second_kill() {
+        let mut table = TaskTable::<4>::new();
+        let zero = table
+            .spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000, Identity::ROOT)
+            .unwrap();
+
+        assert_eq!(table.exit_status_of(zero), Some(0));
+        table.kill(zero, 7).unwrap();
+        assert!(!table.is_alive(zero));
+        assert_eq!(table.exit_status_of(zero), Some(7));
+
+        // A second kill must not overwrite the status the first one recorded.
+        assert_eq!(table.kill(zero, 9), Err(TaskError::UnknownTask));
+        assert_eq!(table.exit_status_of(zero), Some(7));
+
+        // A wait pairs with the kill: the reap drops the record and its status.
+        table.reap(zero).unwrap();
+        assert_eq!(table.exit_status_of(zero), None);
     }
 
     #[test]
@@ -894,7 +923,7 @@ mod task_table_tests {
         assert_eq!(table.generation_of(one), Some(1));
 
         // A revive raises only the revived slot's generation.
-        table.kill(zero).unwrap();
+        table.kill(zero, 0).unwrap();
         // A dead slot keeps its last generation, so an old reference still
         // resolves to the incarnation it named.
         assert_eq!(table.generation_of(zero), Some(1));
@@ -905,7 +934,7 @@ mod task_table_tests {
         assert_eq!(table.generation_of(one), Some(1));
 
         // Killing does not raise it; the next revive does.
-        table.kill(zero).unwrap();
+        table.kill(zero, 0).unwrap();
         assert_eq!(table.generation_of(zero), Some(2));
         table
             .respawn(zero, SyscallRegs::EMPTY, frame(0x600))
@@ -1070,7 +1099,7 @@ mod task_table_tests {
         assert!(table.is_ready(zero));
 
         // A dead slot is never ready, even if it was serving.
-        table.kill(zero).unwrap();
+        table.kill(zero, 0).unwrap();
         assert!(!table.is_ready(zero));
 
         // Reviving clears readiness: a restarted service must re-declare.

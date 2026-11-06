@@ -23,8 +23,8 @@ filesystem exchange page (see [`server-protocol.md`](server-protocol.md)).
 
 ## Syscall table
 
-Numbers are stable and never reused. `SYS_WAIT` (52) is the highest
-assigned number; 53 and above are rejected.
+Numbers are stable and never reused. `SYS_KILL` (53) is the highest
+assigned number; 54 and above are rejected.
 
 Two numbers are **declared but not yet implemented**: `SYS_YIELD` (0) and
 `SYS_MAP_FRAME` (4) are recognized by the dispatch table but have no handler, so
@@ -86,6 +86,7 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 50 | `SYS_SEEK` | descriptor, absolute offset | 0 | `u64::MAX` |
 | 51 | `SYS_SPAWN` | name ptr, name length | child task slot | `u64::MAX` |
 | 52 | `SYS_WAIT` | task slot | the slot's recorded exit status | `u64::MAX` |
+| 53 | `SYS_KILL` | task slot, status | 0 | `u64::MAX` |
 
 ### Clock
 
@@ -318,11 +319,25 @@ slot recorded and consumes its registry record — the reap — so the index
 becomes free for a later `SYS_SPAWN`. It also returns the frames the spawn
 allocated (four private table levels, the image pages, and one stack page) to
 the frame allocator; a boot task keeps no such record, so waiting on one
-reclaims none. The same `WRITE` grant gates both calls: a caller trusted to
+reclaims none. The same `WRITE` grant gates spawn and wait: a caller trusted to
 add work to the table is trusted to account for how it ends. Waiting on the
 caller's own slot is refused, and so is waiting on a supervised service slot,
 because `initd` owns those lifecycles through the service syscalls and fault
 events. Every refusal returns `u64::MAX`.
+
+`SYS_KILL` (53) ends a runtime-spawned task: `rdi` is the slot and `rsi` the
+status stored as its exit status. It is the inverse of `SYS_SPAWN`, not a
+signal — the target cannot catch it, run a handler, or return from it. The
+same `WRITE` grant on the process-lifecycle capability gates it. The target
+must be alive and must have been created by `SYS_SPAWN`; the caller's own
+slot, a boot-layout task, and a supervised service slot are refused, because
+the boot arranged those lifecycles and `initd` owns the supervised ones. On
+success the kernel revokes the target's runtime resources — IRQ and port
+claims, MMIO regions, surfaces, window links, and open descriptors — and
+unblocks every task, so a `SYS_WAIT` on the slot observes the death. That wait
+still performs the reap and returns the spawn's frames; killing an
+already-dead record is refused rather than overwriting the status the first
+end recorded. Returns `0` on success and `u64::MAX` for every refusal.
 
 ### `SYS_WINDOW_CLOSE`
 

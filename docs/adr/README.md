@@ -78,6 +78,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0069](0069-a-persistent-directory-removal-is-its-own-record.md) | A persistent directory removal is its own record | Accepted |
 | [0070](0070-a-task-is-spawned-by-name-and-waited-by-slot.md) | A task is spawned by name and waited by slot | Accepted |
 | [0071](0071-a-reap-returns-the-frames-a-spawn-took.md) | A reap returns the frames a spawn took | Accepted |
+| [0072](0072-a-runtime-spawn-is-killed-by-its-spawner.md) | A runtime spawn is killed by its spawner | Accepted |
 
 ## Adding a decision
 

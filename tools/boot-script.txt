@@ -60,6 +60,12 @@ ps
 spawn consumer.elf
 wait 0
 wait 1
+kill 7 7
+kill 4 7
+spawn consumer.elf
+kill 0 7
+ps
+wait 0
 spawn nothere.elf
 wait 4
 ps

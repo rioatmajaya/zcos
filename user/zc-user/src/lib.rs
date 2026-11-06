@@ -20,7 +20,7 @@ pub use zc_abi::{
     SYS_SERIAL_READ, SYS_SERVICE_HEALTH, SYS_SERVICE_READY, SYS_SERVICE_START, SYS_SERVICE_STATUS,
     SYS_SERVICE_STOP, SYS_SESSION, SYS_STAT, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP,
     SYS_SPAWN, SYS_TASK_EXIT, SYS_TASK_INFO, SYS_TERM_READ, SYS_UMOUNT, SYS_UNLINK, SYS_SYNC,
-    SYS_WAIT, SYS_WINDOW_CLOSE, SYS_WINDOW_ID,
+    SYS_WAIT, SYS_KILL, SYS_WINDOW_CLOSE, SYS_WINDOW_ID,
     SYS_WINDOW_READ,
     SYS_WRITE, SYS_YIELD,
     SERVICE_STATE_READY, SERVICE_STATE_UP, MmioInfo, ServiceSpec, Stat, SurfaceInfo, SyscallError,
@@ -459,6 +459,17 @@ pub fn spawn(name: &str) -> u64 {
 #[inline(always)]
 pub fn wait(slot: u64) -> u64 {
     syscall1(SYS_WAIT, slot)
+}
+
+/// Ends the runtime-spawned task `slot` with `status`.
+///
+/// Takes `WRITE` on the process-lifecycle grant. Returns `0`, or `u64::MAX`
+/// for the caller's own slot, a boot-layout task, a supervised service, a
+/// dead slot, or a missing lifecycle grant. A successful kill leaves a dead
+/// record that [`wait`] must reap before the slot can be spawned into again.
+#[inline(always)]
+pub fn kill(slot: u64, status: u64) -> u64 {
+    syscall2(SYS_KILL, slot, status)
 }
 
 /// Changes `path`'s permission bits to `mode`, returning 0 or `u64::MAX`.
