@@ -23,8 +23,8 @@ filesystem exchange page (see [`server-protocol.md`](server-protocol.md)).
 
 ## Syscall table
 
-Numbers are stable and never reused. `SYS_SESSION_CREATE` (56) is the highest
-assigned number; 57 and above are rejected.
+Numbers are stable and never reused. `SYS_RAISE` (59) is the highest
+assigned number; 60 and above are rejected.
 
 Two numbers are **declared but not yet implemented**: `SYS_YIELD` (0) and
 `SYS_MAP_FRAME` (4) are recognized by the dispatch table but have no handler, so
@@ -90,6 +90,9 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 54 | `SYS_NOTIFY` | task slot, event bits | 0 | `u64::MAX` |
 | 55 | `SYS_EVENT_WAIT` | mask | matched bits (blocks) | `u64::MAX` |
 | 56 | `SYS_SESSION_CREATE` | — | new session id | `u64::MAX` |
+| 57 | `SYS_SIGNAL` | signal, handler | 0 | `u64::MAX` |
+| 58 | `SYS_SIGRETURN` | — | 0 | `u64::MAX` |
+| 59 | `SYS_RAISE` | target slot, signal | 0 | `u64::MAX` |
 
 ### Clock
 

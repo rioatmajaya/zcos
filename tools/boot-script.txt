@@ -59,6 +59,7 @@ ls /tmp
 stat /dev/blk
 id
 session
+signal
 svc
 ps
 help

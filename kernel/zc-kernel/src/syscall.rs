@@ -16,7 +16,7 @@ use zc_abi::{
     SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY,
     SYS_SPAWN, SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TASK_INFO, SYS_TERM_READ, SYS_UMOUNT, SYS_UNLINK,
     SYS_SYNC, SYS_WAIT, SYS_KILL, SYS_NOTIFY, SYS_EVENT_WAIT, SYS_SESSION_CREATE,
-    SYS_WINDOW_CLOSE, SYS_WINDOW_ID,
+    SYS_SIGNAL, SYS_SIGRETURN, SYS_RAISE, SYS_WINDOW_CLOSE, SYS_WINDOW_ID,
     SYS_WINDOW_READ, SYS_WRITE, SYS_YIELD, SyscallError,
 };
 
@@ -110,6 +110,12 @@ pub enum Action {
     EventWait,
     /// Create a new session and return its id.
     SessionCreate,
+    /// Register a signal handler.
+    Signal,
+    /// Restore context after a signal handler.
+    SigReturn,
+    /// Raise a signal on a task.
+    Raise,
     /// Change a file's permission bits.
     Chmod,
     /// Allocate a pixel surface and its backing frames.
@@ -205,6 +211,9 @@ pub const fn dispatch(number: u64) -> Result<Action, SyscallError> {
         SYS_NOTIFY => Ok(Action::Notify),
         SYS_EVENT_WAIT => Ok(Action::EventWait),
         SYS_SESSION_CREATE => Ok(Action::SessionCreate),
+        SYS_SIGNAL => Ok(Action::Signal),
+        SYS_SIGRETURN => Ok(Action::SigReturn),
+        SYS_RAISE => Ok(Action::Raise),
         _ => Err(SyscallError::InvalidNumber),
     }
 }
@@ -272,12 +281,15 @@ mod tests {
         assert_eq!(dispatch(SYS_NOTIFY), Ok(Action::Notify));
         assert_eq!(dispatch(SYS_EVENT_WAIT), Ok(Action::EventWait));
         assert_eq!(dispatch(SYS_SESSION_CREATE), Ok(Action::SessionCreate));
+        assert_eq!(dispatch(SYS_SIGNAL), Ok(Action::Signal));
+        assert_eq!(dispatch(SYS_SIGRETURN), Ok(Action::SigReturn));
+        assert_eq!(dispatch(SYS_RAISE), Ok(Action::Raise));
     }
 
     #[test]
     fn unknown_numbers_are_rejected() {
-        // The last assigned number is SYS_SESSION_CREATE (56), so probe past it.
-        assert_eq!(dispatch(57), Err(SyscallError::InvalidNumber));
+        // The last assigned number is SYS_RAISE (59), so probe past it.
+        assert_eq!(dispatch(60), Err(SyscallError::InvalidNumber));
         assert_eq!(
             dispatch(u64::MAX),
             Err(SyscallError::InvalidNumber)

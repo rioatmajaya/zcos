@@ -1628,6 +1628,72 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             regs.set_result(id);
             0
         }
+        Ok(Action::Signal) => {
+            let me = tasks.current();
+            let sig = regs.rdi as u8;
+            let handler = regs.rsi;
+            if sig == 0 || sig > 3 {
+                let _ = crate::serial::print(format_args!(
+                    "signal: task {me} refused signal {sig}\n",
+                ));
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            tasks.set_signal_handler(handler);
+            let _ = crate::serial::print(format_args!(
+                "signal: task {me} registered {sig} -> {handler:#x}\n",
+            ));
+            regs.set_result(0);
+            0
+        }
+        Ok(Action::SigReturn) => {
+            // Restore the saved context. With no saved context this is a
+            // no-op return, which keeps a stray call from crashing.
+            if let Some((regs_saved, rip, rsp)) = tasks.restore_signal_context() {
+                *regs = regs_saved;
+                frame.rip = rip;
+                // Restore the stack pointer through the saved frame.
+                frame.rsp = rsp;
+            }
+            regs.set_result(0);
+            0
+        }
+        Ok(Action::Raise) => {
+            let me = tasks.current();
+            let target = regs.rdi as usize;
+            let sig = regs.rsi as u8;
+            if sig == 0 || sig > 3 {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            if target >= TASK_COUNT {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            if !tasks.is_alive(target) {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            let session = tasks.current_session();
+            if tasks.session_of(target) != Some(session) {
+                let _ = crate::serial::print(format_args!(
+                    "raise: task {me} refused session {session} task {target}\n",
+                ));
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            if tasks.raise_signal(target, sig).is_err() {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            // Wake a blocked target so it observes the signal.
+            tasks.unblock_all();
+            let _ = crate::serial::print(format_args!(
+                "raise: task {me} raised {sig} on {target}\n",
+            ));
+            regs.set_result(0);
+            0
+        }
         Ok(Action::Create) => {
             let me = tasks.current();
             let path = match validate_user_slice(tasks, regs.rdi, regs.rsi) {

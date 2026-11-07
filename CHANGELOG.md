@@ -345,6 +345,11 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **Signal registration and raise** (F4, core system): `SYS_SIGNAL`
+  registers a handler for signals 1..=3, `SYS_RAISE` sets a pending signal
+  on a live task in the same session, and `SYS_SIGRETURN` is reserved for the
+  future trampoline. The shell gains `signal` and `raise`. See
+  [ADR 0081](docs/adr/0081-signal-registration-and-raise.md).
 - **Service discovery at boot** (F7f, core system): `initd` now logs
   `initd: discovered blk up` and `initd: discovered kbd up` for every catalog
   service before it starts watching, so a bring-up fault is visible before

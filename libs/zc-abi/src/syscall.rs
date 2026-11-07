@@ -389,6 +389,15 @@ pub const SYS_EVENT_WAIT: u64 = 55;
 /// new session id, or `u64::MAX` when the session table is full.
 pub const SYS_SESSION_CREATE: u64 = 56;
 
+/// Registers `handler` for signal `sig` in the caller.
+pub const SYS_SIGNAL: u64 = 57;
+
+/// Restores the context saved when a signal handler was entered.
+pub const SYS_SIGRETURN: u64 = 58;
+
+/// Raises signal `sig` on task `target`.
+pub const SYS_RAISE: u64 = 59;
+
 /// Packs a user and group id into the one word [`SYS_GETID`] returns.
 #[must_use]
 pub const fn identity_word(uid: u32, gid: u32) -> u64 {
@@ -524,6 +533,9 @@ mod tests {
         assert_eq!(SYS_NOTIFY, 54);
         assert_eq!(SYS_EVENT_WAIT, 55);
         assert_eq!(SYS_SESSION_CREATE, 56);
+        assert_eq!(SYS_SIGNAL, 57);
+        assert_eq!(SYS_SIGRETURN, 58);
+        assert_eq!(SYS_RAISE, 59);
         assert_eq!(READDIR_ENTRY, 0);
         assert_eq!(READDIR_END, 1);
     }

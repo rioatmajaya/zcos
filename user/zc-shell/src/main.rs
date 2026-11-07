@@ -54,7 +54,7 @@ use zc_user::{
     identity_gid, identity_uid, log, log_parts, log_read, mount, open, poweroff, read, readdir,
     send_to, serial_read, service_faults, service_health, service_is_ready, service_is_up,
     service_restarts, session, spawn, stat, task_exit_with, task_info, umount, unlink, mkdir, rmdir,
-    rename, seek, sync, wait, write, kill, notify, event_wait, session_create, spawn_in,
+    rename, seek, sync, wait, write, kill, notify, event_wait, session_create, spawn_in, signal, raise,
 };
 
 /// Contents `persist` writes and expects to read back.
@@ -311,7 +311,7 @@ fn run(line: &[u8]) -> bool {
     }
     match argv[0] {
         b"help" => {
-            log("Commands: help echo cat ls stat write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc ps spawn kill wait notify event session dmesg poweroff exit\n");
+            log("Commands: help echo cat ls stat write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc ps spawn kill wait notify event session signal raise dmesg poweroff exit\n");
         }
         b"echo" => {
             for index in 1..count {
@@ -920,6 +920,28 @@ fn run(line: &[u8]) -> bool {
             out_u64(id);
             out_bytes(b"\n");
             out_flush();
+        }
+        b"signal" => {
+            if signal(1, 0x1234) == u64::MAX {
+                log("signal: cannot register\n");
+                return false;
+            }
+            log("signal: registered\n");
+        }
+        b"raise" => {
+            if count < 3 {
+                log("usage: raise <slot> <sig>\n");
+                return false;
+            }
+            let (Some(slot), Some(sig)) = (parse_decimal(argv[1]), parse_decimal(argv[2])) else {
+                log("raise: bad arguments\n");
+                return false;
+            };
+            if raise(slot, sig) == u64::MAX {
+                log("raise: cannot raise\n");
+                return false;
+            }
+            log("raise: ok\n");
         }
         b"dmesg" => {
             // The ring is read-only kernel diagnostics; printing it goes

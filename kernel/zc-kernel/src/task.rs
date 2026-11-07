@@ -180,6 +180,15 @@ pub struct Task {
     /// A fresh incarnation starts at zero, so a stale notification can never
     /// leak into a revived or respawned task.
     events: u64,
+    /// Pending signal number (0 = none).
+    signal_pending: u8,
+    /// Handler address for the next signal (0 = default/ignore).
+    signal_handler: u64,
+    /// Saved context while a signal handler runs.
+    signal_saved_regs: SyscallRegs,
+    signal_saved_rip: u64,
+    signal_saved_rsp: u64,
+    in_signal: bool,
 }
 
 impl Task {
@@ -332,6 +341,12 @@ impl<const N: usize> TaskTable<N> {
             exit_status: 0,
             session,
             events: 0,
+            signal_pending: 0,
+            signal_handler: 0,
+            signal_saved_regs: SyscallRegs::EMPTY,
+            signal_saved_rip: 0,
+            signal_saved_rsp: 0,
+            in_signal: false,
         });
         Ok(index)
     }
@@ -566,6 +581,9 @@ impl<const N: usize> TaskTable<N> {
         // revived later; clearing here keeps the next incarnation clean even
         // before `respawn` runs.
         task.events = 0;
+        task.signal_pending = 0;
+        task.signal_handler = 0;
+        task.in_signal = false;
         Ok(())
     }
 
@@ -602,6 +620,74 @@ impl<const N: usize> TaskTable<N> {
         let matched = task.events & mask;
         task.events &= !mask;
         matched
+    }
+
+    /// Registers `handler` (0 restores default) for the running task.
+    pub fn set_signal_handler(&mut self, handler: u64) {
+        if let Some(task) = self.tasks[self.current].as_mut() {
+            task.signal_handler = handler;
+        }
+    }
+
+    /// Raises `sig` on task `index` if it is alive.
+    pub fn raise_signal(&mut self, index: usize, sig: u8) -> Result<(), TaskError> {
+        let Some(task) = self.tasks.get_mut(index).and_then(Option::as_mut) else {
+            return Err(TaskError::UnknownTask);
+        };
+        if !task.alive {
+            return Err(TaskError::UnknownTask);
+        }
+        task.signal_pending = sig;
+        Ok(())
+    }
+
+    /// Takes the running task's pending signal, if any.
+    pub fn take_signal(&mut self) -> u8 {
+        let Some(task) = self.tasks[self.current].as_mut() else {
+            return 0;
+        };
+        if !task.alive {
+            return 0;
+        }
+        let sig = task.signal_pending;
+        task.signal_pending = 0;
+        sig
+    }
+
+    /// Returns whether the running task is inside a signal handler.
+    pub fn in_signal(&self) -> bool {
+        self.tasks[self.current].as_ref().map_or(false, |t| t.in_signal)
+    }
+
+    /// Marks the running task as inside (or outside) a signal handler.
+    pub fn set_in_signal(&mut self, value: bool) {
+        if let Some(task) = self.tasks[self.current].as_mut() {
+            task.in_signal = value;
+        }
+    }
+
+    /// Saves the running task's context for signal delivery.
+    pub fn save_signal_context(&mut self, regs: SyscallRegs, rip: u64, rsp: u64) {
+        if let Some(task) = self.tasks[self.current].as_mut() {
+            task.signal_saved_regs = regs;
+            task.signal_saved_rip = rip;
+            task.signal_saved_rsp = rsp;
+        }
+    }
+
+    /// Restores the saved context after a signal handler returns.
+    pub fn restore_signal_context(&mut self) -> Option<(SyscallRegs, u64, u64)> {
+        let task = self.tasks[self.current].as_mut()?;
+        if !task.in_signal {
+            return None;
+        }
+        task.in_signal = false;
+        Some((task.signal_saved_regs, task.signal_saved_rip, task.signal_saved_rsp))
+    }
+
+    /// Returns the running task's signal handler address.
+    pub fn signal_handler(&self) -> u64 {
+        self.tasks[self.current].as_ref().map_or(0, |t| t.signal_handler)
     }
 
     /// Removes a dead slot's record, making the index free for a later spawn.
@@ -690,6 +776,9 @@ impl<const N: usize> TaskTable<N> {
             task.blocked = false;
             task.ready = false;
             task.events = 0;
+            task.signal_pending = 0;
+            task.signal_handler = 0;
+            task.in_signal = false;
         }
         self.unblock_all();
         let next = self.next_runnable(self.current)?;
@@ -719,6 +808,9 @@ impl<const N: usize> TaskTable<N> {
             task.ready = false;
             task.exit_status = 0;
             task.events = 0;
+            task.signal_pending = 0;
+            task.signal_handler = 0;
+            task.in_signal = false;
         }
         self.unblock_all();
         let next = self.next_runnable(self.current)?;
