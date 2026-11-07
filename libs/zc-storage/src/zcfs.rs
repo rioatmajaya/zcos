@@ -64,6 +64,8 @@ pub const KIND_DATA: u32 = 2;
 pub const KIND_UNLINK: u32 = 3;
 /// Record kind: clears an **empty** directory, payload-free.
 pub const KIND_RMDIR: u32 = 4;
+/// Record kind: moves a node to a new parent and name.
+pub const KIND_RENAME: u32 = 5;
 
 /// Node id of the root directory.
 pub const ROOT_NODE: u64 = 1;
@@ -79,6 +81,9 @@ const RECORD_CRC_OFFSET: usize = 28;
 
 /// Offset of the name inside a `CREATE` payload.
 const CREATE_NAME_OFFSET: usize = 14;
+
+/// Offset of the name inside a `RENAME` payload.
+const RENAME_NAME_OFFSET: usize = 10;
 
 /// Offset of the content inside a `DATA` payload.
 const DATA_CONTENT_OFFSET: usize = 6;
@@ -100,6 +105,9 @@ pub enum ZcfsError {
     NotADirectory,
     /// The directory is not empty, so a removal would orphan its children.
     NotEmpty,
+    /// The operation is not supported (for example, moving a directory into
+    /// its own subtree).
+    NotSupported,
     /// A name is empty, too long, or not usable.
     BadPath,
     /// The in-memory table has no free slot.
@@ -333,6 +341,34 @@ pub fn parse_create(payload: &[u8]) -> Result<(u64, u32, &[u8]), ZcfsError> {
         return Err(ZcfsError::Corrupt);
     }
     Ok((parent, mode, &payload[CREATE_NAME_OFFSET..CREATE_NAME_OFFSET + name_len]))
+}
+
+/// Builds a `RENAME` payload: new parent, name length, then the name.
+pub fn rename_payload(
+    new_parent: u64,
+    name: &[u8],
+    out: &mut [u8],
+) -> Result<usize, ZcfsError> {
+    if name.is_empty() || name.len() > NAME_MAX || name.len() > out.len() - RENAME_NAME_OFFSET {
+        return Err(ZcfsError::BadPath);
+    }
+    out[..8].copy_from_slice(&new_parent.to_le_bytes());
+    out[8..10].copy_from_slice(&(name.len() as u16).to_le_bytes());
+    out[RENAME_NAME_OFFSET..RENAME_NAME_OFFSET + name.len()].copy_from_slice(name);
+    Ok(RENAME_NAME_OFFSET + name.len())
+}
+
+/// Decodes a `RENAME` payload into `(new_parent, name)`.
+pub fn parse_rename(payload: &[u8]) -> Result<(u64, &[u8]), ZcfsError> {
+    if payload.len() < RENAME_NAME_OFFSET {
+        return Err(ZcfsError::Corrupt);
+    }
+    let new_parent = read_u64(payload, 0);
+    let name_len = u16::from_le_bytes([payload[8], payload[9]]) as usize;
+    if name_len == 0 || name_len > NAME_MAX || RENAME_NAME_OFFSET + name_len > payload.len() {
+        return Err(ZcfsError::Corrupt);
+    }
+    Ok((new_parent, &payload[RENAME_NAME_OFFSET..RENAME_NAME_OFFSET + name_len]))
 }
 
 /// Builds a `DATA` payload: offset, content length, then the content.
@@ -644,6 +680,53 @@ impl<const N: usize> Table<N> {
         Ok(())
     }
 
+    /// Returns whether `node` is `ancestor` or lives below it.
+    ///
+    /// Walking parents guards a directory move: a directory cannot be renamed
+    /// into its own subtree, which would detach the subtree from the root.
+    pub fn is_descendant(&self, node: u64, ancestor: u64) -> bool {
+        if node == 0 {
+            return ancestor == 0;
+        }
+        let mut current = node;
+        loop {
+            if current == ancestor {
+                return true;
+            }
+            if current == 0 {
+                return false;
+            }
+            let Some(slot) = self.find(current) else {
+                return false;
+            };
+            let parent = slot.parent;
+            if parent == current {
+                return false;
+            }
+            current = parent;
+        }
+    }
+
+    /// Moves `node` to `new_parent` and renames it to `name`.
+    fn apply_rename(&mut self, node: u64, new_parent: u64, name: &[u8]) -> Result<(), ZcfsError> {
+        if name.is_empty() || name.len() > NAME_MAX {
+            return Err(ZcfsError::BadPath);
+        }
+        if !self.is_directory(new_parent) {
+            return Err(ZcfsError::NotADirectory);
+        }
+        let slot = self
+            .nodes
+            .iter_mut()
+            .find(|slot| slot.used && slot.node_id == node)
+            .ok_or(ZcfsError::NotFound)?;
+        slot.parent = new_parent;
+        slot.name = [0; NAME_MAX];
+        slot.name[..name.len()].copy_from_slice(name);
+        slot.name_len = name.len() as u8;
+        Ok(())
+    }
+
     /// Clears every slot in place, without a whole-table temporary.
     fn reset(&mut self) {
         for slot in self.nodes.iter_mut() {
@@ -775,6 +858,12 @@ impl<const N: usize> Volume<N> {
                     // A directory removal is the same payload-free shape,
                     // naming the empty directory that goes.
                     self.table.apply_rmdir(header.node)?;
+                }
+                KIND_RENAME => {
+                    let Ok((new_parent, name)) = parse_rename(header.payload(&sector)) else {
+                        break;
+                    };
+                    self.table.apply_rename(header.node, new_parent, name)?;
                 }
                 _ => break,
             }
@@ -941,6 +1030,50 @@ impl<const N: usize> Volume<N> {
         }
         self.append(io, KIND_RMDIR, node, &[])?;
         self.table.apply_rmdir(node)
+    }
+
+    /// Renames or moves `old_name` in `old_dir` to `new_name` in `new_dir`,
+    /// appending a `RENAME` record (and an `UNLINK` record when a file at the
+    /// destination is replaced). An empty destination directory collision is
+    /// refused, as is moving a directory into its own subtree.
+    pub fn rename(
+        &mut self,
+        io: &mut impl BlockIo,
+        old_dir: u64,
+        old_name: &[u8],
+        new_dir: u64,
+        new_name: &[u8],
+    ) -> Result<(), ZcfsError> {
+        if old_name.is_empty()
+            || old_name.len() > NAME_MAX
+            || new_name.is_empty()
+            || new_name.len() > NAME_MAX
+        {
+            return Err(ZcfsError::BadPath);
+        }
+        if !self.table.is_directory(old_dir) || !self.table.is_directory(new_dir) {
+            return Err(ZcfsError::NotADirectory);
+        }
+        let src = self.table.lookup(old_dir, old_name)?;
+        if old_dir == new_dir && old_name == new_name {
+            return Ok(());
+        }
+        if self.table.is_directory(src) && self.table.is_descendant(new_dir, src) {
+            return Err(ZcfsError::NotSupported);
+        }
+        if let Ok(dst) = self.table.lookup(new_dir, new_name) {
+            if dst != src {
+                if self.table.is_directory(dst) {
+                    return Err(ZcfsError::NotEmpty);
+                }
+                self.append(io, KIND_UNLINK, dst, &[])?;
+                self.table.apply_unlink(dst)?;
+            }
+        }
+        let mut payload = [0u8; PAYLOAD_MAX];
+        let len = rename_payload(new_dir, new_name, &mut payload)?;
+        self.append(io, KIND_RENAME, src, &payload[..len])?;
+        self.table.apply_rename(src, new_dir, new_name)
     }
 
     /// Marks the volume cleanly unmounted.
@@ -1138,6 +1271,71 @@ mod tests {
             .expect("recreate");
         assert_ne!(fresh, scratch);
         assert_eq!(reloaded.stat(fresh).expect("stat").2, 0);
+    }
+
+    #[test]
+    fn a_rename_is_durable_across_a_remount() {
+        let (mut io, mut volume) = seeded();
+        let scratch = volume
+            .create(&mut io, ROOT_NODE, b"scratch", MODE_FILE | 0o644)
+            .expect("create");
+        volume.write(&mut io, scratch, 0, b"moved").expect("write");
+
+        volume
+            .rename(&mut io, ROOT_NODE, b"scratch", ROOT_NODE, b"moved")
+            .expect("rename");
+        assert_eq!(
+            volume.lookup(ROOT_NODE, b"scratch"),
+            Err(ZcfsError::NotFound)
+        );
+        assert!(volume.lookup(ROOT_NODE, b"moved").is_ok());
+        volume.mark_clean(&mut io).expect("clean");
+
+        let mut reloaded = Volume::<8>::mount(0, &mut io).expect("remount");
+        assert_eq!(reloaded.lookup(ROOT_NODE, b"scratch"), Err(ZcfsError::NotFound));
+        let moved = reloaded.lookup(ROOT_NODE, b"moved").expect("moved");
+        assert_eq!(moved, scratch);
+        let mut buf = [0u8; 8];
+        assert_eq!(reloaded.read(moved, 0, &mut buf).expect("read"), 5);
+        assert_eq!(&buf[..5], b"moved");
+    }
+
+    #[test]
+    fn a_rename_replaces_a_file_destination() {
+        let (mut io, mut volume) = seeded();
+        let a = volume
+            .create(&mut io, ROOT_NODE, b"a", MODE_FILE | 0o644)
+            .expect("a");
+        let b = volume
+            .create(&mut io, ROOT_NODE, b"b", MODE_FILE | 0o644)
+            .expect("b");
+        volume.write(&mut io, a, 0, b"alpha").expect("write a");
+        volume.write(&mut io, b, 0, b"beta").expect("write b");
+
+        volume
+            .rename(&mut io, ROOT_NODE, b"a", ROOT_NODE, b"b")
+            .expect("rename");
+        assert_eq!(volume.lookup(ROOT_NODE, b"a"), Err(ZcfsError::NotFound));
+        let node = volume.lookup(ROOT_NODE, b"b").expect("b");
+        assert_eq!(node, a);
+        let mut buf = [0u8; 8];
+        assert_eq!(volume.read(node, 0, &mut buf).expect("read"), 5);
+        assert_eq!(&buf[..5], b"alpha");
+    }
+
+    #[test]
+    fn a_rename_refuses_to_move_a_directory_into_its_subtree() {
+        let (mut io, mut volume) = seeded();
+        let dir = volume
+            .create(&mut io, ROOT_NODE, b"dir", MODE_DIR | 0o777)
+            .expect("dir");
+        let sub = volume
+            .create(&mut io, dir, b"sub", MODE_DIR | 0o777)
+            .expect("sub");
+        assert_eq!(
+            volume.rename(&mut io, ROOT_NODE, b"dir", sub, b"moved"),
+            Err(ZcfsError::NotSupported)
+        );
     }
 
     #[test]

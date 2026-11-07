@@ -10,6 +10,14 @@ stat /data/probe
 persist
 ls /data
 sync
+write /data/empty X
+mv /data/empty /data/moved
+stat /data/moved
+umount
+mount
+stat /data/moved
+rm /data/moved
+stat /data/moved
 rm /data/probe
 stat /data/probe
 umount

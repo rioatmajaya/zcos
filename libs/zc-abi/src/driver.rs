@@ -84,6 +84,14 @@ pub const FS_OP_SYNC: u32 = 12;
 /// child before deciding whether it is an empty directory at all.
 pub const FS_OP_RMDIR: u32 = 13;
 
+/// Request opcode: rename or move a name within the volume.
+///
+/// The node field names the source directory, the offset field the destination
+/// directory, and the payload carries the source name followed by the
+/// destination name (each length-prefixed). The domain resolves both names,
+/// validates the move, and appends the records.
+pub const FS_OP_RENAME: u32 = 14;
+
 /// Reply status: the operation succeeded.
 pub const FS_STATUS_OK: u32 = 0;
 /// Reply status: the node or name does not exist.

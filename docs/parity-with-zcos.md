@@ -603,7 +603,7 @@ trustworthy core.
    directory can be removed for real too: `zcfs` appends an `RMDIR` record,
    and the empty check runs before the write
    ([ADR 0069](adr/0069-a-persistent-directory-removal-is-its-own-record.md)).
-   Persistent rename records, and owner records, remain. A
+   Owner records remain. A
    descriptor's offset is now explicit and
    movable through `SYS_SEEK`, so a file can be updated in place or appended
    ([ADR 0067](adr/0067-a-file-offset-is-explicit-and-movable.md)). The three

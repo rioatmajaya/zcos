@@ -44,7 +44,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering, compiler_fence};
 use zc_abi::{
     FS_EXCHANGE_DATA, FS_EXCHANGE_DATA_MAX, FS_EXCHANGE_NODE, FS_EXCHANGE_OFFSET, FS_EXCHANGE_OP,
     FS_EXCHANGE_PAYLOAD, FS_EXCHANGE_RESULT, FS_EXCHANGE_SEQ, FS_EXCHANGE_TASK, FS_OP_CREATE,
-    FS_OP_FLUSH, FS_OP_LIST, FS_OP_LOOKUP, FS_OP_MOUNT, FS_OP_READ, FS_OP_RMDIR, FS_OP_STAT,
+    FS_OP_FLUSH, FS_OP_LIST, FS_OP_LOOKUP, FS_OP_MOUNT, FS_OP_READ, FS_OP_RENAME, FS_OP_RMDIR, FS_OP_STAT,
     FS_OP_SYNC, FS_OP_UNLINK, FS_OP_UNMOUNT,
     FS_OP_WRITE, FS_STATUS_BAD_BUFFER, FS_STATUS_BAD_FD, FS_STATUS_BAD_PATH, FS_STATUS_CORRUPT,
     FS_STATUS_IO, FS_STATUS_NOT_A_DIRECTORY, FS_STATUS_NOT_EMPTY, FS_STATUS_NOT_FOUND,
@@ -401,6 +401,40 @@ impl FileSystem for Proxy {
         // keeps the directory alive (`FS_STATUS_NOT_EMPTY`), a missing name is
         // `NotFound`, and an `RMDIR` record lands only for a real removal.
         let reply = exchange(me, FS_OP_RMDIR, dir, 0, name, name.len() as u32, &mut [])?;
+        decode(reply.status)
+    }
+
+    fn rename(
+        &self,
+        old_dir: NodeId,
+        old_name: &[u8],
+        new_dir: NodeId,
+        new_name: &[u8],
+        _owner: Identity,
+    ) -> Result<(), VfsError> {
+        let me = FS_CALLER.load(Ordering::Relaxed);
+        // The payload is the two names, each length-prefixed, so the domain
+        // can resolve both without a second round trip. The node field names
+        // the source directory and the offset field the destination.
+        let mut payload = [0u8; 66];
+        let mut pos = 0;
+        payload[pos] = old_name.len() as u8;
+        pos += 1;
+        payload[pos..pos + old_name.len()].copy_from_slice(old_name);
+        pos += old_name.len();
+        payload[pos] = new_name.len() as u8;
+        pos += 1;
+        payload[pos..pos + new_name.len()].copy_from_slice(new_name);
+        pos += new_name.len();
+        let reply = exchange(
+            me,
+            FS_OP_RENAME,
+            old_dir,
+            new_dir,
+            &payload[..pos],
+            pos as u32,
+            &mut [],
+        )?;
         decode(reply.status)
     }
 

@@ -345,6 +345,13 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **A persistent rename is a log record** (F7e, core system): `zcfs` now
+  appends a `KIND_RENAME` record (plus an `UNLINK` record when a file at the
+  destination is replaced), so `mv /data/old /data/new` survives an explicit
+  `umount`/`mount` and the moved node keeps its id, data, and children. The
+  kernel's `zcfs` proxy overrides `rename` and the block domain serves it
+  through `FS_OP_RENAME`; no VFS change is needed. See
+  [ADR 0074](docs/adr/0074-a-persistent-rename-is-a-log-record.md).
 - **A task can notify a peer through a per-task event word** (F4, core
   system): `SYS_NOTIFY` (54) ORs bits into a live target's pending `u64`
   word, and `SYS_EVENT_WAIT` (55) blocks until a requested bit is pending,
