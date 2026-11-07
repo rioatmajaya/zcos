@@ -86,6 +86,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0077](0077-a-login-creates-a-session.md) | A login creates a session | Accepted |
 | [0078](0078-a-stable-userspace-c-abi.md) | A stable userspace C ABI | Accepted |
 | [0079](0079-service-discovery-at-boot.md) | Service discovery at boot | Accepted |
+| [0080](0080-smp-bring-up-is-parked.md) | SMP bring-up is parked | Accepted |
 
 ## Adding a decision
 
