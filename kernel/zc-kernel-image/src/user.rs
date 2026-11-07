@@ -35,6 +35,11 @@ use zc_kernel::vm::{VirtAddr, is_user_entry};
 /// source of truth for the bring-up layout.
 const TASK_COUNT: usize = service::TASK_COUNT;
 
+/// Sessions 0 (system) and 1 (desktop) are built in and owned by root.
+/// Later ids are minted by `SYS_SESSION_CREATE`.
+static mut SESSION_COUNT: u32 = 2;
+static mut SESSION_OWNER: [u32; 64] = [0; 64];
+
 /// Kernel-side restart and fault counters for the supervised services.
 ///
 /// The supervisor decides whether to restart; this ledger records what the
@@ -1313,7 +1318,25 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 );
             }
             let owner = tasks.current_owner();
-            let session = tasks.current_session();
+            // `rdx` names the session to spawn into; zero inherits the
+            // caller's, so the existing callers keep working.
+            let requested = regs.rdx;
+            let session = if requested == 0 {
+                tasks.current_session()
+            } else {
+                let ok = unsafe {
+                    requested < u64::from(SESSION_COUNT)
+                        && (SESSION_OWNER[requested as usize] == owner.uid || owner.is_root())
+                };
+                if !ok {
+                    let _ = crate::serial::print(format_args!(
+                        "spawn: task {me} refused session {requested}\n",
+                    ));
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+                requested as u32
+            };
             let init_frame = IrqFrame {
                 rip: entry,
                 cs: u64::from(USER_CS),
@@ -1578,6 +1601,32 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             // Any notify, exit, or fault unblocks every task, so the replay
             // after this wake either finds a requested bit or blocks again.
             return block_with_retry(tasks, regs, frame, 0);
+        }
+        Ok(Action::SessionCreate) => {
+            let me = tasks.current();
+            let owner = tasks.current_owner();
+            // SAFETY: single-threaded; the table is owned here.
+            let id = unsafe {
+                if SESSION_COUNT as usize >= 64 {
+                    u64::MAX
+                } else {
+                    let id = SESSION_COUNT;
+                    SESSION_COUNT += 1;
+                    SESSION_OWNER[id as usize] = owner.uid;
+                    u64::from(id)
+                }
+            };
+            if id == u64::MAX {
+                let _ = crate::serial::print(format_args!(
+                    "session: task {me} refused (table full)\n",
+                ));
+            } else {
+                let _ = crate::serial::print(format_args!(
+                    "session: task {me} created {id}\n",
+                ));
+            }
+            regs.set_result(id);
+            0
         }
         Ok(Action::Create) => {
             let me = tasks.current();

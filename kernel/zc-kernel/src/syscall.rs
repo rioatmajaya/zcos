@@ -15,7 +15,7 @@ use zc_abi::{
     SYS_STAT,
     SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY,
     SYS_SPAWN, SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TASK_INFO, SYS_TERM_READ, SYS_UMOUNT, SYS_UNLINK,
-    SYS_SYNC, SYS_WAIT, SYS_KILL, SYS_NOTIFY, SYS_EVENT_WAIT,
+    SYS_SYNC, SYS_WAIT, SYS_KILL, SYS_NOTIFY, SYS_EVENT_WAIT, SYS_SESSION_CREATE,
     SYS_WINDOW_CLOSE, SYS_WINDOW_ID,
     SYS_WINDOW_READ, SYS_WRITE, SYS_YIELD, SyscallError,
 };
@@ -108,6 +108,8 @@ pub enum Action {
     Notify,
     /// Wait for and consume event bits from the caller's own word.
     EventWait,
+    /// Create a new session and return its id.
+    SessionCreate,
     /// Change a file's permission bits.
     Chmod,
     /// Allocate a pixel surface and its backing frames.
@@ -202,6 +204,7 @@ pub const fn dispatch(number: u64) -> Result<Action, SyscallError> {
         SYS_KILL => Ok(Action::Kill),
         SYS_NOTIFY => Ok(Action::Notify),
         SYS_EVENT_WAIT => Ok(Action::EventWait),
+        SYS_SESSION_CREATE => Ok(Action::SessionCreate),
         _ => Err(SyscallError::InvalidNumber),
     }
 }
@@ -268,12 +271,13 @@ mod tests {
         assert_eq!(dispatch(SYS_KILL), Ok(Action::Kill));
         assert_eq!(dispatch(SYS_NOTIFY), Ok(Action::Notify));
         assert_eq!(dispatch(SYS_EVENT_WAIT), Ok(Action::EventWait));
+        assert_eq!(dispatch(SYS_SESSION_CREATE), Ok(Action::SessionCreate));
     }
 
     #[test]
     fn unknown_numbers_are_rejected() {
-        // The last assigned number is SYS_EVENT_WAIT (55), so probe past it.
-        assert_eq!(dispatch(56), Err(SyscallError::InvalidNumber));
+        // The last assigned number is SYS_SESSION_CREATE (56), so probe past it.
+        assert_eq!(dispatch(57), Err(SyscallError::InvalidNumber));
         assert_eq!(
             dispatch(u64::MAX),
             Err(SyscallError::InvalidNumber)

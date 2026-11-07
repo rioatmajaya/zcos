@@ -63,7 +63,7 @@ jobs:
         grep -q "task 1: consumer received 2000" build/boot.log
         grep -q "task 1: hello verified" build/boot.log
         grep -q "task 0: manifest ok" build/boot.log
-        grep -q "task 2: Commands: help echo cat ls stat write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc ps spawn kill wait notify event dmesg poweroff exit" build/boot.log
+        grep -q "task 2: Commands: help echo cat ls stat write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc ps spawn kill wait notify event session dmesg poweroff exit" build/boot.log
         grep -q "task 2: hello os" build/boot.log
         grep -q "task 2: hello from the ZC OS initramfs" build/boot.log
         grep -q "task 2: hello.txt: file, 31 bytes" build/boot.log
@@ -222,6 +222,7 @@ jobs:
         # driver, and no capability changes that.
         grep -q "notify: task 2 refused session 0 task 4" build/boot.log
         grep -q "task 2: notify: cannot notify" build/boot.log
+        grep -q "task 2: session: created" build/boot.log
         # A missing image and a supervised slot both fail closed; the kernel
         # logs the reason and the shell reports the neutral failure.
         grep -q "spawn: task 2 found no image nothere.elf" build/boot.log

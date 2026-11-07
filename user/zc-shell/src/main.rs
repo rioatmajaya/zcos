@@ -4,7 +4,7 @@
 //! backspace support, and runs `help`, `echo`, `cat`, `ls`, `stat`, `write`,
 //! `append`, `rm`, `mkdir`, `rmdir`, `mv`, `sync`, `tmp`, `persist`, `chmod`,
 //! `mount`, `umount`, `id`, `svc`, `ps`, `spawn`, `kill`, `wait`, `notify`,
-//! `event`, `dmesg`, and `exit`. Output goes
+//! `event`, `session`, `dmesg`, and `exit`. Output goes
 //! through the log syscall, so the transcript appears in the kernel serial log.
 //!
 //! `id` asks the kernel for this task's user and group ids plus its session.
@@ -54,7 +54,7 @@ use zc_user::{
     identity_gid, identity_uid, log, log_parts, log_read, mount, open, poweroff, read, readdir,
     send_to, serial_read, service_faults, service_health, service_is_ready, service_is_up,
     service_restarts, session, spawn, stat, task_exit_with, task_info, umount, unlink, mkdir, rmdir,
-    rename, seek, sync, wait, write, kill, notify, event_wait,
+    rename, seek, sync, wait, write, kill, notify, event_wait, session_create, spawn_in,
 };
 
 /// Contents `persist` writes and expects to read back.
@@ -311,7 +311,7 @@ fn run(line: &[u8]) -> bool {
     }
     match argv[0] {
         b"help" => {
-            log("Commands: help echo cat ls stat write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc ps spawn kill wait notify event dmesg poweroff exit\n");
+            log("Commands: help echo cat ls stat write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc ps spawn kill wait notify event session dmesg poweroff exit\n");
         }
         b"echo" => {
             for index in 1..count {
@@ -783,11 +783,20 @@ fn run(line: &[u8]) -> bool {
         }
         b"spawn" => {
             if count < 2 {
-                log("usage: spawn <image>\n");
+                log("usage: spawn <image> [session]\n");
                 return false;
             }
             let name = core::str::from_utf8(argv[1]).unwrap_or("");
-            let slot = spawn(name);
+            let session = if count >= 3 {
+                parse_decimal(argv[2]).unwrap_or(0)
+            } else {
+                0
+            };
+            let slot = if session == 0 {
+                spawn(name)
+            } else {
+                spawn_in(name, session)
+            };
             if slot == u64::MAX {
                 // The kernel logs the exact reason (missing image, window
                 // client, no free slot); this message stays neutral, as
@@ -898,6 +907,17 @@ fn run(line: &[u8]) -> bool {
             }
             out_bytes(b"event: got ");
             out_u64(bits);
+            out_bytes(b"\n");
+            out_flush();
+        }
+        b"session" => {
+            let id = session_create();
+            if id == u64::MAX {
+                log("session: cannot create\n");
+                return false;
+            }
+            out_bytes(b"session: created ");
+            out_u64(id);
             out_bytes(b"\n");
             out_flush();
         }

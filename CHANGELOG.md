@@ -345,6 +345,11 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **A login creates a session** (F4, core system): `SYS_SESSION_CREATE` mints
+  a new session owned by the caller, and `SYS_SPAWN` now takes a session
+  argument (zero inherits), so a task can be spawned into a minted session.
+  The shell gains a `session` command and `spawn <image> [session]`. See
+  [ADR 0077](docs/adr/0077-a-login-creates-a-session.md).
 - **The kernel reads the boot manifest's service order** (F7f, core system):
   during `enter()` the kernel reads `zc.manifest` from the initramfs and logs
   `manifest: services=blk,kbd`, so the file the kernel and `initd` agree on is

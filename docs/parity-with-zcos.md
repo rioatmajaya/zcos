@@ -578,10 +578,12 @@ trustworthy core.
    not a signal with handlers
    ([ADR 0073](adr/0073-a-task-notifies-a-peer-through-an-event-word.md)).
    Tasks now also belong to a session, fixed at spawn and visible through
-   `SYS_SESSION` and `ps`, which records the system/desktop grouping a future
-   login would create
-   ([ADR 0061](adr/0061-sessions-group-tasks-as-spawn-time-data.md)); there is
-   still no credential check or login. The VFS can now remove a file through
+   `SYS_SESSION` and `ps`. A task can mint a new session with
+   `SYS_SESSION_CREATE` and spawn into it through `SYS_SPAWN`'s session
+   argument, so the grouping is no longer build-time data only
+   ([ADR 0061](adr/0061-sessions-group-tasks-as-spawn-time-data.md),
+   [ADR 0077](adr/0077-a-login-creates-a-session.md)); a credential check and
+   user database remain. The VFS can now remove a file through
    `SYS_UNLINK`, gated by the same parent-directory authority as `create`, and
    the shell exposes it as `rm`
    ([ADR 0062](adr/0062-file-removal-is-directory-authority.md)). The scratch

@@ -20,7 +20,7 @@ pub use zc_abi::{
     SYS_SERIAL_READ, SYS_SERVICE_HEALTH, SYS_SERVICE_READY, SYS_SERVICE_START, SYS_SERVICE_STATUS,
     SYS_SERVICE_STOP, SYS_SESSION, SYS_STAT, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP,
     SYS_SPAWN, SYS_TASK_EXIT, SYS_TASK_INFO, SYS_TERM_READ, SYS_UMOUNT, SYS_UNLINK, SYS_SYNC,
-    SYS_WAIT, SYS_KILL, SYS_NOTIFY, SYS_EVENT_WAIT, SYS_WINDOW_CLOSE, SYS_WINDOW_ID,
+    SYS_WAIT, SYS_KILL, SYS_NOTIFY, SYS_EVENT_WAIT, SYS_SESSION_CREATE, SYS_WINDOW_CLOSE, SYS_WINDOW_ID,
     SYS_WINDOW_READ,
     SYS_WRITE, SYS_YIELD,
     SERVICE_STATE_READY, SERVICE_STATE_UP, MmioInfo, ServiceSpec, Stat, SurfaceInfo, SyscallError,
@@ -448,7 +448,7 @@ pub fn sync() -> u64 {
 /// client, or the task table is full.
 #[inline(always)]
 pub fn spawn(name: &str) -> u64 {
-    syscall2(SYS_SPAWN, name.as_ptr() as u64, name.len() as u64)
+    syscall3(SYS_SPAWN, name.as_ptr() as u64, name.len() as u64, 0)
 }
 
 /// Waits for task `slot` to end and consumes its exit record.
@@ -492,6 +492,18 @@ pub fn notify(slot: u64, bits: u64) -> u64 {
 #[inline(always)]
 pub fn event_wait(mask: u64) -> u64 {
     syscall1(SYS_EVENT_WAIT, mask)
+}
+
+/// Creates a new session owned by the caller and returns its id.
+#[inline(always)]
+pub fn session_create() -> u64 {
+    syscall0(SYS_SESSION_CREATE)
+}
+
+/// Spawns `name` into `session` (0 means inherit the caller's session).
+#[inline(always)]
+pub fn spawn_in(name: &str, session: u64) -> u64 {
+    syscall3(SYS_SPAWN, name.as_ptr() as u64, name.len() as u64, session)
 }
 
 /// Changes `path`'s permission bits to `mode`, returning 0 or `u64::MAX`.

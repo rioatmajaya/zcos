@@ -58,6 +58,7 @@ cat /tmp/ap
 ls /tmp
 stat /dev/blk
 id
+session
 svc
 ps
 help
