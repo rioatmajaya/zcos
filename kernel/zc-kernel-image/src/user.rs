@@ -3982,6 +3982,41 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
         }
     }
 
+    // The boot manifest is the userspace's statement of which services the
+    // boot supervises and in what order. The kernel reads it here so the
+    // bring-up can name the order it was given; the supervised set itself is
+    // still enforced by `initd` against the compiled catalog, and the task
+    // slots below stay fixed by the catalog so the capability and DMA
+    // provisioning above cannot drift with a text file.
+    if let Some(manifest) = find_initramfs_file(boot_info, "zc.manifest") {
+        // Find the `services=` line and log it verbatim. A missing or
+        // malformed line is reported rather than guessed, so a broken file
+        // cannot silently look like the shipped one.
+        let mut found = false;
+        let mut line_start = 0;
+        while line_start < manifest.len() {
+            let line_end = manifest[line_start..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(manifest.len(), |o| line_start + o);
+            let line = &manifest[line_start..line_end];
+            if line.starts_with(b"services=") {
+                let _ = crate::serial::print(format_args!(
+                    "manifest: services={}\n",
+                    core::str::from_utf8(&line[b"services=".len()..]).unwrap_or("?"),
+                ));
+                found = true;
+                break;
+            }
+            line_start = line_end + 1;
+        }
+        if !found {
+            let _ = crate::serial::print(format_args!("manifest: no services line\n"));
+        }
+    } else {
+        let _ = crate::serial::print(format_args!("manifest: absent\n"));
+    }
+
     // Mount the zcfs proxy at `/data`. No request is sent here: the proxy
     // only talks to the block domain when a task opens something, and the
     // exchange page it uses is published with the block domain's DMA area

@@ -549,8 +549,10 @@ trustworthy core.
    compile-time catalog is still the registry; discovery, endpoints, and
    failure-rate routing remain. The boot manifest is now authoritative for the
    supervised service set and shutdown order
-   ([ADR 0058](adr/0058-the-manifest-selects-the-supervised-set.md)) but does
-   not drive spawn order yet. Kernel diagnostics are now a bounded ring
+   ([ADR 0058](adr/0058-the-manifest-selects-the-supervised-set.md)); the kernel
+   now reads and logs its service order at boot
+   ([ADR 0076](adr/0076-the-kernel-reads-the-boot-manifest.md)), but the bring-up
+   slot assignment stays fixed by the catalog. Kernel diagnostics are now a bounded ring
    that a task can read through `SYS_LOG_READ`, and the shell exposes it as
    `dmesg` ([ADR 0056](adr/0056-kernel-logs-live-in-a-bounded-readable-ring.md));
    task output still stays on the serial line. The kernel now also reports its

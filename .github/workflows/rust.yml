@@ -233,6 +233,8 @@ jobs:
         grep -q "device: 3 roles, 7 grants (blk 0, kbd 4, devmgr 3)" build/boot.log
         grep -q "service: 2 roles, 5 grants (initd -> blk, kbd; shell -> status, spawn)" build/boot.log
         grep -q "task 7: initd: root identity" build/boot.log
+        # The kernel reads the manifest's service order at boot.
+        grep -q "manifest: services=blk,kbd" build/boot.log
         grep -q "task 7: initd: manifest ok" build/boot.log
         # The manifest is authoritative for the supervised set and order.
         grep -q "task 7: initd: supervising blk,kbd" build/boot.log

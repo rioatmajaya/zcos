@@ -345,6 +345,12 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **The kernel reads the boot manifest's service order** (F7f, core system):
+  during `enter()` the kernel reads `zc.manifest` from the initramfs and logs
+  `manifest: services=blk,kbd`, so the file the kernel and `initd` agree on is
+  visible at boot. The supervised set, retirement, restart, and shutdown order
+  remain `initd`'s policy. See
+  [ADR 0076](docs/adr/0076-the-kernel-reads-the-boot-manifest.md).
 - **A persistent owner is a log record** (F7e, core system): `zcfs` now
   appends a `KIND_OWNER` record when a file is created, so the creator's
   identity survives an explicit `umount`/`mount` instead of every node
