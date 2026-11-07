@@ -1500,6 +1500,85 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             regs.set_result(0);
             0
         }
+        Ok(Action::Notify) => {
+            let me = tasks.current();
+            let slot = regs.rdi as usize;
+            let bits = regs.rsi;
+            if bits == 0 {
+                let _ = crate::serial::print(format_args!(
+                    "notify: task {me} refused empty bits\n",
+                ));
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            if slot >= TASK_COUNT {
+                let _ = crate::serial::print(format_args!(
+                    "notify: task {me} refused unknown task {slot}\n",
+                ));
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            if !tasks.is_alive(slot) {
+                let _ = crate::serial::print(format_args!(
+                    "notify: task {me} refused dead task {slot}\n",
+                ));
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            // A session is the communication boundary a task was spawned
+            // into (ADR 0061). Notification is peer traffic, so it needs no
+            // capability, but crossing out of the session would let one
+            // group's workload wake another's.
+            let session = tasks.current_session();
+            let Some(target_session) = tasks.session_of(slot) else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            if target_session != session {
+                let _ = crate::serial::print(format_args!(
+                    "notify: task {me} refused session {target_session} task {slot}\n",
+                ));
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            if tasks.notify(slot, bits).is_err() {
+                // The liveness check above already passed; this stays as the
+                // fail-closed answer if the table ever disagrees.
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            let _ = crate::serial::print(format_args!(
+                "notify: task {me} notified task {slot} bits {bits}\n",
+            ));
+            // A waiter blocked in `SYS_EVENT_WAIT` replays and takes the bits;
+            // every other blocked task retries and blocks again if its own
+            // condition still fails, the same wake kill, exit, and fault give.
+            tasks.unblock_all();
+            regs.set_result(0);
+            0
+        }
+        Ok(Action::EventWait) => {
+            let me = tasks.current();
+            let mask = regs.rdi;
+            if mask == 0 {
+                let _ = crate::serial::print(format_args!(
+                    "event: task {me} refused empty mask\n",
+                ));
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            let bits = tasks.take_current_events(mask);
+            if bits != 0 {
+                let _ = crate::serial::print(format_args!(
+                    "event: task {me} took {bits}\n",
+                ));
+                regs.set_result(bits);
+                return 0;
+            }
+            // Any notify, exit, or fault unblocks every task, so the replay
+            // after this wake either finds a requested bit or blocks again.
+            return block_with_retry(tasks, regs, frame, 0);
+        }
         Ok(Action::Create) => {
             let me = tasks.current();
             let path = match validate_user_slice(tasks, regs.rdi, regs.rsi) {

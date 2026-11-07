@@ -38,7 +38,7 @@ F9 Distribusi ◄── F8 Desktop ◄── F7 VFS ◄── F6 Driver userspac
 | **F1** | Bootloader sendiri | ✅ done | CI boot job: `entering kernel`, `boot protocol v2 ok` |
 | **F2** | Kernel entry + Memori | ✅ done | `mechanisms self-test ok`, allocator recycling |
 | **F3** | Interrupt + Timer + SMP | ⚠️ partial | `traps: idt installed`, `timer: calibrated bus`; SMP parked |
-| **F4** | Thread + IPC | ✅ done | `task 0: producer sent 2000`, capability gates |
+| **F4** | Thread + IPC | ✅ done | `task 0: producer sent 2000`, capability gates, `notify: task 2 notified task 0 bits 2` |
 | **F5** | Userspace | ✅ done | ELF tasks, `task 2:` shell transcript, `SYS_OPEN`/`SYS_READ` |
 | **F6** | Driver userspace | ✅ done | `device: 3 roles, 7 grants`, `task 6: devmgr: blk published`, `dma: window coherent ok` |
 | **F7** | VFS & penyimpanan | ✅ F7a–F7k done | `blk: cache durable`; `blk: ext2 hello ok`; `vfs: mounted ramfs at /`; `blk: zcfs replay ok`; `vfs: persistence ok`; `initd: restarted blk`; `blk: zcfs recovered`; `blk: zcfs fsck repaired`; `task 2: tmp: ok`; `task 2: /dev/blk: char device`; `audit: task 2 denied read /tmp/scratch`; `wait: task 2 reclaimed 6 frames from task 0`; `kill: task 2 killed task 0 status 7` |
@@ -200,11 +200,23 @@ scheduler heartbeat per AP.
       ([ADR 0070](adr/0070-a-task-is-spawned-by-name-and-waited-by-slot.md),
       [ADR 0071](adr/0071-a-reap-returns-the-frames-a-spawn-took.md),
       [ADR 0072](adr/0072-a-runtime-spawn-is-killed-by-its-spawner.md)).
-- [ ] *(follow-up)* Signals or an event-notification mechanism.
+- [x] *(follow-up)* An event-notification mechanism: every task slot carries a
+      pending `u64` word, `SYS_NOTIFY` raises bits on a live peer in the same
+      session, and `SYS_EVENT_WAIT` blocks until a requested bit is pending,
+      returns the matched bits, and clears them. Bits coalesce rather than
+      queue, a new incarnation starts with an empty word, and a cross-session
+      raise is refused. Signals with handlers and delivery frames remain a
+      separate follow-up
+      ([ADR 0073](adr/0073-a-task-notifies-a-peer-through-an-event-word.md)).
 
 **Pass criteria.** `task 0: producer sent 2000` and `task 1: consumer
 received 2000` with zero loss; delegation boot lines
-`cap: task 6 delegated 0xe0800100 to task 4`.
+`cap: task 6 delegated 0xe0800100 to task 4`. The event handshake logs
+`task 0: waiter running`, `task 0: waiter waiting`,
+`notify: task 0 notified task 2 bits 1`, `event: task 2 took 1`,
+`notify: task 2 notified task 0 bits 2`, `task 0: waiter woke`, and
+`wait: task 2 reaped task 0 status 2`; a cross-session raise logs
+`notify: task 2 refused session 0 task 4`.
 
 **References.** `03-mikrokernel.md`, `04-userspace.md`,
 `22-konkurensi-dan-sinkronisasi.md`, `24-proses-dan-sinyal.md`.

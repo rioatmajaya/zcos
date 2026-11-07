@@ -15,7 +15,7 @@ use zc_abi::{
     SYS_STAT,
     SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY,
     SYS_SPAWN, SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TASK_INFO, SYS_TERM_READ, SYS_UMOUNT, SYS_UNLINK,
-    SYS_SYNC, SYS_WAIT, SYS_KILL,
+    SYS_SYNC, SYS_WAIT, SYS_KILL, SYS_NOTIFY, SYS_EVENT_WAIT,
     SYS_WINDOW_CLOSE, SYS_WINDOW_ID,
     SYS_WINDOW_READ, SYS_WRITE, SYS_YIELD, SyscallError,
 };
@@ -104,6 +104,10 @@ pub enum Action {
     Wait,
     /// End a runtime-spawned task and record its exit status.
     Kill,
+    /// Set event bits in another task's pending event word.
+    Notify,
+    /// Wait for and consume event bits from the caller's own word.
+    EventWait,
     /// Change a file's permission bits.
     Chmod,
     /// Allocate a pixel surface and its backing frames.
@@ -196,6 +200,8 @@ pub const fn dispatch(number: u64) -> Result<Action, SyscallError> {
         SYS_SPAWN => Ok(Action::Spawn),
         SYS_WAIT => Ok(Action::Wait),
         SYS_KILL => Ok(Action::Kill),
+        SYS_NOTIFY => Ok(Action::Notify),
+        SYS_EVENT_WAIT => Ok(Action::EventWait),
         _ => Err(SyscallError::InvalidNumber),
     }
 }
@@ -260,12 +266,14 @@ mod tests {
         assert_eq!(dispatch(SYS_SPAWN), Ok(Action::Spawn));
         assert_eq!(dispatch(SYS_WAIT), Ok(Action::Wait));
         assert_eq!(dispatch(SYS_KILL), Ok(Action::Kill));
+        assert_eq!(dispatch(SYS_NOTIFY), Ok(Action::Notify));
+        assert_eq!(dispatch(SYS_EVENT_WAIT), Ok(Action::EventWait));
     }
 
     #[test]
     fn unknown_numbers_are_rejected() {
-        // The last assigned number is SYS_KILL (53), so probe past it.
-        assert_eq!(dispatch(54), Err(SyscallError::InvalidNumber));
+        // The last assigned number is SYS_EVENT_WAIT (55), so probe past it.
+        assert_eq!(dispatch(56), Err(SyscallError::InvalidNumber));
         assert_eq!(
             dispatch(u64::MAX),
             Err(SyscallError::InvalidNumber)

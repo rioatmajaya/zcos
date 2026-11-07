@@ -348,6 +348,32 @@ pub const SYS_WAIT: u64 = 52;
 /// Returns `0`, or `u64::MAX` for every refusal.
 pub const SYS_KILL: u64 = 53;
 
+/// Sets event bits in another task's pending event word.
+///
+/// `rdi` is the target task slot and `rsi` a non-zero bit mask. The bits are
+/// ORed into the target's word, so two notifications of the same bit before
+/// the receiver consumes it coalesce into one pending bit. The target must be
+/// alive and in the caller's session: notification is peer communication
+/// within the session a task was spawned into, not lifecycle authority, so it
+/// is deliberately separate from [`crate::task::spawn_cap`]. A successful
+/// notify also wakes every blocked task, so a target waiting in
+/// [`SYS_EVENT_WAIT`] retries and observes the bits. Returns `0`, or
+/// `u64::MAX` for empty bits, an unknown or dead slot, or a task in another
+/// session.
+pub const SYS_NOTIFY: u64 = 54;
+
+/// Waits for event bits and consumes the ones that matched.
+///
+/// `rdi` is a non-zero mask of bits to wait for. If the caller's pending word
+/// already intersects the mask, the call returns the matched bits and clears
+/// them, leaving unmatched bits pending. Otherwise it blocks like a full send
+/// or empty receive and retries after any notify, exit, or fault; a spurious
+/// wake simply finds no match and blocks again. Bits are a coalescing flag
+/// word, not a queue: setting a bit twice delivers it once, and a bit set
+/// before the wait is still delivered. Returns the matched bits, or
+/// `u64::MAX` for an empty mask.
+pub const SYS_EVENT_WAIT: u64 = 55;
+
 /// Packs a user and group id into the one word [`SYS_GETID`] returns.
 #[must_use]
 pub const fn identity_word(uid: u32, gid: u32) -> u64 {
@@ -480,6 +506,8 @@ mod tests {
         assert_eq!(SYS_SPAWN, 51);
         assert_eq!(SYS_WAIT, 52);
         assert_eq!(SYS_KILL, 53);
+        assert_eq!(SYS_NOTIFY, 54);
+        assert_eq!(SYS_EVENT_WAIT, 55);
         assert_eq!(READDIR_ENTRY, 0);
         assert_eq!(READDIR_END, 1);
     }

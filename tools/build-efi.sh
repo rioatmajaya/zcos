@@ -128,6 +128,8 @@ cargo build --manifest-path user/zc-producer/Cargo.toml \
     --target "$none_target" --target-dir target --release
 cargo build --manifest-path user/zc-consumer/Cargo.toml \
     --target "$none_target" --target-dir target --release
+cargo build --manifest-path user/zc-waiter/Cargo.toml \
+    --target "$none_target" --target-dir target --release
 cargo build --manifest-path user/zc-shell/Cargo.toml \
     --target "$none_target" --target-dir target --release
 # shellcheck disable=SC2086
@@ -157,6 +159,7 @@ fi
 ./tools/mkinitramfs.sh \
     "target/$none_target/release/producer:producer.elf" \
     "target/$none_target/release/consumer:consumer.elf" \
+    "target/$none_target/release/waiter:.waiter.elf" \
     "target/$none_target/release/shell:shell.elf" \
     "target/$none_target/release/compositor:compositor.elf" \
     "target/$none_target/release/blk:blk.elf" \

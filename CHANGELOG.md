@@ -345,6 +345,20 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **A task can notify a peer through a per-task event word** (F4, core
+  system): `SYS_NOTIFY` (54) ORs bits into a live target's pending `u64`
+  word, and `SYS_EVENT_WAIT` (55) blocks until a requested bit is pending,
+  returns the matched bits, and clears them. Notification is peer traffic
+  inside the session a task was spawned into — it needs no capability, and a
+  cross-session raise is refused — while bits coalesce rather than queue and
+  a new incarnation starts with an empty word. The boot proof is a two-way
+  handshake: a spawned waiter raises bit 1 and blocks for bit 2, the shell
+  consumes bit 1, raises bit 2, and reaps status 2, so the block path runs on
+  every boot. The waiter image is packed as `.waiter.elf` and dot-prefixed
+  entries are omitted from the root listing, so the visible `ls` and the three
+  locked checksums (`0xd616ad79aaefb099`, `0x6d66e82d0f2d6fb8`, and
+  `0x78ebd6d359914da7`) remain unchanged. See
+  [ADR 0073](docs/adr/0073-a-task-notifies-a-peer-through-an-event-word.md).
 - **A runtime spawn can be killed by its spawner** (F7k, core system):
   `SYS_KILL` ends a task created by `SYS_SPAWN`, records the caller-chosen
   status as its exit status, revokes its runtime authority — IRQ and port

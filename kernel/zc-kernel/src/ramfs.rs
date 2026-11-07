@@ -139,6 +139,14 @@ impl FileSystem for RamFs<'_> {
         let mut found = None;
         let mut at = 0;
         cpio::walk(archive, |entry| {
+            // A dot-prefixed entry is archive metadata or a proof artifact:
+            // it stays reachable by exact name through `lookup`, but it is
+            // not part of the user-visible root listing. The runtime waiter
+            // proof image uses this so the scripted `ls` output — and every
+            // frame checksum derived from it — stays unchanged.
+            if entry.name().starts_with('.') {
+                return true;
+            }
             if at == index {
                 found = Some(entry.name());
                 return false;
@@ -150,8 +158,9 @@ impl FileSystem for RamFs<'_> {
         let Some(name) = found else {
             return Ok(None);
         };
-        // Every entry in the archive is a regular file; the loader does not
-        // pack directories, and a flat archive has no other kind to report.
+        // Every visible entry in the archive is a regular file; the loader
+        // does not pack directories, and a flat archive has no other kind to
+        // report. Dot-prefixed entries were skipped above.
         let mut record = DirEntry::new(KIND_FILE);
         record
             .set_name(name.as_bytes())
@@ -273,5 +282,26 @@ mod tests {
         );
         let mut short = [0u8; zc_abi::DIRENT_LEN - 1];
         assert_eq!(fs.read_dir(ROOT, 0, &mut short), Err(VfsError::BadBuffer));
+    }
+
+    #[test]
+    fn read_dir_skips_dot_entries_but_lookup_finds_them() {
+        let mut raw = [0u8; 1024];
+        let mut pos = 0;
+        pos += entry(b".waiter.elf", b"proof", &mut raw[pos..]);
+        pos += entry(b"hello.txt", b"hi\n", &mut raw[pos..]);
+        pos += entry(b"TRAILER!!!", b"", &mut raw[pos..]);
+        let fs = RamFs::mount(&raw[..pos]).expect("mount");
+        let mut out = [0u8; zc_abi::DIRENT_LEN];
+
+        // The hidden proof image is not part of the root listing.
+        assert_eq!(fs.read_dir(ROOT, 0, &mut out), Ok(Some(())));
+        let first = DirEntry::read_from(&out).expect("entry");
+        assert_eq!(first.name(), b"hello.txt");
+        assert_eq!(fs.read_dir(ROOT, 1, &mut out), Ok(None));
+
+        // Exact-name lookup still reaches it, so spawn by name works.
+        let hidden = fs.lookup(ROOT, b".waiter.elf").expect("hidden");
+        assert_eq!(fs.stat(hidden).expect("stat").size, 5);
     }
 }

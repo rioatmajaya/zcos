@@ -23,8 +23,8 @@ filesystem exchange page (see [`server-protocol.md`](server-protocol.md)).
 
 ## Syscall table
 
-Numbers are stable and never reused. `SYS_KILL` (53) is the highest
-assigned number; 54 and above are rejected.
+Numbers are stable and never reused. `SYS_EVENT_WAIT` (55) is the highest
+assigned number; 56 and above are rejected.
 
 Two numbers are **declared but not yet implemented**: `SYS_YIELD` (0) and
 `SYS_MAP_FRAME` (4) are recognized by the dispatch table but have no handler, so
@@ -87,6 +87,8 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 51 | `SYS_SPAWN` | name ptr, name length | child task slot | `u64::MAX` |
 | 52 | `SYS_WAIT` | task slot | the slot's recorded exit status | `u64::MAX` |
 | 53 | `SYS_KILL` | task slot, status | 0 | `u64::MAX` |
+| 54 | `SYS_NOTIFY` | task slot, event bits | 0 | `u64::MAX` |
+| 55 | `SYS_EVENT_WAIT` | mask | matched bits (blocks) | `u64::MAX` |
 
 ### Clock
 
@@ -338,6 +340,27 @@ unblocks every task, so a `SYS_WAIT` on the slot observes the death. That wait
 still performs the reap and returns the spawn's frames; killing an
 already-dead record is refused rather than overwriting the status the first
 end recorded. Returns `0` on success and `u64::MAX` for every refusal.
+
+### Events
+
+`SYS_NOTIFY` (54) raises event bits on a peer: `rdi` is the target slot and
+`rsi` a non-zero mask. The target must be alive and in the caller's session,
+because notification is peer communication inside the group a task was spawned
+into, not lifecycle authority; it needs no capability, and a cross-session
+raise returns `u64::MAX`. A successful notify ORs the bits into the target's
+pending `u64` word and wakes every blocked task, so a target waiting in
+`SYS_EVENT_WAIT` retries and observes them. Bits coalesce: raising a bit twice
+before it is consumed leaves one pending bit. This is a flag word, not a queue,
+and not a signal: there is no handler, no per-bit mask, and no delivery frame.
+
+`SYS_EVENT_WAIT` (55) blocks the caller until at least one bit in `rdi`'s mask
+is pending, then returns the matched bits and clears them; unmatched bits stay
+pending. A bit raised before the wait is still delivered, so the caller cannot
+lose a notification that arrived while it was running. An empty mask returns
+`u64::MAX`. The wait uses the same retry path as a full send or empty receive:
+any notify, exit, or fault unblocks every task, and a replay with no match
+blocks again. The event word belongs to one incarnation; spawn and respawn
+start it at zero, and kill, exit, and fault restart clear it.
 
 ### `SYS_WINDOW_CLOSE`
 

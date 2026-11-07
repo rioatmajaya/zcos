@@ -20,7 +20,7 @@ pub use zc_abi::{
     SYS_SERIAL_READ, SYS_SERVICE_HEALTH, SYS_SERVICE_READY, SYS_SERVICE_START, SYS_SERVICE_STATUS,
     SYS_SERVICE_STOP, SYS_SESSION, SYS_STAT, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP,
     SYS_SPAWN, SYS_TASK_EXIT, SYS_TASK_INFO, SYS_TERM_READ, SYS_UMOUNT, SYS_UNLINK, SYS_SYNC,
-    SYS_WAIT, SYS_KILL, SYS_WINDOW_CLOSE, SYS_WINDOW_ID,
+    SYS_WAIT, SYS_KILL, SYS_NOTIFY, SYS_EVENT_WAIT, SYS_WINDOW_CLOSE, SYS_WINDOW_ID,
     SYS_WINDOW_READ,
     SYS_WRITE, SYS_YIELD,
     SERVICE_STATE_READY, SERVICE_STATE_UP, MmioInfo, ServiceSpec, Stat, SurfaceInfo, SyscallError,
@@ -470,6 +470,28 @@ pub fn wait(slot: u64) -> u64 {
 #[inline(always)]
 pub fn kill(slot: u64, status: u64) -> u64 {
     syscall2(SYS_KILL, slot, status)
+}
+
+/// Sets `bits` in task `slot`'s pending event word.
+///
+/// Notification is peer communication inside the caller's session: the target
+/// must be alive and spawned into the same session, and no capability is
+/// needed. Bits coalesce with OR, and a successful notify wakes a target
+/// blocked in [`event_wait`]. Returns `0`, or `u64::MAX` for empty bits, an
+/// unknown or dead slot, or another session.
+#[inline(always)]
+pub fn notify(slot: u64, bits: u64) -> u64 {
+    syscall2(SYS_NOTIFY, slot, bits)
+}
+
+/// Waits for at least one bit in `mask` and consumes the matched bits.
+///
+/// Blocks while no requested bit is pending; any notify, exit, or fault wakes
+/// the caller and the wait retries. Returns the matched bits with those bits
+/// cleared, or `u64::MAX` for an empty mask.
+#[inline(always)]
+pub fn event_wait(mask: u64) -> u64 {
+    syscall1(SYS_EVENT_WAIT, mask)
 }
 
 /// Changes `path`'s permission bits to `mode`, returning 0 or `u64::MAX`.

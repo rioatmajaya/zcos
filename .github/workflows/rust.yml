@@ -63,7 +63,7 @@ jobs:
         grep -q "task 1: consumer received 2000" build/boot.log
         grep -q "task 1: hello verified" build/boot.log
         grep -q "task 0: manifest ok" build/boot.log
-        grep -q "task 2: Commands: help echo cat ls stat write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc ps spawn kill wait dmesg poweroff exit" build/boot.log
+        grep -q "task 2: Commands: help echo cat ls stat write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc ps spawn kill wait notify event dmesg poweroff exit" build/boot.log
         grep -q "task 2: hello os" build/boot.log
         grep -q "task 2: hello from the ZC OS initramfs" build/boot.log
         grep -q "task 2: hello.txt: file, 31 bytes" build/boot.log
@@ -197,6 +197,27 @@ jobs:
         grep -q "task 2: ps: slot 0 gen 3 uid=1 gid=1 down status=7 sid=1" build/boot.log
         grep -q "wait: task 2 reaped task 0 status 7" build/boot.log
         grep -q "task 2: wait: task 0 exited status 7" build/boot.log
+        # An event word is a coalescing flag set, not a queue. The waiter
+        # raises bit 1, blocks for bit 2, and the shell consumes bit 1, raises
+        # bit 2, and waits for the status. The ordering makes the block path
+        # deterministic: the shell cannot raise bit 2 until the waiter is
+        # waiting, and the waiter cannot exit until it consumed bit 2.
+        grep -q "task 2: spawn: task 0 running .waiter.elf" build/boot.log
+        grep -q "task 0: waiter running" build/boot.log
+        grep -q "task 0: waiter waiting" build/boot.log
+        grep -q "notify: task 0 notified task 2 bits 1" build/boot.log
+        grep -q "event: task 2 took 1" build/boot.log
+        grep -q "task 2: event: got 1" build/boot.log
+        grep -q "notify: task 2 notified task 0 bits 2" build/boot.log
+        grep -q "task 2: notify: task 0 bits 2" build/boot.log
+        grep -q "task 0: waiter woke" build/boot.log
+        grep -q "wait: task 2 reaped task 0 status 2" build/boot.log
+        grep -q "task 2: wait: task 0 exited status 2" build/boot.log
+        # Notification is peer traffic inside one session, not lifecycle
+        # authority: the shell cannot raise a bit on the system-session block
+        # driver, and no capability changes that.
+        grep -q "notify: task 2 refused session 0 task 4" build/boot.log
+        grep -q "task 2: notify: cannot notify" build/boot.log
         # A missing image and a supervised slot both fail closed; the kernel
         # logs the reason and the shell reports the neutral failure.
         grep -q "spawn: task 2 found no image nothere.elf" build/boot.log
@@ -342,7 +363,7 @@ jobs:
         grep -q "fb: desktop checksum ok" build/boot.log
         grep -q "switches" build/boot.log
         grep -q "acpi: rsdp v2" build/boot.log
-        grep -q "initramfs: 12 files" build/boot.log
+        grep -q "initramfs: 13 files" build/boot.log
         grep -q "task 4: blk: resuming" build/boot.log
         grep -q "task 7: initd: blk down" build/boot.log
         grep -q "task 7: service blk started, task 4 revived" build/boot.log

@@ -66,6 +66,11 @@ spawn consumer.elf
 kill 0 7
 ps
 wait 0
+spawn .waiter.elf
+event 1
+notify 0 2
+wait 0
+notify 4 1
 spawn nothere.elf
 wait 4
 ps

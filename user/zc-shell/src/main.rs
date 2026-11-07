@@ -3,7 +3,8 @@
 //! Reads keystrokes with blocking serial reads, edits a single line with
 //! backspace support, and runs `help`, `echo`, `cat`, `ls`, `stat`, `write`,
 //! `append`, `rm`, `mkdir`, `rmdir`, `mv`, `sync`, `tmp`, `persist`, `chmod`,
-//! `mount`, `umount`, `id`, `svc`, `ps`, `dmesg`, and `exit`. Output goes
+//! `mount`, `umount`, `id`, `svc`, `ps`, `spawn`, `kill`, `wait`, `notify`,
+//! `event`, `dmesg`, and `exit`. Output goes
 //! through the log syscall, so the transcript appears in the kernel serial log.
 //!
 //! `id` asks the kernel for this task's user and group ids plus its session.
@@ -53,7 +54,7 @@ use zc_user::{
     identity_gid, identity_uid, log, log_parts, log_read, mount, open, poweroff, read, readdir,
     send_to, serial_read, service_faults, service_health, service_is_ready, service_is_up,
     service_restarts, session, spawn, stat, task_exit_with, task_info, umount, unlink, mkdir, rmdir,
-    rename, seek, sync, wait, write, kill,
+    rename, seek, sync, wait, write, kill, notify, event_wait,
 };
 
 /// Contents `persist` writes and expects to read back.
@@ -310,7 +311,7 @@ fn run(line: &[u8]) -> bool {
     }
     match argv[0] {
         b"help" => {
-            log("Commands: help echo cat ls stat write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc ps spawn kill wait dmesg poweroff exit\n");
+            log("Commands: help echo cat ls stat write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc ps spawn kill wait notify event dmesg poweroff exit\n");
         }
         b"echo" => {
             for index in 1..count {
@@ -854,6 +855,49 @@ fn run(line: &[u8]) -> bool {
             out_u64(slot);
             out_bytes(b" exited status ");
             out_u64(status);
+            out_bytes(b"\n");
+            out_flush();
+        }
+        b"notify" => {
+            if count < 3 {
+                log("usage: notify <slot> <bits>\n");
+                return false;
+            }
+            let (Some(slot), Some(bits)) =
+                (parse_decimal(argv[1]), parse_decimal(argv[2]))
+            else {
+                log("notify: bad arguments\n");
+                return false;
+            };
+            if notify(slot, bits) == u64::MAX {
+                // The kernel logs the exact reason (empty bits, dead slot,
+                // another session); this message stays neutral like `kill`'s.
+                log("notify: cannot notify\n");
+                return false;
+            }
+            out_bytes(b"notify: task ");
+            out_u64(slot);
+            out_bytes(b" bits ");
+            out_u64(bits);
+            out_bytes(b"\n");
+            out_flush();
+        }
+        b"event" => {
+            if count < 2 {
+                log("usage: event <mask>\n");
+                return false;
+            }
+            let Some(mask) = parse_decimal(argv[1]) else {
+                log("event: bad mask\n");
+                return false;
+            };
+            let bits = event_wait(mask);
+            if bits == u64::MAX {
+                log("event: cannot wait\n");
+                return false;
+            }
+            out_bytes(b"event: got ");
+            out_u64(bits);
             out_bytes(b"\n");
             out_flush();
         }

@@ -173,6 +173,13 @@ pub struct Task {
     exit_status: u32,
     /// Session group the task belongs to.
     session: u32,
+    /// Pending event bits raised by peers through `SYS_NOTIFY`.
+    ///
+    /// The word is a coalescing flag set, not a queue: setting a bit twice
+    /// leaves one pending bit. `SYS_EVENT_WAIT` clears the bits it returns.
+    /// A fresh incarnation starts at zero, so a stale notification can never
+    /// leak into a revived or respawned task.
+    events: u64,
 }
 
 impl Task {
@@ -324,6 +331,7 @@ impl<const N: usize> TaskTable<N> {
             generation,
             exit_status: 0,
             session,
+            events: 0,
         });
         Ok(index)
     }
@@ -389,6 +397,18 @@ impl<const N: usize> TaskTable<N> {
         self.tasks
             .get(index)
             .and_then(|slot| slot.map(|task| task.session))
+    }
+
+    /// Returns the pending event bits of the slot at `index`, if it holds any
+    /// task at all.
+    ///
+    /// A dead record still reports its word; the kill and exit paths clear it,
+    /// so this is zero for a task that can no longer consume a notification.
+    #[must_use]
+    pub fn events_of(&self, index: usize) -> Option<u64> {
+        self.tasks
+            .get(index)
+            .and_then(|slot| slot.map(|task| task.events))
     }
 
     /// Returns the running task's session.
@@ -516,6 +536,9 @@ impl<const N: usize> TaskTable<N> {
         task.generation = self.next_generation[index];
         self.next_generation[index] = self.next_generation[index].saturating_add(1);
         task.exit_status = 0;
+        // A notification names an incarnation, so a revived slot must not
+        // inherit bits raised for the one that died.
+        task.events = 0;
         Ok(())
     }
 
@@ -539,7 +562,46 @@ impl<const N: usize> TaskTable<N> {
         task.blocked = false;
         task.ready = false;
         task.exit_status = status;
+        // The dead task can never wait on its own word, and the record may be
+        // revived later; clearing here keeps the next incarnation clean even
+        // before `respawn` runs.
+        task.events = 0;
         Ok(())
+    }
+
+    /// Sets event bits in the task at `index`.
+    ///
+    /// The caller supplies the authority policy; this only refuses a slot that
+    /// holds no live task, because a notification to a dead record would have
+    /// no consumer. Bits accumulate with OR, so a bit raised twice before it
+    /// is taken remains a single pending bit.
+    pub fn notify(&mut self, index: usize, bits: u64) -> Result<(), TaskError> {
+        let Some(task) = self.tasks.get_mut(index).and_then(Option::as_mut) else {
+            return Err(TaskError::UnknownTask);
+        };
+        if !task.alive {
+            return Err(TaskError::UnknownTask);
+        }
+        task.events |= bits;
+        Ok(())
+    }
+
+    /// Takes the running task's pending bits selected by `mask`.
+    ///
+    /// Returns the matched bits and clears every bit in `mask`, so a delivered
+    /// bit does not survive the wait. Bits outside `mask` stay pending.
+    /// Returns zero when no requested bit is set; the caller then decides
+    /// whether to block or report an empty read.
+    pub fn take_current_events(&mut self, mask: u64) -> u64 {
+        let Some(task) = self.tasks[self.current].as_mut() else {
+            return 0;
+        };
+        if !task.alive {
+            return 0;
+        }
+        let matched = task.events & mask;
+        task.events &= !mask;
+        matched
     }
 
     /// Removes a dead slot's record, making the index free for a later spawn.
@@ -627,6 +689,7 @@ impl<const N: usize> TaskTable<N> {
             task.alive = false;
             task.blocked = false;
             task.ready = false;
+            task.events = 0;
         }
         self.unblock_all();
         let next = self.next_runnable(self.current)?;
@@ -655,6 +718,7 @@ impl<const N: usize> TaskTable<N> {
             task.blocked = false;
             task.ready = false;
             task.exit_status = 0;
+            task.events = 0;
         }
         self.unblock_all();
         let next = self.next_runnable(self.current)?;
@@ -911,6 +975,70 @@ mod task_table_tests {
         // A wait pairs with the kill: the reap drops the record and its status.
         table.reap(zero).unwrap();
         assert_eq!(table.exit_status_of(zero), None);
+    }
+
+    #[test]
+    fn notify_sets_bits_and_event_wait_takes_only_a_match() {
+        let mut table = TaskTable::<4>::new();
+        let zero = table
+            .spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000, Identity::ROOT)
+            .unwrap();
+        let one = table
+            .spawn(SyscallRegs::EMPTY, frame(0x200), 0x2000, Identity::ROOT)
+            .unwrap();
+        // `current` starts at slot zero, so the take targets it directly.
+        assert_eq!(table.current(), zero);
+        table.notify(zero, 0b101).unwrap();
+        table.notify(zero, 0b010).unwrap();
+        assert_eq!(table.events_of(zero), Some(0b111));
+        table.notify(zero, 0b101).unwrap();
+        assert_eq!(table.events_of(zero), Some(0b111));
+
+        // Only the requested bits are taken; the rest stay pending.
+        assert_eq!(table.take_current_events(0b011), 0b011);
+        assert_eq!(table.events_of(zero), Some(0b100));
+        assert_eq!(table.take_current_events(0b001), 0);
+        assert_eq!(table.take_current_events(0b110), 0b100);
+        assert_eq!(table.events_of(zero), Some(0));
+
+        // A dead or empty slot refuses the notification instead of holding
+        // bits no one can consume.
+        table.notify(one, 0b1).unwrap();
+        table.kill(one, 0).unwrap();
+        assert_eq!(table.events_of(one), Some(0));
+        assert_eq!(table.notify(one, 0b1), Err(TaskError::UnknownTask));
+        assert_eq!(table.notify(9, 0b1), Err(TaskError::UnknownTask));
+    }
+
+    #[test]
+    fn a_new_incarnation_starts_with_no_pending_events() {
+        let mut table = TaskTable::<2>::new();
+        let zero = table
+            .spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000, Identity::ROOT)
+            .unwrap();
+        assert_eq!(table.events_of(zero), Some(0));
+        table.notify(zero, 0xAA).unwrap();
+        assert_eq!(table.events_of(zero), Some(0xAA));
+
+        // A kill clears the word even before the record is reaped.
+        table.kill(zero, 0).unwrap();
+        assert_eq!(table.events_of(zero), Some(0));
+        table
+            .respawn(zero, SyscallRegs::EMPTY, frame(0x500))
+            .unwrap();
+        assert_eq!(table.events_of(zero), Some(0));
+
+        // A reap drops the record, and the next spawn into the slot starts
+        // clean rather than inheriting the previous tenant's bits.
+        table.notify(zero, 0x55).unwrap();
+        table.kill(zero, 0).unwrap();
+        table.reap(zero).unwrap();
+        assert_eq!(table.events_of(zero), None);
+        let again = table
+            .spawn(SyscallRegs::EMPTY, frame(0x600), 0x3000, Identity::ROOT)
+            .unwrap();
+        assert_eq!(again, zero);
+        assert_eq!(table.events_of(again), Some(0));
     }
 
     #[test]
