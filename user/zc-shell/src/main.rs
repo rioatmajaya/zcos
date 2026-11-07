@@ -922,7 +922,7 @@ fn run(line: &[u8]) -> bool {
             out_flush();
         }
         b"signal" => {
-            if signal(1, 0x1234) == u64::MAX {
+            if signal(1, 0) == u64::MAX {
                 log("signal: cannot register\n");
                 return false;
             }
