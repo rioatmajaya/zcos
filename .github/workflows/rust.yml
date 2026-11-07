@@ -238,6 +238,8 @@ jobs:
         # The kernel reads the manifest's service order at boot.
         grep -q "manifest: services=blk,kbd" build/boot.log
         grep -q "task 7: initd: manifest ok" build/boot.log
+        grep -q "task 7: initd: discovered blk up" build/boot.log
+        grep -q "task 7: initd: discovered kbd up" build/boot.log
         # The manifest is authoritative for the supervised set and order.
         grep -q "task 7: initd: supervising blk,kbd" build/boot.log
         grep -q "cap: task 6 delegated" build/boot.log

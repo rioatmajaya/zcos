@@ -52,6 +52,7 @@ pub unsafe extern "C" fn _start() -> ! {
         log("initd: not root\n");
     }
     let plan = load_plan();
+    log_discovery();
     log_plan(&plan);
     retire_unplanned(&plan);
     let mut budget = RestartBudget::new();
@@ -121,6 +122,24 @@ fn load_plan() -> SupervisionPlan {
         Err(_) => {
             log("initd: manifest malformed\n");
             plan_for(None)
+        }
+    }
+}
+
+/// Logs which catalog services are already up at startup.
+///
+/// Discovery is a diagnostic: the supervised set still comes from the manifest
+/// (or the full catalog as a fallback), but the supervisor records which of
+/// those services actually answered `service_status` before it starts watching.
+/// A service that is down at this point is reported, so a bring-up fault is
+/// visible before the first supervision event arrives.
+fn log_discovery() {
+    for service in SERVICE_CATALOG {
+        let status = service_status(u64::from(service.id));
+        if service_is_up(status) {
+            log_parts(&["initd: discovered ", service.name, " up\n"]);
+        } else {
+            log_parts(&["initd: discovered ", service.name, " down\n"]);
         }
     }
 }

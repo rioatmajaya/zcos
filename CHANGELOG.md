@@ -345,6 +345,11 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **Service discovery at boot** (F7f, core system): `initd` now logs
+  `initd: discovered blk up` and `initd: discovered kbd up` for every catalog
+  service before it starts watching, so a bring-up fault is visible before
+  the first supervision event. See
+  [ADR 0079](docs/adr/0079-service-discovery-at-boot.md).
 - **A stable userspace C ABI** (F5, core system): a freestanding C task
   (`user/zc-hello`) built with the cross-compiler prints
   `task 0: hello from C` on every boot, proving the `int $0x80` contract is
