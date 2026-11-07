@@ -224,6 +224,7 @@ jobs:
         grep -q "task 2: notify: cannot notify" build/boot.log
         grep -q "task 2: session: created" build/boot.log
         grep -q "task 2: signal: registered" build/boot.log
+        grep -q "task 2: signal: handled" build/boot.log
         grep -q "task 2: raise: ok" build/boot.log
         grep -q "task 0: hello from C" build/boot.log
         # A missing image and a supervised slot both fail closed; the kernel

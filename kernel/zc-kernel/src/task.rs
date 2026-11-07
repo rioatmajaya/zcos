@@ -685,6 +685,13 @@ impl<const N: usize> TaskTable<N> {
         Some((task.signal_saved_regs, task.signal_saved_rip, task.signal_saved_rsp))
     }
 
+    /// Re-arms a pending signal without clearing it.
+    pub fn set_signal_pending(&mut self, sig: u8) {
+        if let Some(task) = self.tasks[self.current].as_mut() {
+            task.signal_pending = sig;
+        }
+    }
+
     /// Returns the running task's signal handler address.
     pub fn signal_handler(&self) -> u64 {
         self.tasks[self.current].as_ref().map_or(0, |t| t.signal_handler)

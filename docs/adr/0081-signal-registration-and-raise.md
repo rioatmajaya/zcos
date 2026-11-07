@@ -32,8 +32,14 @@ event had to poll its event word.
 
 - The ABI now names signals, handlers, and raise, and the kernel records them
   per task. The boot proof reports `signal: registered`.
-- Handler invocation, a signal trampoline, and syscall interruption remain
-  future work: a raised signal is recorded but not yet delivered.
+- Handler invocation now works through a shared trampoline page mapped at
+  `0x5F0000`: a raised signal redirects the target's next entry to the
+  handler, which returns to the trampoline and calls `SYS_SIGRETURN` to
+  restore the saved context. The boot proof reports `signal: handled`.
+- Syscall interruption remains future work: a signal that arrives while a
+  task is blocked in a syscall is recorded and delivered at the task's next
+  syscall entry, so a task stuck in a blocking call is not interrupted
+  mid-call.
 - `SYS_SIGRETURN` is reserved so the trampoline can be added without
   renumbering.
 

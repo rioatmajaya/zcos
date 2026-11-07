@@ -204,6 +204,8 @@ const SECOND_WINDOW_CLIENT_NAME: &str = "win.elf";
 
 /// User virtual address the display framebuffer is mapped at.
 const FB_VIRT: u64 = 0x10_00000;
+/// Virtual address of the signal trampoline mapped into every task.
+const TRAMPOLINE_VIRT: u64 = 0x5F_0000;
 
 /// Size of the framebuffer window reserved in every address space.
 ///
@@ -1688,6 +1690,32 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             }
             // Wake a blocked target so it observes the signal.
             tasks.unblock_all();
+
+            // Synchronous self-delivery: if the target is the caller and a
+            // handler is registered, deliver now.
+            if target == me as usize {
+                let handler = tasks.signal_handler();
+                if handler != 0 && !tasks.in_signal() {
+                    let mut saved = *regs;
+                    saved.rax = 0;
+                    tasks.save_signal_context(saved, frame.rip, frame.rsp);
+                    tasks.set_in_signal(true);
+                    let new_rsp = frame.rsp.wrapping_sub(8);
+                    unsafe {
+                        *(new_rsp as *mut u64) = TRAMPOLINE_VIRT;
+                    }
+                    frame.rsp = new_rsp;
+                    frame.rip = handler;
+                    regs.rdi = u64::from(sig);
+                    tasks.set_signal_pending(0);
+                    let _ = crate::serial::print(format_args!(
+                        "signal: delivered {sig} to {target}\n",
+                    ));
+                    regs.set_result(0);
+                    return 0;
+                }
+            }
+
             let _ = crate::serial::print(format_args!(
                 "raise: task {me} raised {sig} on {target}\n",
             ));
@@ -4305,6 +4333,28 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
                 j += 1;
             }
             i += 1;
+        }
+    }
+
+    // One shared trampoline page, mapped into every task at TRAMPOLINE_VIRT.
+    let tramp_frame = alloc.allocate().expect("trampoline frame");
+    let tramp_phys = tramp_frame.start_address();
+    unsafe {
+        let base = tramp_phys as *mut u8;
+        base.add(0).write(0x48);
+        base.add(1).write(0xC7);
+        base.add(2).write(0xC0);
+        base.add(3).write(58);
+        base.add(4).write(0);
+        base.add(5).write(0);
+        base.add(6).write(0);
+        base.add(7).write(0xCD);
+        base.add(8).write(0x80);
+        for pt in pts.iter() {
+            let idx = ((TRAMPOLINE_VIRT >> 12) & 0x1FF) as usize;
+            let entry = tramp_phys | 0x05;
+            let pt_ptr = *pt as *mut u64;
+            core::ptr::write_volatile(pt_ptr.add(idx), entry);
         }
     }
 

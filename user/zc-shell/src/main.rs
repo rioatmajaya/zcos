@@ -296,6 +296,12 @@ fn print_lines(bytes: &[u8]) {
     }
 }
 
+/// Signal handler proof: logs and returns to the trampoline.
+#[unsafe(no_mangle)]
+pub extern "C" fn zc_signal_handler() {
+    log("signal: handled\n");
+}
+
 /// Runs one parsed command line. Returns whether to exit the shell.
 fn run(line: &[u8]) -> bool {
     let mut argv: [&[u8]; 4] = [&[]; 4];
@@ -922,7 +928,7 @@ fn run(line: &[u8]) -> bool {
             out_flush();
         }
         b"signal" => {
-            if signal(1, 0) == u64::MAX {
+            if signal(1, zc_signal_handler as u64) == u64::MAX {
                 log("signal: cannot register\n");
                 return false;
             }
