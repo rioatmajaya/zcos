@@ -60,6 +60,7 @@ stat /dev/blk
 id
 session
 signal
+raise 2 1
 svc
 ps
 help
