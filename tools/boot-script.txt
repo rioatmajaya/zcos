@@ -83,5 +83,6 @@ notify 4 1
 spawn nothere.elf
 wait 4
 ps
+spawn .hello-c.elf
 dmesg
 exit

@@ -130,6 +130,12 @@ cargo build --manifest-path user/zc-consumer/Cargo.toml \
     --target "$none_target" --target-dir target --release
 cargo build --manifest-path user/zc-waiter/Cargo.toml \
     --target "$none_target" --target-dir target --release
+# A C proof task: the smallest possible freestanding ELF built with the
+# system cross-compiler, exercising the stable C ABI rather than Rust.
+x86_64-linux-gnu-gcc -nostdlib -nostartfiles -static \
+    -Wl,--build-id=none -e _start \
+    -T user/zc-hello/user.ld \
+    -o build/hello-c.elf user/zc-hello/main.c
 cargo build --manifest-path user/zc-shell/Cargo.toml \
     --target "$none_target" --target-dir target --release
 # shellcheck disable=SC2086
@@ -160,6 +166,7 @@ fi
     "target/$none_target/release/producer:producer.elf" \
     "target/$none_target/release/consumer:consumer.elf" \
     "target/$none_target/release/waiter:.waiter.elf" \
+    "build/hello-c.elf:.hello-c.elf" \
     "target/$none_target/release/shell:shell.elf" \
     "target/$none_target/release/compositor:compositor.elf" \
     "target/$none_target/release/blk:blk.elf" \

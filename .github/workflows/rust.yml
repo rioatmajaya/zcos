@@ -223,6 +223,7 @@ jobs:
         grep -q "notify: task 2 refused session 0 task 4" build/boot.log
         grep -q "task 2: notify: cannot notify" build/boot.log
         grep -q "task 2: session: created" build/boot.log
+        grep -q "task 0: hello from C" build/boot.log
         # A missing image and a supervised slot both fail closed; the kernel
         # logs the reason and the shell reports the neutral failure.
         grep -q "spawn: task 2 found no image nothere.elf" build/boot.log

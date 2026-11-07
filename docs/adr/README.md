@@ -84,6 +84,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0075](0075-a-persistent-owner-is-a-log-record.md) | A persistent owner is a log record | Accepted |
 | [0076](0076-the-kernel-reads-the-boot-manifest.md) | The kernel reads the boot manifest's service order | Accepted |
 | [0077](0077-a-login-creates-a-session.md) | A login creates a session | Accepted |
+| [0078](0078-a-stable-userspace-c-abi.md) | A stable userspace C ABI | Accepted |
 
 ## Adding a decision
 

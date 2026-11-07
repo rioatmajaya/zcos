@@ -345,6 +345,12 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **A stable userspace C ABI** (F5, core system): a freestanding C task
+  (`user/zc-hello`) built with the cross-compiler prints
+  `task 0: hello from C` on every boot, proving the `int $0x80` contract is
+  reachable from C without a libc. The image is packed as `.hello-c.elf` and
+  stays hidden from the root listing. See
+  [ADR 0078](docs/adr/0078-a-stable-userspace-c-abi.md).
 - **A login creates a session** (F4, core system): `SYS_SESSION_CREATE` mints
   a new session owned by the caller, and `SYS_SPAWN` now takes a session
   argument (zero inherits), so a task can be spawned into a minted session.
