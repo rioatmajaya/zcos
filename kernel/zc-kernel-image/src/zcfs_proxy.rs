@@ -44,7 +44,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering, compiler_fence};
 use zc_abi::{
     FS_EXCHANGE_DATA, FS_EXCHANGE_DATA_MAX, FS_EXCHANGE_NODE, FS_EXCHANGE_OFFSET, FS_EXCHANGE_OP,
     FS_EXCHANGE_PAYLOAD, FS_EXCHANGE_RESULT, FS_EXCHANGE_SEQ, FS_EXCHANGE_TASK, FS_OP_CREATE,
-    FS_OP_FLUSH, FS_OP_LIST, FS_OP_LOOKUP, FS_OP_MOUNT, FS_OP_READ, FS_OP_RENAME, FS_OP_RMDIR, FS_OP_STAT,
+    FS_OP_FLUSH, FS_OP_LIST, FS_OP_LOOKUP, FS_OP_MOUNT, FS_OP_READ, FS_OP_RENAME, FS_OP_RMDIR, FS_OP_SET_OWNER, FS_OP_STAT,
     FS_OP_SYNC, FS_OP_UNLINK, FS_OP_UNMOUNT,
     FS_OP_WRITE, FS_STATUS_BAD_BUFFER, FS_STATUS_BAD_FD, FS_STATUS_BAD_PATH, FS_STATUS_CORRUPT,
     FS_STATUS_IO, FS_STATUS_NOT_A_DIRECTORY, FS_STATUS_NOT_EMPTY, FS_STATUS_NOT_FOUND,
@@ -328,7 +328,7 @@ impl FileSystem for Proxy {
         dir: NodeId,
         name: &[u8],
         mode: u32,
-        _owner: Identity,
+        owner: Identity,
     ) -> Result<NodeId, VfsError> {
         let me = FS_CALLER.load(Ordering::Relaxed);
         // The on-disk record carries the mode but not the owner yet, so the
@@ -343,7 +343,12 @@ impl FileSystem for Proxy {
             name.len() as u32,
             &mut [],
         )?;
-        decode(reply.status).map(|()| reply.result)
+        let node = decode(reply.status).map(|()| reply.result)?;
+        // Persist the creator's identity. zcfs reports root for every node by
+        // default, so without this record ownership would not survive a
+        // remount even though the VFS already decided it at create time.
+        self.set_owner(node, owner.uid, owner.gid)?;
+        Ok(node)
     }
 
     fn unlink(
@@ -435,6 +440,15 @@ impl FileSystem for Proxy {
             pos as u32,
             &mut [],
         )?;
+        decode(reply.status)
+    }
+
+    fn set_owner(&self, node: NodeId, uid: u32, gid: u32) -> Result<(), VfsError> {
+        let me = FS_CALLER.load(Ordering::Relaxed);
+        let mut payload = [0u8; 8];
+        payload[0..4].copy_from_slice(&uid.to_le_bytes());
+        payload[4..8].copy_from_slice(&gid.to_le_bytes());
+        let reply = exchange(me, FS_OP_SET_OWNER, node, 0, &payload, 8, &mut [])?;
         decode(reply.status)
     }
 

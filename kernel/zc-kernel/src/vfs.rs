@@ -165,6 +165,15 @@ pub trait FileSystem {
         Err(VfsError::NotSupported)
     }
 
+    /// Sets a node's owner.
+    ///
+    /// The caller has already been checked by the VFS. The default is a
+    /// filesystem that cannot change an owner in place, such as a read-only
+    /// mount or one served over IPC.
+    fn set_owner(&self, _node: NodeId, _uid: u32, _gid: u32) -> Result<(), VfsError> {
+        Err(VfsError::NotSupported)
+    }
+
     /// Removes the entry `name` from directory `dir`.
     ///
     /// The VFS has already checked that the caller may write the directory, so

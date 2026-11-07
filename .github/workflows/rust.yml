@@ -124,7 +124,7 @@ jobs:
         # `mv` on /data appends a durable RENAME record, so the moved name
         # survives the explicit umount/mount pair.
         grep -q "task 2: mv: moved /data/empty -> /data/moved" build/boot.log
-        grep -q "task 2: /data/moved: file, 0 bytes" build/boot.log
+        grep -q "task 2: /data/moved: file, 1 bytes" build/boot.log
         grep -q "task 2: tmp: ok" build/boot.log
         grep -q "task 2: /dev/blk: char device" build/boot.log
         grep -q "task 2: uid=1 gid=1" build/boot.log

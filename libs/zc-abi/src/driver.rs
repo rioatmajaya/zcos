@@ -84,6 +84,12 @@ pub const FS_OP_SYNC: u32 = 12;
 /// child before deciding whether it is an empty directory at all.
 pub const FS_OP_RMDIR: u32 = 13;
 
+/// Request opcode: set a node's owner.
+///
+/// The node field names the node and the payload carries the uid and gid as
+/// two little-endian u32 values. The domain appends an `OWNER` record.
+pub const FS_OP_SET_OWNER: u32 = 15;
+
 /// Request opcode: rename or move a name within the volume.
 ///
 /// The node field names the source directory, the offset field the destination

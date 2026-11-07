@@ -64,6 +64,8 @@ pub const KIND_DATA: u32 = 2;
 pub const KIND_UNLINK: u32 = 3;
 /// Record kind: clears an **empty** directory, payload-free.
 pub const KIND_RMDIR: u32 = 4;
+/// Record kind: sets a node's owner.
+pub const KIND_OWNER: u32 = 6;
 /// Record kind: moves a node to a new parent and name.
 pub const KIND_RENAME: u32 = 5;
 
@@ -371,6 +373,26 @@ pub fn parse_rename(payload: &[u8]) -> Result<(u64, &[u8]), ZcfsError> {
     Ok((new_parent, &payload[RENAME_NAME_OFFSET..RENAME_NAME_OFFSET + name_len]))
 }
 
+/// Builds an `OWNER` payload: uid then gid.
+pub fn owner_payload(uid: u32, gid: u32, out: &mut [u8]) -> Result<usize, ZcfsError> {
+    if out.len() < 8 {
+        return Err(ZcfsError::NoSpace);
+    }
+    out[..4].copy_from_slice(&uid.to_le_bytes());
+    out[4..8].copy_from_slice(&gid.to_le_bytes());
+    Ok(8)
+}
+
+/// Decodes an `OWNER` payload into `(uid, gid)`.
+pub fn parse_owner(payload: &[u8]) -> Result<(u32, u32), ZcfsError> {
+    if payload.len() < 8 {
+        return Err(ZcfsError::Corrupt);
+    }
+    let uid = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    let gid = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+    Ok((uid, gid))
+}
+
 /// Builds a `DATA` payload: offset, content length, then the content.
 pub fn data_payload(offset: u32, data: &[u8], out: &mut [u8]) -> Result<usize, ZcfsError> {
     if data.len() > out.len() - DATA_CONTENT_OFFSET {
@@ -431,6 +453,8 @@ struct Node {
     kind: u32,
     mode: u32,
     size: u32,
+    owner_uid: u32,
+    owner_gid: u32,
     name_len: u8,
     name: [u8; NAME_MAX],
     content: [u8; CONTENT_MAX],
@@ -445,6 +469,8 @@ impl Node {
         kind: 0,
         mode: 0,
         size: 0,
+        owner_uid: 0,
+        owner_gid: 0,
         name_len: 0,
         name: [0; NAME_MAX],
         content: [0; CONTENT_MAX],
@@ -727,6 +753,24 @@ impl<const N: usize> Table<N> {
         Ok(())
     }
 
+    /// Returns the owner of `node`.
+    pub fn owner(&self, node: u64) -> Result<(u32, u32), ZcfsError> {
+        let slot = self.find(node).ok_or(ZcfsError::NotFound)?;
+        Ok((slot.owner_uid, slot.owner_gid))
+    }
+
+    /// Sets the owner of `node`.
+    fn apply_owner(&mut self, node: u64, uid: u32, gid: u32) -> Result<(), ZcfsError> {
+        let slot = self
+            .nodes
+            .iter_mut()
+            .find(|slot| slot.used && slot.node_id == node)
+            .ok_or(ZcfsError::NotFound)?;
+        slot.owner_uid = uid;
+        slot.owner_gid = gid;
+        Ok(())
+    }
+
     /// Clears every slot in place, without a whole-table temporary.
     fn reset(&mut self) {
         for slot in self.nodes.iter_mut() {
@@ -865,6 +909,12 @@ impl<const N: usize> Volume<N> {
                     };
                     self.table.apply_rename(header.node, new_parent, name)?;
                 }
+                KIND_OWNER => {
+                    let Ok((uid, gid)) = parse_owner(header.payload(&sector)) else {
+                        break;
+                    };
+                    self.table.apply_owner(header.node, uid, gid)?;
+                }
                 _ => break,
             }
             seq += 1;
@@ -992,7 +1042,7 @@ impl<const N: usize> Volume<N> {
         if end > CONTENT_MAX {
             return Err(ZcfsError::NoSpace);
         }
-        let mut payload = [0u8; PAYLOAD_MAX];
+        let mut payload = [0u8; 64];
         let len = data_payload(offset, data, &mut payload)?;
         self.append(io, KIND_DATA, node, &payload[..len])?;
         self.table.apply_data(node, offset, data)?;
@@ -1070,10 +1120,30 @@ impl<const N: usize> Volume<N> {
                 self.table.apply_unlink(dst)?;
             }
         }
-        let mut payload = [0u8; PAYLOAD_MAX];
+        let mut payload = [0u8; 64];
         let len = rename_payload(new_dir, new_name, &mut payload)?;
         self.append(io, KIND_RENAME, src, &payload[..len])?;
         self.table.apply_rename(src, new_dir, new_name)
+    }
+
+    /// Returns the owner of `node`.
+    pub fn owner(&self, node: u64) -> Result<(u32, u32), ZcfsError> {
+        self.table.owner(node)
+    }
+
+    /// Sets the owner of `node`, appending an `OWNER` record.
+    pub fn set_owner(
+        &mut self,
+        io: &mut impl BlockIo,
+        node: u64,
+        uid: u32,
+        gid: u32,
+    ) -> Result<(), ZcfsError> {
+        self.table.stat(node)?;
+        let mut payload = [0u8; 8];
+        let len = owner_payload(uid, gid, &mut payload)?;
+        self.append(io, KIND_OWNER, node, &payload[..len])?;
+        self.table.apply_owner(node, uid, gid)
     }
 
     /// Marks the volume cleanly unmounted.
@@ -1336,6 +1406,21 @@ mod tests {
             volume.rename(&mut io, ROOT_NODE, b"dir", sub, b"moved"),
             Err(ZcfsError::NotSupported)
         );
+    }
+
+    #[test]
+    fn an_owner_is_durable_across_a_remount() {
+        let (mut io, mut volume) = seeded();
+        let node = volume
+            .create(&mut io, ROOT_NODE, b"owned", MODE_FILE | 0o644)
+            .expect("create");
+        volume.set_owner(&mut io, node, 7, 9).expect("set owner");
+        assert_eq!(volume.owner(node).expect("owner"), (7, 9));
+
+        volume.mark_clean(&mut io).expect("clean");
+        let reloaded = Volume::<8>::mount(0, &mut io).expect("remount");
+        let node = reloaded.lookup(ROOT_NODE, b"owned").expect("owned");
+        assert_eq!(reloaded.owner(node).expect("owner"), (7, 9));
     }
 
     #[test]
@@ -1741,7 +1826,7 @@ mod tests {
         // Append a DATA record by hand, then destroy its sector: the volume
         // must still mount at the previous head.
         let probe = volume.lookup(ROOT_NODE, b"probe").expect("probe");
-        let mut payload = [0u8; PAYLOAD_MAX];
+        let mut payload = [0u8; 64];
         let len = data_payload(0, b"torn", &mut payload).expect("payload");
         let mut sector = [0u8; SECTOR_SIZE];
         encode_record(KIND_DATA, committed + 1, probe, &payload[..len], &mut sector).expect("encode");
@@ -1767,7 +1852,7 @@ mod tests {
         // superblock at it anyway: the sector is torn, but the head claims it.
         // This is the shape a real power loss leaves behind, and it is the case
         // a plain torn tail cannot express.
-        let mut payload = [0u8; PAYLOAD_MAX];
+        let mut payload = [0u8; 64];
         let len = data_payload(0, b"lost", &mut payload).expect("payload");
         let mut sector = [0u8; SECTOR_SIZE];
         let claimed = committed + 1;
@@ -1914,7 +1999,7 @@ mod tests {
 
         // Plant a torn, over-claiming tail and point the superblock at it, with
         // no clean flag — the shape F7g documented as needing recovery.
-        let mut payload = [0u8; PAYLOAD_MAX];
+        let mut payload = [0u8; 64];
         let len = data_payload(0, b"lost", &mut payload).expect("payload");
         let mut sector = [0u8; SECTOR_SIZE];
         let claimed = committed + 1;

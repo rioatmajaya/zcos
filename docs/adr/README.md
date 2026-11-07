@@ -81,6 +81,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0072](0072-a-runtime-spawn-is-killed-by-its-spawner.md) | A runtime spawn is killed by its spawner | Accepted |
 | [0073](0073-a-task-notifies-a-peer-through-an-event-word.md) | A task notifies a peer through an event word | Accepted |
 | [0074](0074-a-persistent-rename-is-a-log-record.md) | A persistent rename is a log record | Accepted |
+| [0075](0075-a-persistent-owner-is-a-log-record.md) | A persistent owner is a log record | Accepted |
 
 ## Adding a decision
 

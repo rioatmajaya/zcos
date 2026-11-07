@@ -31,7 +31,7 @@ use core::sync::atomic::{Ordering, compiler_fence};
 use zc_abi::{
     DIRENT_LEN, DirEntry, FS_EXCHANGE_DATA, FS_EXCHANGE_NODE, FS_EXCHANGE_OFFSET, FS_EXCHANGE_OP,
     FS_EXCHANGE_PAYLOAD, FS_EXCHANGE_RESULT, FS_EXCHANGE_VIRT, FS_OP_CREATE, FS_OP_FLUSH,
-    FS_OP_LIST, FS_OP_LOOKUP, FS_OP_MOUNT, FS_OP_READ, FS_OP_RENAME, FS_OP_RMDIR, FS_OP_STAT, FS_OP_STOP,
+    FS_OP_LIST, FS_OP_LOOKUP, FS_OP_MOUNT, FS_OP_READ, FS_OP_RENAME, FS_OP_RMDIR, FS_OP_SET_OWNER, FS_OP_STAT, FS_OP_STOP,
     FS_OP_SYNC, FS_OP_UNLINK, FS_OP_UNMOUNT,
     FS_OP_WRITE, FS_STATUS_BAD_BUFFER, FS_STATUS_BAD_PATH, FS_STATUS_CORRUPT,
     FS_STATUS_NOT_A_DIRECTORY, FS_STATUS_NOT_EMPTY, FS_STATUS_NOT_FOUND, FS_STATUS_NOT_SUPPORTED,
@@ -990,15 +990,16 @@ fn serve_op(
         FS_OP_STAT => match volume.stat(node) {
             Ok((kind, mode, size)) => {
                 // The ABI `Stat` layout: kind, mode, size, node, uid, gid,
-                // little-endian. The on-disk record carries the mode but not
-                // the owner yet, so every zcfs node reports root.
+                // little-endian. The owner comes from the OWNER record, or
+                // root when none was written.
+                let (uid, gid) = volume.owner(node).unwrap_or((0, 0));
                 let mut bytes = [0u8; STAT_LEN];
                 bytes[0..4].copy_from_slice(&kind.to_le_bytes());
                 bytes[4..8].copy_from_slice(&mode.to_le_bytes());
                 bytes[8..16].copy_from_slice(&u64::from(size).to_le_bytes());
                 bytes[16..24].copy_from_slice(&node.to_le_bytes());
-                bytes[24..28].copy_from_slice(&0u32.to_le_bytes());
-                bytes[28..32].copy_from_slice(&0u32.to_le_bytes());
+                bytes[24..28].copy_from_slice(&uid.to_le_bytes());
+                bytes[28..32].copy_from_slice(&gid.to_le_bytes());
                 ex_write_bytes(&bytes);
                 ex_store32(FS_EXCHANGE_PAYLOAD, bytes.len() as u32);
                 FS_STATUS_OK
@@ -1144,6 +1145,26 @@ fn serve_op(
                 Err(error) => status_of(error),
             }
         }
+        FS_OP_SET_OWNER => {
+            log("blk: set_owner arm\n");
+            if payload_len < 8 {
+                return FS_STATUS_BAD_PATH;
+            }
+            ex_read_bytes(&mut buffer[..8]);
+            let uid = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
+            let gid = u32::from_le_bytes([buffer[4], buffer[5], buffer[6], buffer[7]]);
+            let mut io = CacheIo {
+                device: &mut *device,
+                cache: &mut *cache,
+                flush_offered,
+            };
+            let r = volume.set_owner(&mut io, node, uid, gid);
+            log("blk: set_owner done\n");
+            match r {
+                Ok(()) => FS_STATUS_OK,
+                Err(error) => status_of(error),
+            }
+        }
         FS_OP_RENAME => {
             // node = source directory, offset = destination directory, payload
             // = source name then destination name (each length-prefixed).
@@ -1220,7 +1241,7 @@ fn serve_op(
                 Err(error) => status_of(error),
             }
         }
-        _ => FS_STATUS_NOT_SUPPORTED,
+        _ => { log("blk: unknown op\n"); FS_STATUS_NOT_SUPPORTED }
     }
 }
 

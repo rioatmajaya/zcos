@@ -345,6 +345,13 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **A persistent owner is a log record** (F7e, core system): `zcfs` now
+  appends a `KIND_OWNER` record when a file is created, so the creator's
+  identity survives an explicit `umount`/`mount` instead of every node
+  reporting root. The kernel's `zcfs` proxy overrides `set_owner` through
+  `FS_OP_SET_OWNER` and propagates `WouldBlock` so the syscall retries, and
+  `Proxy::stat` already carries the uid/gid. See
+  [ADR 0075](docs/adr/0075-a-persistent-owner-is-a-log-record.md).
 - **A persistent rename is a log record** (F7e, core system): `zcfs` now
   appends a `KIND_RENAME` record (plus an `UNLINK` record when a file at the
   destination is replaced), so `mv /data/old /data/new` survives an explicit
