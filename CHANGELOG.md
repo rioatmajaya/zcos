@@ -171,6 +171,17 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Fixed
 
+- **The host zcfs checker replays every record kind** (F7e, host tooling):
+  `tools/zcfs.py` stopped at the first `UNLINK`/`RMDIR`/`RENAME`/`OWNER`
+  record, so `tools/check-disk-zcfs.sh` failed on a healthy disk — the
+  guest's zcfs was fine, the checker was behind. The replay now implements
+  all six record kinds with the guest's semantics (a record that contradicts
+  the tree raises like the guest's failed mount, a torn tail still clamps,
+  the node table is bounded at the guest's eight slots), and the check
+  proves the boot's whole story: every kind present in the log, the final
+  tree exactly root and `/written`, the rename's content and persisted owner
+  proven by a prefix replay, and the volume marked clean. See
+  [ADR 0083](docs/adr/0083-the-host-checker-replays-every-record-kind.md).
 - **A full COM1 receive ring kept its newest bytes** (kernel). The headless
   boot harness re-sends the whole scripted command body whenever the guest
   looks idle, so a slow boot queues passes worth of bytes in the 2048-byte

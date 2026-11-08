@@ -33,12 +33,22 @@ NAME_MAX = 32
 CONTENT_MAX = 512
 KIND_CREATE = 1
 KIND_DATA = 2
+KIND_UNLINK = 3
+KIND_RMDIR = 4
+KIND_RENAME = 5
+KIND_OWNER = 6
 ROOT_NODE = 1
 FLAG_CLEAN = 1
 MODE_DIR = 0o040000
 MODE_FILE = 0o100000
+MODE_PERM = 0o777
 CREATE_NAME_OFFSET = 14
 DATA_CONTENT_OFFSET = 6
+RENAME_NAME_OFFSET = 10
+# The node table the guest mounts with (`Volume<8>` in user/zc-blk): a log
+# that would overflow it fails the replay the same way the guest's mount
+# fails, instead of producing a tree the guest could never hold.
+NODE_SLOTS = 8
 
 # The pattern the host plants in /probe for the guest to verify.
 HOST_PATTERN = b"ZCHOST1\n"
@@ -158,6 +168,36 @@ def parse_create(payload):
     return parent, mode, bytes(payload[CREATE_NAME_OFFSET:CREATE_NAME_OFFSET + name_len])
 
 
+def rename_payload(new_parent, name):
+    if not name or len(name) > NAME_MAX:
+        raise ValueError("bad name")
+    payload = bytearray(RENAME_NAME_OFFSET + len(name))
+    struct.pack_into("<Q", payload, 0, new_parent)
+    struct.pack_into("<H", payload, 8, len(name))
+    payload[RENAME_NAME_OFFSET:] = name
+    return bytes(payload)
+
+
+def parse_rename(payload):
+    if len(payload) < RENAME_NAME_OFFSET:
+        raise ValueError("bad rename payload")
+    new_parent = struct.unpack_from("<Q", payload, 0)[0]
+    name_len = struct.unpack_from("<H", payload, 8)[0]
+    if name_len == 0 or name_len > NAME_MAX or RENAME_NAME_OFFSET + name_len > len(payload):
+        raise ValueError("bad rename payload")
+    return new_parent, bytes(payload[RENAME_NAME_OFFSET:RENAME_NAME_OFFSET + name_len])
+
+
+def owner_payload(uid, gid):
+    return struct.pack("<II", uid, gid)
+
+
+def parse_owner(payload):
+    if len(payload) < 8:
+        raise ValueError("bad owner payload")
+    return struct.unpack_from("<II", payload, 0)
+
+
 def data_payload(offset, data):
     if len(data) > PAYLOAD_MAX - DATA_CONTENT_OFFSET:
         raise ValueError("content too large")
@@ -176,11 +216,112 @@ def parse_data(payload):
     return offset, bytes(payload[DATA_CONTENT_OFFSET:DATA_CONTENT_OFFSET + length])
 
 
-def replay(image, partition_lba=0):
+def is_directory(nodes, node):
+    """Mirrors the guest's `Table::is_directory`: node zero, the implicit
+    context the root's parent field names, counts as a directory."""
+    if node == 0:
+        return True
+    slot = nodes.get(node)
+    return slot is not None and slot["kind"] == "dir"
+
+
+def apply_create(nodes, seq, parent, mode, name):
+    """Mirrors the guest's `Table::apply_create`, including the slot bound."""
+    if len(nodes) >= NODE_SLOTS:
+        raise ValueError("inconsistent log: create %d overflows the node table" % seq)
+    if not name or len(name) > NAME_MAX:
+        raise ValueError("inconsistent log: create %d names nothing" % seq)
+    if not is_directory(nodes, parent):
+        raise ValueError("inconsistent log: create %d under a non-directory" % seq)
+    nodes[seq] = {
+        "parent": parent,
+        "name": name,
+        # The type bit decides the replayed kind; only the permission bits
+        # reach the tree, exactly as the guest masks them.
+        "mode": mode & MODE_PERM,
+        "kind": "dir" if mode & MODE_DIR else "file",
+        "content": bytearray(),
+        "owner_uid": 0,
+        "owner_gid": 0,
+    }
+
+
+def apply_data(nodes, node, offset, data):
+    """Mirrors the guest's `Table::apply_data`."""
+    slot = nodes.get(node)
+    if slot is None:
+        raise ValueError("inconsistent log: data for missing node %d" % node)
+    if slot["kind"] != "file":
+        raise ValueError("inconsistent log: data for directory %d" % node)
+    end = offset + len(data)
+    if end > CONTENT_MAX:
+        raise ValueError("inconsistent log: data past %d bytes on node %d"
+                         % (CONTENT_MAX, node))
+    if len(slot["content"]) < end:
+        slot["content"].extend(b"\0" * (end - len(slot["content"])))
+    slot["content"][offset:end] = data
+
+
+def apply_unlink(nodes, node):
+    """Mirrors the guest's `Table::apply_unlink`: files only, and the node
+    must be there — a missing node means the log is inconsistent."""
+    slot = nodes.get(node)
+    if slot is None:
+        raise ValueError("inconsistent log: unlink of missing node %d" % node)
+    if slot["kind"] == "dir":
+        raise ValueError("inconsistent log: unlink of directory %d" % node)
+    del nodes[node]
+
+
+def apply_rmdir(nodes, node):
+    """Mirrors the guest's `Table::apply_rmdir`: an empty directory only.
+    Records arrive in log order, so a non-empty directory means the log is
+    inconsistent — the children's own removal records must have replayed."""
+    slot = nodes.get(node)
+    if slot is None:
+        raise ValueError("inconsistent log: rmdir of missing node %d" % node)
+    if slot["kind"] != "dir":
+        raise ValueError("inconsistent log: rmdir of file %d" % node)
+    if any(child["parent"] == node for child in nodes.values()):
+        raise ValueError("inconsistent log: rmdir of non-empty directory %d" % node)
+    del nodes[node]
+
+
+def apply_rename(nodes, node, new_parent, name):
+    """Mirrors the guest's `Table::apply_rename`: a pure parent+name move."""
+    if not name or len(name) > NAME_MAX:
+        raise ValueError("inconsistent log: rename of node %d names nothing" % node)
+    if not is_directory(nodes, new_parent):
+        raise ValueError("inconsistent log: rename of node %d under a non-directory"
+                         % node)
+    slot = nodes.get(node)
+    if slot is None:
+        raise ValueError("inconsistent log: rename of missing node %d" % node)
+    slot["parent"] = new_parent
+    slot["name"] = name
+
+
+def apply_owner(nodes, node, uid, gid):
+    """Mirrors the guest's `Table::apply_owner`."""
+    slot = nodes.get(node)
+    if slot is None:
+        raise ValueError("inconsistent log: owner of missing node %d" % node)
+    slot["owner_uid"] = uid
+    slot["owner_gid"] = gid
+
+
+def replay(image, partition_lba=0, limit=None):
     """Replays the log and returns (superblock, nodes).
 
     `image` is the whole disk; `partition_lba` locates the volume inside it.
-    A torn or corrupt tail simply ends the replay, matching the guest.
+    A torn or corrupt tail simply ends the replay, matching the guest: the
+    record beyond it is overwritten by the next append. A record that parses
+    but contradicts the tree replayed so far — a `DATA` record naming a
+    missing node, an `UNLINK` of a directory, an `RMDIR` of a non-empty one —
+    raises instead, matching the guest, whose mount fails on such a log
+    rather than clamping it away. `limit` stops after that sequence number
+    and leaves the superblock untouched, so a checker can replay an
+    intermediate prefix and prove a tree that existed mid-boot.
     """
     base = partition_lba * SECTOR
 
@@ -190,8 +331,9 @@ def replay(image, partition_lba=0):
 
     sb = select_superblock(sector_at(SUPERBLOCK_A), sector_at(SUPERBLOCK_B))
     nodes = {}
+    head = sb["head_seq"] if limit is None else min(sb["head_seq"], limit)
     seq = sb["tail_seq"] + 1
-    while seq <= sb["head_seq"]:
+    while seq <= head:
         relative = sb["log_start"] + ((seq - 1) % sb["log_sectors"])
         try:
             header = parse_record(sector_at(relative))
@@ -199,40 +341,46 @@ def replay(image, partition_lba=0):
             break
         if header["seq"] != seq:
             break
-        if header["kind"] == KIND_CREATE:
+        kind = header["kind"]
+        if kind == KIND_CREATE:
             try:
                 parent, mode, name = parse_create(header["payload"])
             except ValueError:
                 break
-            nodes[seq] = {
-                "parent": parent,
-                "name": name,
-                "mode": mode,
-                "kind": "dir" if mode & MODE_DIR else "file",
-                "content": bytearray(),
-            }
-        elif header["kind"] == KIND_DATA:
-            node = nodes.get(header["node"])
-            if node is None:
-                break
+            apply_create(nodes, seq, parent, mode, name)
+        elif kind == KIND_DATA:
             try:
                 offset, data = parse_data(header["payload"])
             except ValueError:
                 break
-            end = offset + len(data)
-            if end > CONTENT_MAX:
+            apply_data(nodes, header["node"], offset, data)
+        elif kind == KIND_UNLINK:
+            apply_unlink(nodes, header["node"])
+        elif kind == KIND_RMDIR:
+            apply_rmdir(nodes, header["node"])
+        elif kind == KIND_RENAME:
+            try:
+                new_parent, name = parse_rename(header["payload"])
+            except ValueError:
                 break
-            if len(node["content"]) < end:
-                node["content"].extend(b"\0" * (end - len(node["content"])))
-            node["content"][offset:end] = data
+            apply_rename(nodes, header["node"], new_parent, name)
+        elif kind == KIND_OWNER:
+            try:
+                uid, gid = parse_owner(header["payload"])
+            except ValueError:
+                break
+            apply_owner(nodes, header["node"], uid, gid)
         else:
             break
         seq += 1
     # Recovery, mirroring the guest: the log decides the head. A superblock may
     # claim records a crash never made durable, so the head is clamped back to
     # the last record that actually replayed. Without this the host would
-    # disagree with `Volume::mount_into` on any over-claiming image.
-    sb["head_seq"] = seq - 1
+    # disagree with `Volume::mount_into` on any over-claiming image. A prefix
+    # replay is a checker's window, not a recovery, so the superblock is left
+    # as it was parsed.
+    if limit is None:
+        sb["head_seq"] = seq - 1
     return sb, nodes
 
 
@@ -357,7 +505,13 @@ def main(argv):
         check = len(argv) >= 4 and argv[3] == "--check"
         with open(path, "rb") as handle:
             data = handle.read()
-        report, repaired, image, _ = fsck_image(data, check)
+        try:
+            report, repaired, image, _ = fsck_image(data, check)
+        except ValueError as error:
+            # A log that contradicts itself is the guest's failed mount, not a
+            # repairable head: report it the way the guest refuses the volume.
+            print("fsck: %s" % error, file=sys.stderr)
+            return 1
         if repaired and not check:
             with open(path, "wb") as handle:
                 handle.write(image)
@@ -366,16 +520,21 @@ def main(argv):
     if len(argv) == 3 and argv[1] == "dump":
         with open(argv[2], "rb") as handle:
             image = handle.read()
-        sb, nodes = replay(image)
+        try:
+            sb, nodes = replay(image)
+        except ValueError as error:
+            print("zcfs: %s" % error, file=sys.stderr)
+            return 1
         print("zcfs: head=%d tail=%d clean=%d log=%d..%d"
               % (sb["head_seq"], sb["tail_seq"],
                  bool(sb["flags"] & FLAG_CLEAN), sb["log_start"],
                  sb["log_start"] + sb["log_sectors"]))
         for node_id in sorted(nodes):
             node = nodes[node_id]
-            print("zcfs: node %d %s %r size=%d content=%s"
+            print("zcfs: node %d %s %r size=%d owner=%d:%d content=%s"
                   % (node_id, node["kind"], node["name"].decode("utf-8", "replace"),
-                     len(node["content"]), bytes(node["content"]).hex()))
+                     len(node["content"]), node["owner_uid"], node["owner_gid"],
+                     bytes(node["content"]).hex()))
         return 0
     print(__doc__, file=sys.stderr)
     return 2

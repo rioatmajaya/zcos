@@ -142,7 +142,7 @@ the 2026-10-20 changelog records the Linux entries being removed.
 
 | Capability | Reference | Current | Status and gap |
 |---|---|---|---|
-| Native filesystem | ZCFS, journaled, persistent `/user` | zcfs, log-structured records (create, data, unlink), dual superblock, crash recovery, fsck, on-demand `sync` | ✅ Different format, comparable durability goal. Current has strong crash tests. |
+| Native filesystem | ZCFS, journaled, persistent `/user` | zcfs, log-structured records (create, data, unlink, rmdir, rename, owner), dual superblock, crash recovery, fsck, on-demand `sync`, host checker replaying every kind | ✅ Different format, comparable durability goal. Current has strong crash tests. |
 | In-memory / pseudo filesystems | RAMFS, ISO9660 | ramfs, tmpfs, devfs | 🟡 Current has a better writable RAM proof and device namespace; no ISO9660. |
 | Foreign filesystems | ZCFS / RAMFS / ISO9660 are the documented set | FAT32 read-only, ext2 read-only, zcfs read-write | 🟡 Current has more read-only formats but no ISO9660; both are narrower than a daily-driver rootfs. |
 | Block layer | AHCI, ATA, NVMe, virtio-blk; block service | virtio-blk only; four-slot write-back cache | 🟡 Only one transport is proven. AHCI/NVMe are required for hardware parity. |

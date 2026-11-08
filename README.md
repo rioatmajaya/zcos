@@ -95,7 +95,8 @@ the host-planted `/probe`, creating and writing `/written`, then dropping the
 cache and remounting from the disk to read its own file back. Host checks
 confirm the writes reached `build/disk.img`, that mtools reads the FAT32 file,
 that `debugfs` reads the ext2 file, and that an independent replay of the zcfs
-log finds `/written` and the `/probe` the shell rewrites. The VFS mounts the
+log — every record kind the guest writes — finds `/written` and proves the
+removals, the rename, and the persisted owner the shell exercised. The VFS mounts the
 initramfs as `ramfs` at `/` and the zcfs volume at `/data`, so the serial
 shell's `write`, `stat`, `mount`, `umount`, and `persist` commands reach the
 disk through the same `FileSystem` trait; `persist` proves durability by
