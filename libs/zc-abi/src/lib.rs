@@ -109,7 +109,7 @@ pub use syscall::{
     identity_gid, identity_uid, identity_word,
 };
 pub use terminal::{
-    BUTTON_FG, BUTTON_H, BUTTON_W, Listing, Term, button_rect,
+    BUTTON_FG, BUTTON_H, BUTTON_W, Click, Listing, Term, button_rect, reset_rect,
 };
 pub use fm::{
     FM_COLS, FM_NAME_MAX, FM_PATH_MAX, FM_PREVIEW_MAX, FM_ROWS, Fm, PARENT_NAME, parent_path,

@@ -3604,10 +3604,12 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface, window: u32) {
         }
         crate::serial::write_str("wm: ls ok\n");
         // The pointer script's window-local reports, replayed through the same
-        // routing the client's stream came from. The button click changes the
-        // terminal's label, so this must run before the pixels are compared — and
-        // the script must click something, or the proof would silently degrade to
-        // "the client painted whatever it liked".
+        // routing the client's stream came from. The widget detour changes the
+        // terminal's label, so this must run before the pixels are compared —
+        // and the script's net effect must be exactly one: it presses the
+        // button, presses the reset target, and presses the button again. A
+        // client that ignored the reset shows two; one that never clicked
+        // shows zero; only the reset's `Clicks: 1` matches.
         zc_abi::replay_pointer(
             &mut terminal,
             info.width,
@@ -3617,10 +3619,11 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface, window: u32) {
             cfg!(feature = "close-proof"),
             window,
         );
-        if terminal.clicks() == 0 {
-            crate::fail("window script clicked nothing");
+        if terminal.clicks() != 1 {
+            crate::fail("window script's clicks did not net to one");
         }
         crate::serial::write_str("wm: click ok\n");
+        crate::serial::write_str("wm: reset ok\n");
         hash_window_surface(&terminal, surface, font, format, &wm, window);
         return;
     }

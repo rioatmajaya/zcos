@@ -375,6 +375,22 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **A second widget resets the first** (F8, desktop): the strip's second
+  widget is a reset target that zeroes the click counter when pressed —
+  `Buttons::reset` refuses a target outside the strip the way `press`
+  refuses an out-of-range id, one `strip` call places both widgets with the
+  button unmoved and the target one gap to its left, and `Term::click` now
+  returns what a click did (`Miss`/`Count`/`Reset`) so the client logs each
+  accepted outcome separately. The scripted pointer detour presses the
+  button, the reset, and the button again, all inside the shared prefix, so
+  the pinned frame's label is the reset's product: the kernel's verifier
+  demands a net count of one, which a client that ignored the reset (two)
+  or never clicked (zero) cannot produce. The `--test` checksum moved
+  `0xd616ad79aaefb099` → `0x5484547c0bf080af` and `--fm`
+  `0x78ebd6d359914da7` → `0xafa71a77f8d7687b`; the close checksum did not
+  move — that run erases the window before the final frame, and the closed
+  window's content is proven by the per-window content check instead. See
+  [ADR 0088](docs/adr/0088-a-second-widget-resets-the-first.md).
 - **A window's widgets are data one layout pass places** (F8, desktop):
   `zc_abi::widget` owns the widget model — a `Layout` of placed widgets, a
   right-aligned bottom strip pass, and per-widget press counters — and the

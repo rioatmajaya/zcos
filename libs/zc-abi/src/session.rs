@@ -176,24 +176,31 @@ mod tests {
     }
 
     #[test]
-    fn the_script_clicks_the_button_exactly_once() {
-        // Both variants share the click, so both must reach the same content.
+    fn the_script_clicks_twice_around_a_reset() {
+        // Both variants share the widget detour, so both must reach the same
+        // content: two button presses with the reset target pressed between
+        // them leave the counter at one — the value the pinned frame shows,
+        // and one a script without the reset could not produce.
         assert_eq!(replay(false).clicks(), 1);
         assert_eq!(replay(true).clicks(), 1);
     }
 
     #[test]
-    fn the_click_lands_inside_the_button_the_renderer_paints() {
-        // The script's click is a point, and the button rectangle is what the
-        // client hit-tests; the two must agree or the proof would pass on a
-        // button nobody could press.
+    fn the_clicks_land_inside_widgets_the_renderer_paints() {
+        // The script's presses are points, and the strip's rectangles are what
+        // the client hit-tests; the two must agree or the proof would pass on
+        // widgets nobody could press. Two presses land on the button and one
+        // on the reset target, each inside the rectangle its label paints in.
         let button = button_rect(SURFACE.0, SURFACE.1);
         assert!(!button.is_empty());
+        let reset = crate::terminal::reset_rect(SURFACE.0, SURFACE.1);
+        assert!(!reset.is_empty());
         let mut wm = scripted_wm();
         let mut cursor = Cursor::new(SCREEN.0, SCREEN.1);
         let mut raw = Input::new();
         let mut routed = Input::new();
-        let mut pressed = 0;
+        let mut on_button = 0;
+        let mut on_reset = 0;
         for step in &MOUSE_SCRIPT[..script_len(false)] {
             let event = raw.report(step.buttons, step.dx, step.dy);
             cursor.apply(step.dx, step.dy, SCREEN.0, SCREEN.1);
@@ -203,13 +210,21 @@ mod tests {
                     routed.report(step.buttons, step.dx, step.dy)
                 {
                     if bits & BUTTON_LEFT != 0 {
-                        assert!(button.contains(x, y), "scripted click missed the button");
-                        pressed += 1;
+                        assert!(
+                            button.contains(x, y) || reset.contains(x, y),
+                            "scripted press missed both widgets"
+                        );
+                        if button.contains(x, y) {
+                            on_button += 1;
+                        } else {
+                            on_reset += 1;
+                        }
                     }
                 }
             }
         }
-        assert_eq!(pressed, 1);
+        assert_eq!(on_button, 2);
+        assert_eq!(on_reset, 1);
     }
 
     #[test]

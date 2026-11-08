@@ -132,19 +132,25 @@ impl Term {
         }
     }
 
-    /// Clicks the button when `(x, y)` — window-local — falls inside it.
+    /// Clicks the strip when `(x, y)` — window-local — falls inside a widget.
     ///
     /// The button is the window's first widget and the boot proof's first
-    /// clickable target: the scripted session presses it, and the kernel replays
-    /// the same reports through [`crate::session::replay_pointer`] so the label
-    /// the client paints is recomputed, not trusted. A miss changes nothing, so
-    /// a routed coordinate that lands beside the button fails the content check
+    /// clickable target; the reset target zeroes the counter when pressed.
+    /// The scripted session presses both, and the kernel replays the same
+    /// reports through [`crate::session::replay_pointer`] so the label the
+    /// client paints is recomputed, not trusted. A miss changes nothing, so
+    /// a routed coordinate that lands beside a widget fails the content check
     /// instead of passing silently.
-    pub fn click(&mut self, x: u32, y: u32, w: u32, h: u32) -> bool {
-        if !button_rect(w, h).contains(x, y) {
-            return false;
+    pub fn click(&mut self, x: u32, y: u32, w: u32, h: u32) -> Click {
+        if button_rect(w, h).contains(x, y) {
+            let _ = self.buttons.press(crate::widget::BUTTON_ID);
+            return Click::Count;
         }
-        self.buttons.press(crate::widget::BUTTON_ID)
+        if reset_rect(w, h).contains(x, y) {
+            let _ = self.buttons.reset(crate::widget::BUTTON_ID);
+            return Click::Reset;
+        }
+        Click::Miss
     }
 
     /// Returns how many times the button has been clicked.
@@ -251,11 +257,12 @@ impl Term {
             }
             return base;
         }
-        // The click button sits in the widget strip below the ten text rows.
-        // It is part of the shared render, so the client paints it and the
-        // kernel's verifier recomputes it — including the count after a
-        // scripted click. The pixels come from the widget layer, which owns
-        // the button's layout and its label.
+        // The widget strip sits below the ten text rows: the click counter and
+        // the reset target beside it. It is part of the shared render, so the
+        // client paints it and the kernel's verifier recomputes it — including
+        // the count after a scripted click and the zero a scripted reset
+        // leaves. The pixels come from the widget layer, which owns the
+        // widgets' layout and their labels.
         let button = button_rect(w, h);
         if button.contains(lx, ly) {
             return crate::widget::button_pixel(
@@ -264,6 +271,10 @@ impl Term {
                 lx - button.x,
                 ly - button.y,
             );
+        }
+        let reset = reset_rect(w, h);
+        if reset.contains(lx, ly) {
+            return crate::widget::reset_pixel(font, lx - reset.x, ly - reset.y);
         }
         let body_y = ly - TITLE_HEIGHT;
         if body_y < PAD_Y {
@@ -535,13 +546,14 @@ pub const DECORATION_MIN_W: u32 = 80;
 
 /// The terminal window's widget strip, placed by the shared layout pass.
 ///
-/// The terminal hosts one widget — its click button — rightmost in the free
-/// band below the ten text rows. The strip is the widget layer's data: the
-/// renderer paints from it and the hit-test clicks through it, so the region
-/// a click can hit is exactly the region the label is drawn in.
+/// The terminal hosts two widgets in the free band below the ten text rows:
+/// its click counter button rightmost, and the reset target one gap to its
+/// left. The strip is the widget layer's data: the renderer paints from it
+/// and the hit-test clicks through it, so the region a click can hit is
+/// exactly the region a label is drawn in.
 #[must_use]
 pub const fn widgets(w: u32, h: u32) -> crate::widget::Layout {
-    crate::widget::strip(w, h, TITLE_HEIGHT, &[BUTTON_W, 0, 0, 0], 1)
+    crate::widget::strip(w, h, TITLE_HEIGHT, &[BUTTON_W, crate::widget::RESET_W, 0, 0], 2)
 }
 
 /// The click button's rectangle in window-local coordinates.
@@ -552,15 +564,29 @@ pub const fn button_rect(w: u32, h: u32) -> crate::desktop::Rect {
     widgets(w, h).rect_of(crate::widget::BUTTON_ID)
 }
 
-/// Returns `10` raised to `power`.
+/// The reset target's rectangle in window-local coordinates.
+///
+/// A thin view over [`widgets`], like [`button_rect`]: the renderer and the
+/// hit-test share this rect, so a click can never land beside the `Reset`
+/// the user can see.
 #[must_use]
-const fn pow10(mut power: u32) -> u32 {
-    let mut value = 1;
-    while power > 0 {
-        value *= 10;
-        power -= 1;
-    }
-    value
+pub const fn reset_rect(w: u32, h: u32) -> crate::desktop::Rect {
+    widgets(w, h).rect_of(crate::widget::RESET_ID)
+}
+
+/// What a click at a window-local point did.
+///
+/// [`Term::click`] returns this instead of a flag now that the strip hosts two
+/// widgets: the caller logs the two accepted outcomes separately, so the boot
+/// transcript names the widget the scripted press actually landed on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Click {
+    /// The point hit no widget; nothing changed.
+    Miss,
+    /// The point pressed the click counter; its label advanced.
+    Count,
+    /// The point activated the reset target; the counter went back to zero.
+    Reset,
 }
 
 /// Vertical offset of the decoration glyphs inside the title bar.
@@ -961,7 +987,10 @@ mod tests {
         assert!(saw_label, "the button label does not paint");
         // A click changes the rendered count, so the content proof can see it.
         let mut clicked = Term::new();
-        assert!(clicked.click(button.x + BUTTON_W / 2, button.y + BUTTON_H / 2, w, h));
+        assert_eq!(
+            clicked.click(button.x + BUTTON_W / 2, button.y + BUTTON_H / 2, w, h),
+            Click::Count
+        );
         let mut changed = false;
         at = 0;
         ly = button.y;
@@ -985,19 +1014,70 @@ mod tests {
         let (w, h) = (426u32, 266u32);
         let button = button_rect(w, h);
         let mut term = Term::new();
-        assert!(!term.click(0, 0, w, h));
-        assert!(!term.click(button.x - 1, button.y + 1, w, h));
-        assert!(!term.click(button.x + 1, button.y - 1, w, h));
-        assert!(!term.click(button.right(), button.y + 1, w, h));
-        assert!(!term.click(button.x + 1, button.bottom(), w, h));
+        assert_eq!(term.click(0, 0, w, h), Click::Miss);
+        assert_eq!(term.click(button.x - 1, button.y + 1, w, h), Click::Miss);
+        assert_eq!(term.click(button.x + 1, button.y - 1, w, h), Click::Miss);
+        assert_eq!(term.click(button.right(), button.y + 1, w, h), Click::Miss);
+        assert_eq!(term.click(button.x + 1, button.bottom(), w, h), Click::Miss);
         assert_eq!(term.clicks(), 0);
         // The top-left corner is inside, and the counter saturates rather than
         // wrapping when a live user clicks far past the label's four digits.
-        assert!(term.click(button.x, button.y, w, h));
+        assert_eq!(term.click(button.x, button.y, w, h), Click::Count);
         assert_eq!(term.clicks(), 1);
         term.buttons = crate::widget::Buttons::seeded([u32::MAX; crate::widget::WIDGET_SLOTS]);
-        assert!(term.click(button.x + 1, button.y + 1, w, h));
+        assert_eq!(term.click(button.x + 1, button.y + 1, w, h), Click::Count);
         assert_eq!(term.clicks(), u32::MAX);
+    }
+
+    #[test]
+    fn a_click_on_the_reset_target_zeroes_the_counter() {
+        let (w, h) = (426u32, 266u32);
+        let button = button_rect(w, h);
+        let reset = reset_rect(w, h);
+        assert!(!reset.is_empty());
+        assert_eq!(reset.y, button.y, "the reset target left the strip's row");
+        let mut term = Term::new();
+        // A miss beside the reset changes nothing, like a missed button.
+        assert_eq!(term.click(reset.x - 1, reset.y + 1, w, h), Click::Miss);
+        assert_eq!(term.click(reset.x + 1, reset.y - 1, w, h), Click::Miss);
+        assert_eq!(term.click(reset.right(), reset.y + 1, w, h), Click::Miss);
+        assert_eq!(term.click(reset.x + 1, reset.bottom(), w, h), Click::Miss);
+        assert_eq!(term.clicks(), 0);
+        // Two presses, then the reset: the counter goes back to zero, and
+        // the next press counts from there — the scripted proof's net effect.
+        assert_eq!(term.click(button.x + BUTTON_W / 2, button.y + BUTTON_H / 2, w, h), Click::Count);
+        assert_eq!(term.click(button.x + BUTTON_W / 2, button.y + BUTTON_H / 2, w, h), Click::Count);
+        assert_eq!(term.clicks(), 2);
+        assert_eq!(term.click(reset.x + crate::widget::RESET_W / 2, reset.y + BUTTON_H / 2, w, h), Click::Reset);
+        assert_eq!(term.clicks(), 0);
+        assert_eq!(term.click(button.x + BUTTON_W / 2, button.y + BUTTON_H / 2, w, h), Click::Count);
+        assert_eq!(term.clicks(), 1);
+    }
+
+    #[test]
+    fn the_reset_target_is_paintable_only_where_it_sits() {
+        // The reset target is drawn from the same strip the hit-test reads, so
+        // every painted reset pixel is a clickable reset pixel and the two
+        // rectangles agree with the layout pass.
+        let (w, h) = (426u32, 266u32);
+        let reset = reset_rect(w, h);
+        let mut term = Term::new();
+        let mut saw_fg = false;
+        let mut ly = reset.y;
+        while ly < reset.bottom() {
+            let mut lx = reset.x;
+            while lx < reset.right() {
+                let pixel = term.render(Font::embedded(), lx, ly, w, h);
+                if pixel == crate::widget::BUTTON_FG {
+                    saw_fg = true;
+                }
+                lx += 1;
+            }
+            ly += 1;
+        }
+        assert!(saw_fg, "the reset label does not paint");
+        // One pixel left of the target is the gap, not the widget.
+        assert_eq!(term.click(reset.x - 1, reset.y + BUTTON_H / 2, w, h), Click::Miss);
     }
 
     #[test]
@@ -1006,8 +1086,9 @@ mod tests {
         // than a button hanging off the border.
         assert!(button_rect(BUTTON_W + 2 * crate::widget::STRIP_INSET - 1, 266).is_empty());
         assert!(button_rect(426, TITLE_HEIGHT + BUTTON_H + crate::widget::STRIP_INSET - 1).is_empty());
+        assert!(reset_rect(BUTTON_W + crate::widget::RESET_W + 2 * crate::widget::STRIP_INSET - 1, 266).is_empty());
         let mut term = Term::new();
-        assert!(!term.click(0, 0, 64, 64));
+        assert_eq!(term.click(0, 0, 64, 64), Click::Miss);
         assert_eq!(term.clicks(), 0);
     }
 }

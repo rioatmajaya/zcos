@@ -91,7 +91,8 @@ const fn step(buttons: u8, dx: i8, dy: i8) -> MouseStep {
 /// 3. click the minimize glyph, so the window leaves the screen entirely,
 /// 4. click the taskbar's task button, so the window comes back exactly where it
 ///    was,
-/// 5. walk to the window's click button, press it, and walk back to where the
+/// 5. walk to the window's widgets, press the click button, the reset target,
+///    the button again, and walk back to where the
 ///    shared prefix ends,
 /// 6. *(close proof only)* walk to the close glyph and click it, ending the
 ///    window's session for good.
@@ -141,11 +142,20 @@ pub const MOUSE_SCRIPT: &[MouseStep] = &[
     step(0, 0, 0),
     step(0, 127, 127),
     step(0, 50, 7),
-    // Step 5: the window's click button. Two moves reach its centre, the press
-    // and release are one click, and two moves return to (300, 150) so the
-    // close suffix starts exactly where it used to.
+    // Step 5: the window's widgets. Two moves reach the click button's centre
+    // and the press/release is one click; the pointer then walks 80 px left —
+    // half the button, the strip gap, half the reset target — and presses the
+    // reset, so the counter goes back to zero mid-script; a final press on the
+    // button leaves the label at `Clicks: 1` in the pinned frame. Two moves
+    // return to (300, 150) so the close suffix starts exactly where it used to.
     step(0, 127, 127),
     step(0, 43, 12),
+    step(BUTTON_LEFT, 0, 0),
+    step(0, 0, 0),
+    step(0, -80, 0),
+    step(BUTTON_LEFT, 0, 0),
+    step(0, 0, 0),
+    step(0, 80, 0),
     step(BUTTON_LEFT, 0, 0),
     step(0, 0, 0),
     step(0, -127, -127),
@@ -269,11 +279,12 @@ pub const fn script_step(variant: ScriptVariant, index: usize) -> Option<MouseSt
 
 /// Index of the first step that belongs to the close proof.
 ///
-/// Everything before it ends with the window restored, the button clicked, and
-/// the pointer back over the window. Naming the boundary rather than a bare
-/// count keeps the two variants tied to the gesture they split at: inserting a
-/// step anywhere in the shared prefix moves the boundary with it.
-pub const MOUSE_SCRIPT_LEN_WINDOW_UP: usize = 28;
+/// Everything before it ends with the window restored, the button clicked
+/// twice around a reset press, and the pointer back over the window. Naming
+/// the boundary rather than a bare count keeps the two variants tied to the
+/// gesture they split at: inserting a step anywhere in the shared prefix moves
+/// the boundary with it.
+pub const MOUSE_SCRIPT_LEN_WINDOW_UP: usize = 34;
 
 /// Returns the scripted session a build serves from its two proof features.
 ///
@@ -566,7 +577,7 @@ mod tests {
             "the launch script must end on the hello.txt row"
         );
         // The launch variant shares the exact prefix the --test and close boots
-        // serve, so the first 28 steps are byte-identical and only the suffix
+        // serve, so the first 34 steps are byte-identical and only the suffix
         // differs.
         assert_eq!(script_len_for(ScriptVariant::Launch), MOUSE_SCRIPT_LEN_WINDOW_UP + MOUSE_LAUNCH_SCRIPT.len());
         for index in 0..MOUSE_SCRIPT_LEN_WINDOW_UP {

@@ -8,9 +8,10 @@
 //! right-aligned in the free band below a window's content, so a widget's
 //! position never moves when a later widget joins to its left.
 //!
-//! The first citizen is the terminal's click button, whose geometry this
-//! module now owns: its rect is where [`crate::terminal::button_rect`] has
-//! always put it, so the pinned proof frames do not move by a pixel.
+//! The first citizens are the terminal's click button and the reset target
+//! beside it, whose geometry this module owns: the button's rect is where
+//! [`crate::terminal::button_rect`] has always put it, and the reset target
+//! is the first widget the strip placed to its left.
 
 use crate::desktop::Rect;
 use crate::font::{Font, GLYPH_H, GLYPH_W, glyph_bit};
@@ -21,6 +22,10 @@ pub const WIDGET_SLOTS: usize = 4;
 /// Id of the strip's first widget — the terminal's click counter, the boot
 /// proof's clickable target.
 pub const BUTTON_ID: u8 = 0;
+
+/// Id of the strip's second widget — the terminal's reset target, which
+/// zeroes the click counter when pressed.
+pub const RESET_ID: u8 = 1;
 
 /// The strip's row height: the height a click target needs, and the height
 /// every widget in the strip shares.
@@ -35,10 +40,14 @@ pub const WIDGET_GAP: u32 = 8;
 /// Button visuals, owned here so the renderer and the verifier share them.
 const BUTTON_BG: (u8, u8, u8) = (48, 54, 66);
 const BUTTON_EDGE: (u8, u8, u8) = (92, 102, 122);
+/// Label color shared by every strip button's glyph.
 pub const BUTTON_FG: (u8, u8, u8) = (235, 238, 245);
 /// Click-button width in pixels: twelve 8-pixel cells.
 pub const BUTTON_W: u32 = 96;
 const BUTTON_PAD_X: u32 = 4;
+
+/// Reset-target width in pixels: six 8-pixel cells, one past the label.
+pub const RESET_W: u32 = 48;
 
 /// What a placed widget is.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -213,6 +222,20 @@ impl Buttons {
         self.counts[id as usize]
     }
 
+    /// Zeroes widget `target`'s counter, on behalf of a press on a reset
+    /// widget.
+    ///
+    /// Returns `false` for a target outside the strip, so a bogus reset can
+    /// never touch a widget that does not exist. Resetting an already-zero
+    /// counter is accepted: the action is the zeroing, not the change.
+    pub fn reset(&mut self, target: u8) -> bool {
+        if target as usize >= WIDGET_SLOTS {
+            return false;
+        }
+        self.counts[target as usize] = 0;
+        true
+    }
+
     /// Seeds counters directly, for tests: the saturation path cannot be
     /// reached by pressing in any reasonable number of calls.
     #[cfg(test)]
@@ -229,23 +252,53 @@ impl Default for Buttons {
 
 /// Renders one pixel of a click button, in button-local coordinates.
 ///
-/// Moved verbatim from the terminal's renderer: the button is the widget
-/// layer's first citizen, so its pixels belong here, where the layout and the
-/// press counters live. The count is capped at four digits so the label always
-/// fits and the button never changes size.
+/// The button is the widget layer's first citizen, so its pixels belong here,
+/// where the layout and the press counters live. The frame is the strip's
+/// shared button shape — [`RESET_W`]-wide for the reset target, this width for
+/// the counter — so both widgets the strip places today are drawn by the same
+/// arithmetic and cannot drift apart. The count is capped at four digits so
+/// the label always fits and the button never changes size.
 #[must_use]
 pub const fn button_pixel(font: Font<'_>, clicks: u32, x: u32, y: u32) -> (u8, u8, u8) {
-    if x == 0 || y == 0 || x + 1 == BUTTON_W || y + 1 == STRIP_H {
+    let mut ch = b' ';
+    if x >= BUTTON_PAD_X && y >= 1 && y < 1 + GLYPH_H {
+        let col = (x - BUTTON_PAD_X) / GLYPH_W;
+        if col < BUTTON_W / GLYPH_W {
+            ch = button_label_byte(clicks, col);
+        }
+    }
+    labeled_button_pixel(font, ch, BUTTON_W, x, y)
+}
+
+/// Renders one pixel of the reset target, in widget-local coordinates.
+///
+/// Same frame and colors as [`button_pixel`] — the two are one widget kind —
+/// with the static `Reset` label in place of the counter.
+#[must_use]
+pub const fn reset_pixel(font: Font<'_>, x: u32, y: u32) -> (u8, u8, u8) {
+    let mut ch = b' ';
+    if x >= BUTTON_PAD_X && y >= 1 && y < 1 + GLYPH_H {
+        let col = (x - BUTTON_PAD_X) / GLYPH_W;
+        if col < RESET_W / GLYPH_W {
+            ch = reset_label_byte(col);
+        }
+    }
+    labeled_button_pixel(font, ch, RESET_W, x, y)
+}
+
+/// Renders one pixel of a `w`-wide strip button carrying `ch` at this pixel's
+/// cell.
+///
+/// The edge check runs first, so a glyph column that reaches the border still
+/// paints the edge, exactly as the terminal's original button renderer did.
+const fn labeled_button_pixel(font: Font<'_>, ch: u8, w: u32, x: u32, y: u32) -> (u8, u8, u8) {
+    if x == 0 || y == 0 || x + 1 == w || y + 1 == STRIP_H {
         return BUTTON_EDGE;
     }
     if x >= BUTTON_PAD_X && y >= 1 && y < 1 + GLYPH_H {
         let gx = x - BUTTON_PAD_X;
-        let col = gx / GLYPH_W;
-        if col < BUTTON_W / GLYPH_W {
-            let ch = button_label_byte(clicks, col);
-            if glyph_bit(font, ch, y - 1, gx % GLYPH_W) {
-                return BUTTON_FG;
-            }
+        if glyph_bit(font, ch, y - 1, gx % GLYPH_W) {
+            return BUTTON_FG;
         }
     }
     BUTTON_BG
@@ -265,6 +318,16 @@ const fn button_label_byte(clicks: u32, col: u32) -> u8 {
         return b' ';
     }
     (value / pow10(digits - 1 - at) % 10) as u8 + b'0'
+}
+
+/// Returns the label byte at cell `col` of the reset target.
+#[must_use]
+const fn reset_label_byte(col: u32) -> u8 {
+    const LABEL: &[u8] = b"Reset";
+    if col < LABEL.len() as u32 {
+        return LABEL[col as usize];
+    }
+    b' '
 }
 
 /// Returns how many decimal digits `value` needs.
@@ -356,6 +419,74 @@ mod tests {
         // Counters start at zero and saturate through `saturating_add`, so the
         // label's four-digit cap is what bounds what a viewer can read.
         assert_eq!(Buttons::new().count(BUTTON_ID), 0);
+    }
+
+    #[test]
+    fn the_reset_target_sits_one_gap_left_of_the_button() {
+        for (w, h) in [SURFACE, SCREEN] {
+            let strip = strip(w, h, 24, &[BUTTON_W, RESET_W, 0, 0], 2);
+            assert_eq!(strip.len(), 2);
+            let button = strip.rect_of(BUTTON_ID);
+            let reset = strip.rect_of(RESET_ID);
+            // Same row, same height, exactly WIDGET_GAP between them, and the
+            // button never moved from where the one-widget strip put it.
+            assert_eq!(
+                button,
+                Rect::new(w - 8 - BUTTON_W, h - 8 - STRIP_H, BUTTON_W, STRIP_H),
+                "the button moved when the reset joined at {w}x{h}"
+            );
+            assert_eq!(reset.y, button.y);
+            assert_eq!(reset.h, button.h);
+            assert_eq!(reset.w, RESET_W);
+            assert_eq!(reset.x + reset.w + WIDGET_GAP, button.x);
+        }
+    }
+
+    #[test]
+    fn a_reset_zeroes_only_its_target() {
+        let mut buttons = Buttons::new();
+        assert!(buttons.press(BUTTON_ID));
+        assert!(buttons.press(BUTTON_ID));
+        assert!(buttons.press(BUTTON_ID));
+        assert!(buttons.press(2));
+        // The reset zeroes the counter it names and nothing else.
+        assert!(buttons.reset(BUTTON_ID));
+        assert_eq!(buttons.count(BUTTON_ID), 0);
+        assert_eq!(buttons.count(2), 1);
+        // Resetting an already-zero counter is accepted; a target outside the
+        // strip is refused, like an out-of-range press.
+        assert!(buttons.reset(BUTTON_ID));
+        assert_eq!(buttons.count(BUTTON_ID), 0);
+        assert!(!buttons.reset(WIDGET_SLOTS as u8));
+    }
+
+    #[test]
+    fn the_reset_target_paints_the_reset_label() {
+        // "Reset" is five cells; the sixth cell past the label stays blank.
+        assert_eq!(reset_label_byte(0), b'R');
+        assert_eq!(reset_label_byte(4), b't');
+        assert_eq!(reset_label_byte(5), b' ');
+        // The frame is the button's frame at the reset width: the border pixels
+        // carry the edge color at both widths, and the glyph region paints the
+        // label in the shared foreground.
+        let font = crate::font::Font::embedded();
+        assert_eq!(reset_pixel(font, 0, 9), BUTTON_EDGE);
+        assert_eq!(reset_pixel(font, RESET_W - 1, 9), BUTTON_EDGE);
+        assert_eq!(reset_pixel(font, 0, 9), button_pixel(font, 7, 0, 9));
+        let mut x = BUTTON_PAD_X;
+        let mut saw_fg = false;
+        let mut y = 1;
+        while y < 1 + GLYPH_H {
+            x = BUTTON_PAD_X;
+            while x < RESET_W - BUTTON_PAD_X {
+                if reset_pixel(font, x, y) == BUTTON_FG {
+                    saw_fg = true;
+                }
+                x += 1;
+            }
+            y += 1;
+        }
+        assert!(saw_fg, "the reset label does not paint");
     }
 
     #[test]

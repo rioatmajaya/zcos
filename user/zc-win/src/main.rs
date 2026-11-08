@@ -22,7 +22,7 @@
 #![no_main]
 #![allow(unsafe_code)]
 
-use zc_abi::terminal::{Listing, Term, run_command_with};
+use zc_abi::terminal::{Click, Listing, Term, run_command_with};
 use zc_abi::{
     BUTTON_LEFT, DIRENT_LEN, DirEntry, Event, FONT_LEN, FONT_PATH, Font, IPC_WM_REPLY,
     PixelFormat, READDIR_END, READDIR_ENTRY, SurfaceInfo, WM_ACK, WM_DONE, wm_assign, wm_reply,
@@ -43,6 +43,9 @@ static mut LS_LOGGED: bool = false;
 
 /// Whether the client has logged its first successful button click.
 static mut CLICK_LOGGED: bool = false;
+
+/// Whether the client has logged its first successful reset press.
+static mut RESET_LOGGED: bool = false;
 
 /// Whether the client has logged its first window-local pointer event.
 ///
@@ -173,17 +176,24 @@ pub unsafe extern "C" fn _start() -> ! {
                     let _ = send_to(IPC_WM_REPLY as u64, wm_reply(WM_ACK, window));
                 }
                 // The event already carries the window-local position and the
-                // derived edge, so the button hit-test needs no device
-                // knowledge. A press that lands inside the button changes the
-                // label; a miss changes nothing, and the kernel's replay of the
-                // same reports expects exactly that.
+                // derived edge, so the strip hit-test needs no device
+                // knowledge. A press that lands inside a widget changes the
+                // pixels — the counter's label, or the zero a reset leaves —
+                // and a miss changes nothing; the kernel's replay of the same
+                // reports expects exactly that.
                 WindowEvent::Pointer { x, y, event } => {
                     log_pointer_once();
                     let pressed = matches!(event, Event::Press { button, .. } if button & BUTTON_LEFT != 0);
-                    if pressed
-                        && terminal.click(u32::from(x), u32::from(y), surface.width, surface.height)
-                    {
-                        log_click_once();
+                    let mut hit = Click::Miss;
+                    if pressed {
+                        hit = terminal.click(u32::from(x), u32::from(y), surface.width, surface.height);
+                    }
+                    match hit {
+                        Click::Count => log_click_once(),
+                        Click::Reset => log_reset_once(),
+                        Click::Miss => {}
+                    }
+                    if hit != Click::Miss {
                         paint(
                             &terminal,
                             font,
@@ -235,6 +245,22 @@ fn log_click_once() {
         if !core::ptr::addr_of!(CLICK_LOGGED).read() {
             core::ptr::addr_of_mut!(CLICK_LOGGED).write(true);
             log("client: click ok\n");
+        }
+    }
+}
+
+/// Logs, once, that a press hit the window's reset target.
+///
+/// The reset is the strip's second widget: the kernel's replay expects the
+/// counter it zeroes, so this marker and the `Clicks: 1` the replay derives
+/// from the whole detour agree — the press landed on the rectangle the
+/// renderer paints and the client actually reset the counter.
+fn log_reset_once() {
+    // SAFETY: owned here; written once, before the next event is read.
+    unsafe {
+        if !core::ptr::addr_of!(RESET_LOGGED).read() {
+            core::ptr::addr_of_mut!(RESET_LOGGED).write(true);
+            log("client: reset ok\n");
         }
     }
 }

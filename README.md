@@ -175,8 +175,11 @@ client can hit-test a widget without reading the compositor's global pointer —
 see [ADR 0034](docs/adr/0034-a-window-has-its-own-pointer-stream.md). F8e-4 puts
 the first widget on that stream: a clickable `Clicks: N` button, with the
 scripted click replayed by the kernel's content verifier, which fails if the
-script clicked nothing — see
-[ADR 0035](docs/adr/0035-a-scripted-click-is-a-proof.md). F8h-0 makes the
+script's clicks did not net to one — see
+[ADR 0035](docs/adr/0035-a-scripted-click-is-a-proof.md). The strip's second
+widget is a reset target that zeroes the counter, placed by the same layout
+pass and pressed by the same scripted detour — see
+[ADR 0088](docs/adr/0088-a-second-widget-resets-the-first.md). F8h-0 makes the
 filesystem enumerable: `SYS_READDIR` (36) returns one fixed-size `DirEntry` per
 index, the mount table lists its own mount points first, and `ls` lives in the
 shared terminal with the lister injected — the window client reads through the
@@ -263,11 +266,12 @@ the disk is still consistent afterwards, so "it turned off" and "it turned off
 [ADR 0032](docs/adr/0032-clean-shutdown-is-a-syscall.md).
 
 One thing that does **not** work yet, so you are not left hunting for it: the
-window has exactly one widget — the `Clicks: N` button at its bottom right.
-A general widget set (labels, lists, focus between widgets) and a layout pass
-are the next task. The path they will use is already proven: the kernel forwards
+window has two widgets — the `Clicks: N` button and the `Reset` target beside
+it, both placed by one shared layout pass. A general widget set (labels, lists,
+focus between widgets) is the next task. The path they will use is already
+proven: the kernel forwards
 window-local pointer reports to the client, `user/zc-ui::Window` hands them over
-with their position and derived edge, and the scripted click is replayed by the
+with their position and derived edge, and the scripted clicks are replayed by the
 kernel's verifier rather than trusted. The compositor keeps the global pointer
 for placement and the sprite; a client reads its own derived stream through
 `SYS_WINDOW_READ`, so it cannot steal a drag. See

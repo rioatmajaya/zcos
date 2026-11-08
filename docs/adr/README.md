@@ -94,6 +94,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0085](0085-the-firmwares-tables-stay-installed-for-exitbootservices.md) | The firmware's tables stay installed for ExitBootServices | Accepted |
 | [0086](0086-a-block-with-no-runnable-peer-waits-for-one.md) | A block with no runnable peer waits for one | Accepted |
 | [0087](0087-a-windows-widgets-are-data-one-layout-pass-places.md) | A window's widgets are data one layout pass places | Accepted |
+| [0088](0088-a-second-widget-resets-the-first.md) | A second widget resets the first | Accepted |
 
 ## Adding a decision
 
