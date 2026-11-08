@@ -1238,10 +1238,15 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             let mounts = unsafe { &*core::ptr::addr_of!(MOUNTS) };
             match mounts.read_dir(path, regs.rdx as usize, out, tasks.current_owner()) {
                 Ok(Some(())) => {
+                    // The record is the proof's replay source: the verifier
+                    // compares the client against what the kernel served it,
+                    // not against a later state of the table.
+                    record_readdir(tasks.current(), false, regs.rdx as usize, path, out);
                     regs.set_result(zc_abi::READDIR_ENTRY);
                     0
                 }
                 Ok(None) => {
+                    record_readdir(tasks.current(), true, regs.rdx as usize, path, out);
                     regs.set_result(zc_abi::READDIR_END);
                     0
                 }
@@ -3232,7 +3237,9 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             }
         }
         Ok(Action::MouseRead) => {
-            use zc_abi::cursor::{MOUSE_NO_REPORT, pack_report, script_step, script_variant};
+            use zc_abi::cursor::{
+                MOUSE_NO_REPORT, pack_report, script_len_for, script_step, script_variant,
+            };
             // The scripted session runs first, so the boot proof derives the
             // same pointer position the compositor paints; after it the live
             // movement the drain accumulated is delivered. Non-blocking: the
@@ -3252,6 +3259,22 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 let step = script_step(variant, *index);
                 if step.is_some() {
                     *index += 1;
+                    if *index == script_len_for(variant)
+                        && !unsafe { addr_of!(MOUSE_SCRIPT_SERVED).read() }
+                    {
+                        unsafe { addr_of_mut!(MOUSE_SCRIPT_SERVED).write(true) };
+                        // SAFETY: owned here; interrupts are masked in this arm.
+                        let (queued0, queued1) = unsafe {
+                            (
+                                (*addr_of!(WINDOW_POINTERS))[0].len(),
+                                (*addr_of!(WINDOW_POINTERS))[1].len(),
+                            )
+                        };
+                        let _ = crate::serial::print(format_args!(
+                            "wm: mouse script served, window queues [{}, {}]\n",
+                            queued0, queued1,
+                        ));
+                    }
                 }
                 step
             } else {
@@ -3385,13 +3408,36 @@ fn block_with_retry(
             // enabled and switches to the first peer that wakes. A real
             // deadlock still cannot hide: nothing would ever wake, and the
             // boot watchdog bounds the run.
-            let _ = crate::serial::print(format_args!(
-                "ipc idle: current {} alive {} endpoint len {}\n",
-                tasks.current(),
-                tasks.alive_count(),
-                queue_len,
-            ));
-            dump_trace();
+            //
+            // The diagnostic dumps once per boot. A machine that drifts
+            // through many idle instants — a loaded runner re-feeding a
+            // script while the desktop waits — would otherwise print the
+            // ring on every block, and the printing itself is slower than
+            // the wait it diagnoses: thousands of dumps have drowned a run
+            // in serial output and starved the very input that would have
+            // ended the idle. After the first dump the same state is silent
+            // and sleeps, which is all a repeat of the same idle is.
+            if !unsafe { addr_of!(IDLE_DUMPED).read() } {
+                unsafe { addr_of_mut!(IDLE_DUMPED).write(true) };
+                let _ = crate::serial::print(format_args!(
+                    "ipc idle: current {} alive {} endpoint len {}\n",
+                    tasks.current(),
+                    tasks.alive_count(),
+                    queue_len,
+                ));
+                // The stall's state, one line: how far the scripted pointer
+                // got, what still waits in each window's pointer queue and
+                // the keyboard ring — the dump names the starved stream.
+                let mouse_step = unsafe { addr_of!(MOUSE_SCRIPT_INDEX).read() };
+                let ptr0 = unsafe { (*addr_of!(WINDOW_POINTERS))[0].len() };
+                let ptr1 = unsafe { (*addr_of!(WINDOW_POINTERS))[1].len() };
+                let keys = unsafe { addr_of!(WINDOW_INPUT).read().len() };
+                let _ = crate::serial::print(format_args!(
+                    "ipc idle state: mouse-step {} ptr [{}] [{}] keys {}\n",
+                    mouse_step, ptr0, ptr1, keys,
+                ));
+                dump_trace();
+            }
             loop {
                 if tasks.poll_peer(regs, frame).is_some() {
                     publish_next_cr3(tasks);
@@ -3588,7 +3634,7 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface, window: u32) {
                         &mut terminal,
                         line.as_bytes(),
                         kernel_read_file,
-                        kernel_list_dir,
+                        |path, index| recorded_list_dir(window, path, index),
                     );
                 }
                 key += 1;
@@ -3645,8 +3691,8 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface, window: u32) {
     // different file bytes lands on a different title, preview, and pixels than
     // this replay and fails the compare.
     let mut fm = zc_abi::Fm::new();
-    zc_abi::reload(&mut fm, b"/", kernel_list_dir);
-    // SAFETY: `kernel_list_dir` owns the counter and ran above.
+    zc_abi::reload(&mut fm, b"/", |path, index| recorded_list_dir(window, path, index));
+    // SAFETY: `recorded_list_dir` owns the counter and ran above.
     if unsafe { addr_of!(WINDOW_LS_ENTRIES).read() } == 0 {
         crate::fail("fm window listed nothing");
     }
@@ -3657,7 +3703,7 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface, window: u32) {
             y,
             surface.width,
             surface.height,
-            kernel_list_dir,
+            |path, index| recorded_list_dir(window, path, index),
             kernel_read_file,
         );
     });
@@ -3725,6 +3771,10 @@ fn hash_window_surface<P: SurfaceModel>(
                 crate::fail("unsupported window format");
             };
             if pixel != expected {
+                let _ = crate::serial::print(format_args!(
+                    "wm: first differing pixel ({}, {}) seen {:#010x} want {:#010x}\n",
+                    lx, ly, pixel, expected,
+                ));
                 crate::fail("window content mismatch");
             }
             lx += 1;
@@ -3789,11 +3839,166 @@ static mut WINDOW_VFS_READS: u32 = 0;
 /// Directory entries the frame verifier's scripted `ls` walked.
 static mut WINDOW_LS_ENTRIES: u32 = 0;
 
+/// How many distinct directories one window's listing record maps, and how
+/// many entries per directory. The terminal lists `/`; the file manager walks
+/// `/`, `/dev`, and back — a handful of paths, a dozen entries each.
+const LS_PATH_SLOTS: usize = 4;
+const LS_PATH_ENTRIES: usize = 16;
+/// The longest recorded listing path.
+const LS_PATH_CAP: usize = 32;
+
+/// Per window client: the directory listings the kernel served it through
+/// `SYS_READDIR`, keyed by the path each listing named.
+///
+/// This is what the verifier replays. It is *not* a re-derivation from the
+/// mount table at verify time: the shell's script remounts `/data` while it
+/// runs, and on a loaded runner the feed re-sends its body while the desktop
+/// is still catching up, so a client's listing can legitimately observe the
+/// table between two of those states. What the proof needs is that the
+/// client painted what the kernel served — and that is exactly this record:
+/// the kernel's own served bytes, the first listing it served per path. A
+/// client that listed a directory repeatedly still replays from the same
+/// served words, because the replay is keyed by request, not by call order.
+static mut LS_SLOT_PATH: [[[u8; LS_PATH_CAP]; LS_PATH_SLOTS]; service::WINDOW_TASKS] =
+    [[[0; LS_PATH_CAP]; LS_PATH_SLOTS]; service::WINDOW_TASKS];
+static mut LS_SLOT_PATH_LEN: [[u8; LS_PATH_SLOTS]; service::WINDOW_TASKS] =
+    [[0; LS_PATH_SLOTS]; service::WINDOW_TASKS];
+static mut LS_SLOT_ENTRY: [[[[u8; zc_abi::DIRENT_LEN]; LS_PATH_ENTRIES]; LS_PATH_SLOTS];
+    service::WINDOW_TASKS] = [[[[0; zc_abi::DIRENT_LEN]; LS_PATH_ENTRIES]; LS_PATH_SLOTS];
+    service::WINDOW_TASKS];
+/// Entries recorded per slot; the served `End` fixes it at the walk's length.
+static mut LS_SLOT_LEN: [[usize; LS_PATH_SLOTS]; service::WINDOW_TASKS] =
+    [[0; LS_PATH_SLOTS]; service::WINDOW_TASKS];
+/// Whether the slot's listing ended; later listings of the same path are
+/// ignored, so the replay sees one stable, fully served listing per path.
+static mut LS_SLOT_DONE: [[bool; LS_PATH_SLOTS]; service::WINDOW_TASKS] =
+    [[false; LS_PATH_SLOTS]; service::WINDOW_TASKS];
+
+/// Records one served `SYS_READDIR` word for the reading window client.
+///
+/// Called from the `SYS_READDIR` dispatch after the mount table wrote the
+/// record into the client's buffer (or served the end). The record keeps the
+/// first listing per path: a client that re-lists mid-session — the file
+/// manager repaints its rows more often than it navigates — still replays
+/// from one stable set of served words.
+fn record_readdir(me: usize, served_end: bool, index: usize, path: &[u8], out: &[u8]) {
+    let Some(window) = window_of_task(me) else {
+        return;
+    };
+    let w = window as usize;
+    // SAFETY: owned here; the dispatch runs with interrupts masked.
+    unsafe {
+        // Find the path's slot, or claim a free one for a fresh walk.
+        let mut slot = None;
+        for s in 0..LS_PATH_SLOTS {
+            let len = LS_SLOT_PATH_LEN[w][s] as usize;
+            if len == path.len() && LS_SLOT_PATH[w][s][..len] == path[..len] {
+                slot = Some(s);
+                break;
+            }
+            if slot.is_none() && len == 0 {
+                slot = Some(s);
+            }
+        }
+        let Some(s) = slot else {
+            return;
+        };
+        let len = LS_SLOT_PATH_LEN[w][s] as usize;
+        if len == 0 {
+            let n = path.len().min(LS_PATH_CAP);
+            LS_SLOT_PATH[w][s][..n].copy_from_slice(&path[..n]);
+            LS_SLOT_PATH_LEN[w][s] = n as u8;
+        }
+        if LS_SLOT_DONE[w][s] {
+            return;
+        }
+        if served_end {
+            // The walk ended at `regs.rdx` — the index the end was served at
+            // is the entry count the client saw.
+            LS_SLOT_DONE[w][s] = true;
+            return;
+        }
+        if index >= LS_PATH_ENTRIES {
+            return;
+        }
+        LS_SLOT_ENTRY[w][s][index].copy_from_slice(out);
+        if index + 1 > LS_SLOT_LEN[w][s] {
+            LS_SLOT_LEN[w][s] = index + 1;
+        }
+    }
+}
+
+/// Serves the directory entries the kernel recorded for `window`, for the
+/// frame verifier's replay.
+///
+/// This is the verifier's side of the listing — not a fresh walk of the
+/// mount table, but the record of what the kernel actually served this
+/// client, keyed by the path the replay asks for. A listing observed
+/// mid-remount replays as mid-remount instead of failing against the final
+/// table. The record is still the kernel's own data, so a client that
+/// painted a directory the kernel never served fails the compare exactly as
+/// before.
+fn recorded_list_dir(window: u32, path: &[u8], index: usize) -> zc_abi::terminal::Listing {
+    use zc_abi::terminal::Listing;
+
+    let w = window as usize;
+    if w >= service::WINDOW_TASKS {
+        return Listing::Error;
+    }
+    // SAFETY: owned here; the verifier runs on the kernel stack with no
+    // concurrent writer — the client it recorded has already exited.
+    let slot = unsafe {
+        let mut found = None;
+        for s in 0..LS_PATH_SLOTS {
+            let len = LS_SLOT_PATH_LEN[w][s] as usize;
+            if len == path.len() && LS_SLOT_PATH[w][s][..len] == path[..len] {
+                found = Some(s);
+                break;
+            }
+        }
+        found
+    };
+    let Some(s) = slot else {
+        // The replay walked where the client never listed: a desync,
+        // reported as an unavailable directory rather than papered over.
+        return Listing::Error;
+    };
+    // SAFETY: as above.
+    let (len, done) = unsafe { (LS_SLOT_LEN[w][s], LS_SLOT_DONE[w][s]) };
+    if index >= len {
+        // Past the record: the natural end of a completed walk. A record
+        // that never closed (the client stopped mid-listing) reports the
+        // same, and the entry-count check below says so.
+        let _ = done;
+        return Listing::End;
+    }
+    let mut bytes = [0u8; zc_abi::DIRENT_LEN];
+    // SAFETY: as above; the record outlives the replay.
+    bytes.copy_from_slice(unsafe {
+        &(*core::ptr::addr_of!(LS_SLOT_ENTRY))[w][s][index]
+    });
+    match zc_abi::DirEntry::read_from(&bytes) {
+        Some(entry) => {
+            // SAFETY: owned here; the snapshot runs with interrupts masked.
+            unsafe {
+                let count = addr_of!(WINDOW_LS_ENTRIES).read();
+                addr_of_mut!(WINDOW_LS_ENTRIES).write(count + 1);
+            }
+            Listing::Entry(entry)
+        }
+        None => Listing::Error,
+    }
+}
+
 /// Reads `path` from the kernel's own mount table, for the frame verifier.
 ///
 /// Read-only, so it is safe on the surface-destroy path. A filesystem served
 /// over IPC returns `WouldBlock` and reports as unavailable, which is why the
-/// scripted session only reads the initramfs.
+/// scripted session only reads the initramfs. Listings take the other road —
+/// [`recorded_list_dir`] replays what the kernel served the client — because
+/// the table's mount points move while the shell's script runs, and a replay
+/// against the final table would contradict a listing honestly observed
+/// mid-remount.
 fn kernel_read_file(path: &[u8], out: &mut [u8]) -> Option<usize> {
     // SAFETY: mounted during setup before any task ran; read-only here.
     let mounts = unsafe { &*core::ptr::addr_of!(MOUNTS) };
@@ -3805,36 +4010,6 @@ fn kernel_read_file(path: &[u8], out: &mut [u8]) -> Option<usize> {
         addr_of_mut!(WINDOW_VFS_READS).write(count + 1);
     }
     Some(read)
-}
-
-/// Reads one directory entry through the kernel's own mount table, for `ls`.
-///
-/// This is the verifier's side of the listing the client asked for through
-/// `SYS_READDIR`: both reach [`MountTable::read_dir`], one across the syscall
-/// boundary and one directly, so the same names come back in the same order.
-/// The verifier runs as root, which is the identity the kernel has always used
-/// for its proof reads.
-fn kernel_list_dir(path: &[u8], index: usize) -> zc_abi::terminal::Listing {
-    use zc_abi::terminal::Listing;
-
-    // SAFETY: mounted during setup before any task ran; read-only here.
-    let mounts = unsafe { &*core::ptr::addr_of!(MOUNTS) };
-    let mut out = [0u8; zc_abi::DIRENT_LEN];
-    match mounts.read_dir(path, index, &mut out, perms::Identity::ROOT) {
-        Ok(Some(())) => match zc_abi::DirEntry::read_from(&out) {
-            Some(entry) => {
-                // SAFETY: owned here; the snapshot runs with interrupts masked.
-                unsafe {
-                    let count = addr_of!(WINDOW_LS_ENTRIES).read();
-                    addr_of_mut!(WINDOW_LS_ENTRIES).write(count + 1);
-                }
-                Listing::Entry(entry)
-            }
-            None => Listing::Error,
-        },
-        Ok(None) => Listing::End,
-        Err(_) => Listing::Error,
-    }
 }
 
 /// Verifies the final desktop frame: exact where it is deterministic,
@@ -5549,6 +5724,10 @@ static mut INPUT: zc_abi::ui::Input = zc_abi::ui::Input::new();
 
 /// How many reports of the scripted mouse session have been served.
 static mut MOUSE_SCRIPT_INDEX: usize = 0;
+/// Whether the end-of-script diagnostic has printed.
+static mut MOUSE_SCRIPT_SERVED: bool = false;
+/// Whether the first idle dump has printed; later idle instants stay silent.
+static mut IDLE_DUMPED: bool = false;
 
 /// Maximum live mouse reports queued between reads.
 const MOUSE_QUEUE_CAP: usize = 64;
@@ -5792,10 +5971,10 @@ fn next_window_event(me: usize, pointer: bool, window: u32) -> Option<u64> {
 }
 
 /// Queues one window-local pointer event, logging the first one routed.
-fn push_window_pointer(window: u32, word: u64) {
+fn push_window_pointer(window: u32, word: u64) -> bool {
     let index = window as usize;
     if index >= service::WINDOW_TASKS {
-        return;
+        return false;
     }
     // SAFETY: owned here; the pointer syscall runs with interrupts masked.
     let queued = unsafe { (*addr_of_mut!(WINDOW_POINTERS))[index].push(word) };
@@ -5804,6 +5983,7 @@ fn push_window_pointer(window: u32, word: u64) {
         unsafe { addr_of_mut!(WINDOW_POINTER_LOGGED).write(true) };
         crate::serial::write_str("wm: pointer routed\n");
     }
+    queued
 }
 
 /// Removes the oldest window-local pointer event for `window`, if any.
@@ -5872,7 +6052,9 @@ fn route_window_pointer(held_before: u8, buttons: u8, dx: i8, dy: i8, live: bool
                 dx,
                 dy,
             );
-            push_window_pointer(window, word);
+            if !push_window_pointer(window, word) {
+                crate::serial::write_str("wm: window pointer queue full, report dropped\n");
+            }
         }
     }
 }

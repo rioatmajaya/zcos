@@ -352,6 +352,10 @@ jobs:
         # stream was produced but never crossed the syscall.
         grep -q "wm: pointer routed" build/boot.log
         grep -q "task 8: client: pointer ok" build/boot.log
+        # The whole scripted pointer session was served, not cut short: the
+        # kernel names how many reports each window's queue held when the
+        # last step went out.
+        grep -q "wm: mouse script served" build/boot.log
         # The strip's widgets, and a scripted detour the verifier replays
         # (F8e-4, ADR 0035; the reset target, ADR 0088; the focus, ADR 0089).
         # The client must have hit both widgets and taken the focus, and the
@@ -448,6 +452,8 @@ jobs:
         # delivered before the end-of-session sentinel.
         grep -q "wm: pointer routed" build/boot-close.log
         grep -q "task 8: client: pointer ok" build/boot-close.log
+        # The whole scripted pointer session was served before the close.
+        grep -q "wm: mouse script served" build/boot-close.log
         # The widget detour is in the shared prefix, so the close run proves
         # both widgets and the focus too before the window is erased
         # (ADR 0088, ADR 0089).
@@ -526,6 +532,10 @@ jobs:
         grep -q "wm: click ok" build/boot-fm.log
         grep -q "wm: reset ok" build/boot-fm.log
         grep -q "wm: focus ok" build/boot-fm.log
+        # The whole scripted pointer session was served, and the verifier now
+        # replays the listings the kernel actually served each client (ADR
+        # 0090) — the fm walk included.
+        grep -q "wm: mouse script served" build/boot-fm.log
         grep -q "clock: proof" build/boot-fm.log
         grep -q "compositor: clock fixed" build/boot-fm.log
         ! grep -q "compositor: clock tick" build/boot-fm.log

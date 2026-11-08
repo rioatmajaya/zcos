@@ -96,6 +96,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0087](0087-a-windows-widgets-are-data-one-layout-pass-places.md) | A window's widgets are data one layout pass places | Accepted |
 | [0088](0088-a-second-widget-resets-the-first.md) | A second widget resets the first | Accepted |
 | [0089](0089-a-click-gives-a-widget-the-focus.md) | A click gives a widget the focus | Accepted |
+| [0090](0090-the-verifier-replays-what-the-kernel-served.md) | The verifier replays what the kernel served | Accepted |
 
 ## Adding a decision
 

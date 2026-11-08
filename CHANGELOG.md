@@ -171,6 +171,19 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Fixed
 
+- **The frame verifier replays the listings the kernel actually served** (F8,
+  desktop): the shell's script remounts `/data` while the desktop runs, and a
+  loaded runner re-feeds its script while the window client is still catching
+  up, so a client's `SYS_READDIR` could honestly observe the mount table
+  mid-churn — and the verifier's re-derivation from the final table then
+  disagreed by one row, failing the frame as `window content mismatch`. The
+  `SYS_READDIR` dispatch now records each served word per window client, and
+  the verifier replays that record keyed by path: the proof is "the client
+  painted what the kernel served it", which is the claim it always made. The
+  idle wait's diagnostic dump also prints once per boot instead of on every
+  block — a quiescent machine had drowned itself in four megabytes of event
+  ring and starved the input that would have ended the idle. See
+  [ADR 0090](docs/adr/0090-the-verifier-replays-what-the-kernel-served.md).
 - **The boot no longer dies inside `ExitBootServices`** (F1, loader): the
   loader installed its own minimal GDT before calling the firmware, but the
   firmware re-enables interrupts during that call and services its timer
