@@ -93,6 +93,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0084](0084-a-service-publishes-its-endpoint-at-runtime.md) | A service publishes its endpoint at runtime | Accepted |
 | [0085](0085-the-firmwares-tables-stay-installed-for-exitbootservices.md) | The firmware's tables stay installed for ExitBootServices | Accepted |
 | [0086](0086-a-block-with-no-runnable-peer-waits-for-one.md) | A block with no runnable peer waits for one | Accepted |
+| [0087](0087-a-windows-widgets-are-data-one-layout-pass-places.md) | A window's widgets are data one layout pass places | Accepted |
 
 ## Adding a decision
 

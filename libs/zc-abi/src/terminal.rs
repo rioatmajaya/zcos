@@ -41,27 +41,17 @@ pub const DECORATION_CLOSE_COLOR: (u8, u8, u8) = (226, 96, 96);
 /// Minimize-button glyph color.
 pub const DECORATION_MIN_COLOR: (u8, u8, u8) = (226, 200, 120);
 
-/// Click-button fill color.
-const BUTTON_BG: (u8, u8, u8) = (48, 54, 66);
-/// Click-button border color.
-const BUTTON_EDGE: (u8, u8, u8) = (92, 102, 122);
+/// Click-button width in pixels: twelve 8-pixel cells.
+///
+/// Re-exported from the widget layer, which owns the button's geometry.
+pub const BUTTON_W: u32 = crate::widget::BUTTON_W;
+/// Click-button height in pixels: the widget strip's row height.
+pub const BUTTON_H: u32 = crate::widget::STRIP_H;
 /// Click-button label color.
 ///
 /// Public so a test can confirm the label really paints inside the rectangle
 /// hit-testing claims for it.
-pub const BUTTON_FG: (u8, u8, u8) = (235, 238, 245);
-
-/// Click-button width in pixels: twelve 8-pixel cells.
-///
-/// "Clicks: " is eight cells and the counter is capped at four digits, so the
-/// label always fits and the button never resizes as the count grows.
-pub const BUTTON_W: u32 = 96;
-/// Click-button height in pixels.
-pub const BUTTON_H: u32 = 18;
-/// Inset of the button from the window border.
-const BUTTON_INSET: u32 = 8;
-/// Horizontal inset of the label inside the button.
-const BUTTON_PAD_X: u32 = 4;
+pub use crate::widget::BUTTON_FG;
 
 /// Terminal width in character cells.
 const TERM_COLS: usize = 44;
@@ -119,7 +109,7 @@ pub struct Term {
     lines: [[u8; TERM_COLS]; TERM_ROWS],
     len: [u8; TERM_ROWS],
     rows: u8,
-    clicks: u32,
+    buttons: crate::widget::Buttons,
 }
 
 impl Term {
@@ -138,7 +128,7 @@ impl Term {
             lines,
             len,
             rows: 1,
-            clicks: 0,
+            buttons: crate::widget::Buttons::new(),
         }
     }
 
@@ -154,14 +144,13 @@ impl Term {
         if !button_rect(w, h).contains(x, y) {
             return false;
         }
-        self.clicks = self.clicks.saturating_add(1);
-        true
+        self.buttons.press(crate::widget::BUTTON_ID)
     }
 
     /// Returns how many times the button has been clicked.
     #[must_use]
     pub const fn clicks(&self) -> u32 {
-        self.clicks
+        self.buttons.count(crate::widget::BUTTON_ID)
     }
 
     /// Applies one keystroke for editing.
@@ -262,12 +251,19 @@ impl Term {
             }
             return base;
         }
-        // The click button sits in the free strip below the ten text rows. It
-        // is part of the shared render, so the client paints it and the kernel's
-        // verifier recomputes it — including the count after a scripted click.
+        // The click button sits in the widget strip below the ten text rows.
+        // It is part of the shared render, so the client paints it and the
+        // kernel's verifier recomputes it — including the count after a
+        // scripted click. The pixels come from the widget layer, which owns
+        // the button's layout and its label.
         let button = button_rect(w, h);
         if button.contains(lx, ly) {
-            return button_pixel(font, self.clicks, lx - button.x, ly - button.y);
+            return crate::widget::button_pixel(
+                font,
+                self.buttons.count(crate::widget::BUTTON_ID),
+                lx - button.x,
+                ly - button.y,
+            );
         }
         let body_y = ly - TITLE_HEIGHT;
         if body_y < PAD_Y {
@@ -537,72 +533,23 @@ const fn glyph_over(font: Font<'_>, ch: u8, gx: u32, gy: u32, base: (u8, u8, u8)
 /// are [`crate::desktop::Rect::EMPTY`].
 pub const DECORATION_MIN_W: u32 = 80;
 
+/// The terminal window's widget strip, placed by the shared layout pass.
+///
+/// The terminal hosts one widget — its click button — rightmost in the free
+/// band below the ten text rows. The strip is the widget layer's data: the
+/// renderer paints from it and the hit-test clicks through it, so the region
+/// a click can hit is exactly the region the label is drawn in.
+#[must_use]
+pub const fn widgets(w: u32, h: u32) -> crate::widget::Layout {
+    crate::widget::strip(w, h, TITLE_HEIGHT, &[BUTTON_W, 0, 0, 0], 1)
+}
+
 /// The click button's rectangle in window-local coordinates.
 ///
-/// It sits in the free strip below the ten text rows, inset from the window
-/// border, so it never covers the transcript. [`Term::render`] paints it and
-/// [`Term::click`] hit-tests it through this one function, so the region a
-/// click can hit is exactly the region the label is drawn in.
+/// A thin view over [`widgets`], kept for callers that want the one rect.
 #[must_use]
 pub const fn button_rect(w: u32, h: u32) -> crate::desktop::Rect {
-    if w < BUTTON_W + BUTTON_INSET * 2 || h < TITLE_HEIGHT + BUTTON_H + BUTTON_INSET * 2 {
-        return crate::desktop::Rect::EMPTY;
-    }
-    crate::desktop::Rect::new(
-        w - BUTTON_INSET - BUTTON_W,
-        h - BUTTON_INSET - BUTTON_H,
-        BUTTON_W,
-        BUTTON_H,
-    )
-}
-
-/// Renders one pixel of the click button, in button-local coordinates.
-#[must_use]
-const fn button_pixel(font: Font<'_>, clicks: u32, x: u32, y: u32) -> (u8, u8, u8) {
-    if x == 0 || y == 0 || x + 1 == BUTTON_W || y + 1 == BUTTON_H {
-        return BUTTON_EDGE;
-    }
-    if x >= BUTTON_PAD_X && y >= 1 && y < 1 + GLYPH_H {
-        let gx = x - BUTTON_PAD_X;
-        let col = gx / GLYPH_W;
-        if col < BUTTON_W / GLYPH_W {
-            let ch = button_label_byte(clicks, col);
-            if glyph_bit(font, ch, y - 1, gx % GLYPH_W) {
-                return BUTTON_FG;
-            }
-        }
-    }
-    BUTTON_BG
-}
-
-/// Returns the label byte at cell `col` of the button.
-///
-/// The count is capped at four digits so the label always fits the twelve cells
-/// the button holds; the cap also means the button never changes size.
-#[must_use]
-const fn button_label_byte(clicks: u32, col: u32) -> u8 {
-    const PREFIX: &[u8] = b"Clicks: ";
-    if col < PREFIX.len() as u32 {
-        return PREFIX[col as usize];
-    }
-    let value = if clicks > 9999 { 9999 } else { clicks };
-    let digits = digit_count(value);
-    let at = col - PREFIX.len() as u32;
-    if at >= digits {
-        return b' ';
-    }
-    (value / pow10(digits - 1 - at) % 10) as u8 + b'0'
-}
-
-/// Returns how many decimal digits `value` needs.
-#[must_use]
-const fn digit_count(mut value: u32) -> u32 {
-    let mut count = 1;
-    while value >= 10 {
-        value /= 10;
-        count += 1;
-    }
-    count
+    widgets(w, h).rect_of(crate::widget::BUTTON_ID)
 }
 
 /// Returns `10` raised to `power`.
@@ -1048,7 +995,7 @@ mod tests {
         // wrapping when a live user clicks far past the label's four digits.
         assert!(term.click(button.x, button.y, w, h));
         assert_eq!(term.clicks(), 1);
-        term.clicks = u32::MAX;
+        term.buttons = crate::widget::Buttons::seeded([u32::MAX; crate::widget::WIDGET_SLOTS]);
         assert!(term.click(button.x + 1, button.y + 1, w, h));
         assert_eq!(term.clicks(), u32::MAX);
     }
@@ -1057,8 +1004,8 @@ mod tests {
     fn a_window_too_small_for_the_button_has_none() {
         // Both rectangles empty: no label paints and no click lands, rather
         // than a button hanging off the border.
-        assert!(button_rect(BUTTON_W + BUTTON_INSET * 2 - 1, 266).is_empty());
-        assert!(button_rect(426, TITLE_HEIGHT + BUTTON_H + BUTTON_INSET * 2 - 1).is_empty());
+        assert!(button_rect(BUTTON_W + 2 * crate::widget::STRIP_INSET - 1, 266).is_empty());
+        assert!(button_rect(426, TITLE_HEIGHT + BUTTON_H + crate::widget::STRIP_INSET - 1).is_empty());
         let mut term = Term::new();
         assert!(!term.click(0, 0, 64, 64));
         assert_eq!(term.clicks(), 0);

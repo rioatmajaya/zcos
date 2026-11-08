@@ -375,6 +375,15 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **A window's widgets are data one layout pass places** (F8, desktop):
+  `zc_abi::widget` owns the widget model — a `Layout` of placed widgets, a
+  right-aligned bottom strip pass, and per-widget press counters — and the
+  terminal's click button becomes its first citizen: the renderer, the
+  hit-test, and the kernel's frame verifier all read the same strip, so the
+  region a click can hit is exactly the region the label paints. The three
+  locked frame checksums are byte-identical, which is the proof the
+  refactor moved no pixel. See
+  [ADR 0087](docs/adr/0087-a-windows-widgets-are-data-one-layout-pass-places.md).
 - **A service publishes its endpoint at runtime** (F7f, core system):
   `SYS_SERVICE_PUBLISH` (60) lets a supervised service announce the IPC
   channel it serves on, and `SYS_SERVICE_LOOKUP` (61) resolves a service

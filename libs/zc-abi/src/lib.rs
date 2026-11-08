@@ -27,6 +27,7 @@ pub mod syscall;
 pub mod task;
 pub mod terminal;
 pub mod ui;
+pub mod widget;
 pub mod vfs;
 pub mod wm;
 
