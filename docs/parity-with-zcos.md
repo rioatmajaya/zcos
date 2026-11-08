@@ -47,15 +47,17 @@ The current tree has three locked proof images and checksums:
 
 | Image | Purpose | Locked checksum |
 |---|---|---|
-| `build/zcos-test.img` | single-window scripted proof | `0x5484547c0bf080af` |
+| `build/zcos-test.img` | single-window scripted proof | `0x18f9ce724a929efc` |
 | `build/zcos-close.img` | close/erase proof | `0x6d66e82d0f2d6fb8` |
-| `build/zcos-fm.img` | launcher, navigation, preview proof | `0xafa71a77f8d7687b` |
+| `build/zcos-fm.img` | launcher, navigation, preview proof | `0xf89e1ca133f3e8dc` |
 
-The test and fm checksums moved once, deliberately, when the strip's second
-widget (the reset target) joined the frame (ADR 0088). The close checksum did
-not move: that run erases the window before the final frame, so the frame is
-desktop and cursor only — the closed window's content is proven by the
-per-window content check (`wm: reset ok`), not by the final frame.
+The test and fm checksums moved twice, deliberately: when the strip's second
+widget (the reset target) joined the frame (ADR 0088) and when the focused
+widget began wearing the ring (ADR 0089). The close checksum did not move at
+either step: that run erases the window before the final frame, so the frame
+is desktop and cursor only — the closed window's content is proven by the
+per-window content check (`wm: reset ok`, `wm: focus ok`), not by the final
+frame.
 
 `build/zcos.img` is the human-testable image and has no golden checksum.
 

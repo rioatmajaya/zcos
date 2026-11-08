@@ -47,6 +47,9 @@ static mut CLICK_LOGGED: bool = false;
 /// Whether the client has logged its first successful reset press.
 static mut RESET_LOGGED: bool = false;
 
+/// Whether the client has logged a widget holding the focus.
+static mut FOCUS_LOGGED: bool = false;
+
 /// Whether the client has logged its first window-local pointer event.
 ///
 /// One marker per boot: it proves the kernel's derived stream reached this
@@ -161,7 +164,7 @@ pub unsafe extern "C" fn _start() -> ! {
             };
             match event {
                 WindowEvent::Key(key) => {
-                    if let Some(line) = terminal.push_key(key) {
+                    if let Some(line) = terminal.key(key, surface.width, surface.height) {
                         run_command_with(&mut terminal, line.as_bytes(), read_file, list_dir);
                     }
                     paint(
@@ -192,6 +195,12 @@ pub unsafe extern "C" fn _start() -> ! {
                         Click::Count => log_click_once(),
                         Click::Reset => log_reset_once(),
                         Click::Miss => {}
+                    }
+                    // Either accepted click gives its widget the focus; the
+                    // marker fires only when the focus model actually holds
+                    // one, so it and the kernel's `wm: focus ok` agree.
+                    if hit != Click::Miss && terminal.focus().is_some() {
+                        log_focus_once();
                     }
                     if hit != Click::Miss {
                         paint(
@@ -261,6 +270,21 @@ fn log_reset_once() {
         if !core::ptr::addr_of!(RESET_LOGGED).read() {
             core::ptr::addr_of_mut!(RESET_LOGGED).write(true);
             log("client: reset ok\n");
+        }
+    }
+}
+
+/// Logs, once, that a widget holds the window's focus.
+///
+/// A click gives its widget the focus and the focused widget wears the ring
+/// the kernel's verifier recomputes, so this marker and that replay agree:
+/// the client's focus model took the widget the script pressed.
+fn log_focus_once() {
+    // SAFETY: owned here; written once, before the next event is read.
+    unsafe {
+        if !core::ptr::addr_of!(FOCUS_LOGGED).read() {
+            core::ptr::addr_of_mut!(FOCUS_LOGGED).write(true);
+            log("client: focus ok\n");
         }
     }
 }

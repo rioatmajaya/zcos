@@ -179,7 +179,11 @@ script's clicks did not net to one — see
 [ADR 0035](docs/adr/0035-a-scripted-click-is-a-proof.md). The strip's second
 widget is a reset target that zeroes the counter, placed by the same layout
 pass and pressed by the same scripted detour — see
-[ADR 0088](docs/adr/0088-a-second-widget-resets-the-first.md). F8h-0 makes the
+[ADR 0088](docs/adr/0088-a-second-widget-resets-the-first.md) — and a click
+gives its widget the focus: the focused widget wears a brighter ring, and
+`Tab` moves the focus around the placed widgets without ever reaching the
+transcript (see
+[ADR 0089](docs/adr/0089-a-click-gives-a-widget-the-focus.md)). F8h-0 makes the
 filesystem enumerable: `SYS_READDIR` (36) returns one fixed-size `DirEntry` per
 index, the mount table lists its own mount points first, and `ls` lives in the
 shared terminal with the lister injected — the window client reads through the
@@ -267,8 +271,9 @@ the disk is still consistent afterwards, so "it turned off" and "it turned off
 
 One thing that does **not** work yet, so you are not left hunting for it: the
 window has two widgets — the `Clicks: N` button and the `Reset` target beside
-it, both placed by one shared layout pass. A general widget set (labels, lists,
-focus between widgets) is the next task. The path they will use is already
+it, both placed by one shared layout pass, with a focus a click gives and
+`Tab` moves. A general widget set (labels, lists) is the next task. The path
+they will use is already
 proven: the kernel forwards
 window-local pointer reports to the client, `user/zc-ui::Window` hands them over
 with their position and derived edge, and the scripted clicks are replayed by the

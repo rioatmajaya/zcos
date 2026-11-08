@@ -110,6 +110,7 @@ pub struct Term {
     len: [u8; TERM_ROWS],
     rows: u8,
     buttons: crate::widget::Buttons,
+    focused: crate::widget::Focus,
 }
 
 impl Term {
@@ -129,6 +130,7 @@ impl Term {
             len,
             rows: 1,
             buttons: crate::widget::Buttons::new(),
+            focused: crate::widget::Focus::new(),
         }
     }
 
@@ -136,21 +138,48 @@ impl Term {
     ///
     /// The button is the window's first widget and the boot proof's first
     /// clickable target; the reset target zeroes the counter when pressed.
-    /// The scripted session presses both, and the kernel replays the same
-    /// reports through [`crate::session::replay_pointer`] so the label the
-    /// client paints is recomputed, not trusted. A miss changes nothing, so
-    /// a routed coordinate that lands beside a widget fails the content check
-    /// instead of passing silently.
+    /// Either accepted click gives that widget the focus — the ring it wears
+    /// is part of the pinned frame. The scripted session presses both, and
+    /// the kernel replays the same reports through
+    /// [`crate::session::replay_pointer`] so the label the client paints is
+    /// recomputed, not trusted. A miss changes nothing, so a routed
+    /// coordinate that lands beside a widget fails the content check instead
+    /// of passing silently.
     pub fn click(&mut self, x: u32, y: u32, w: u32, h: u32) -> Click {
-        if button_rect(w, h).contains(x, y) {
+        let layout = widgets(w, h);
+        if layout.rect_of(crate::widget::BUTTON_ID).contains(x, y) {
             let _ = self.buttons.press(crate::widget::BUTTON_ID);
+            let _ = self.focused.take(crate::widget::BUTTON_ID, layout.len());
             return Click::Count;
         }
-        if reset_rect(w, h).contains(x, y) {
+        if layout.rect_of(crate::widget::RESET_ID).contains(x, y) {
             let _ = self.buttons.reset(crate::widget::BUTTON_ID);
+            let _ = self.focused.take(crate::widget::RESET_ID, layout.len());
             return Click::Reset;
         }
         Click::Miss
+    }
+
+    /// Applies one keystroke, routing the widget layer's keys first.
+    ///
+    /// Tab never reaches the transcript: it moves the focus around the
+    /// widgets the geometry places, the way a click moves it — the focused
+    /// widget's ring repaints on the next frame. Every other byte goes to
+    /// [`Self::push_key`] unchanged. This is the door a real client reads
+    /// events through; the transcript-only editor stays [`Self::push_key`],
+    /// the way [`run_command_with`] wraps [`run_command`].
+    pub fn key(&mut self, ch: u8, w: u32, h: u32) -> Option<Line> {
+        if ch == b'\t' {
+            let _ = self.focused.advance(widgets(w, h).len());
+            return None;
+        }
+        self.push_key(ch)
+    }
+
+    /// Returns the focused widget's id, or `None` when nothing holds focus.
+    #[must_use]
+    pub const fn focus(&self) -> Option<u8> {
+        self.focused.id()
     }
 
     /// Returns how many times the button has been clicked.
@@ -260,21 +289,27 @@ impl Term {
         // The widget strip sits below the ten text rows: the click counter and
         // the reset target beside it. It is part of the shared render, so the
         // client paints it and the kernel's verifier recomputes it — including
-        // the count after a scripted click and the zero a scripted reset
-        // leaves. The pixels come from the widget layer, which owns the
-        // widgets' layout and their labels.
+        // the count after a scripted click, the zero a scripted reset leaves,
+        // and the ring the focused widget wears. The pixels come from the
+        // widget layer, which owns the widgets' layout and their labels.
         let button = button_rect(w, h);
         if button.contains(lx, ly) {
             return crate::widget::button_pixel(
                 font,
                 self.buttons.count(crate::widget::BUTTON_ID),
+                matches!(self.focused.id(), Some(crate::widget::BUTTON_ID)),
                 lx - button.x,
                 ly - button.y,
             );
         }
         let reset = reset_rect(w, h);
         if reset.contains(lx, ly) {
-            return crate::widget::reset_pixel(font, lx - reset.x, ly - reset.y);
+            return crate::widget::reset_pixel(
+                font,
+                matches!(self.focused.id(), Some(crate::widget::RESET_ID)),
+                lx - reset.x,
+                ly - reset.y,
+            );
         }
         let body_y = ly - TITLE_HEIGHT;
         if body_y < PAD_Y {
@@ -1052,6 +1087,89 @@ mod tests {
         assert_eq!(term.clicks(), 0);
         assert_eq!(term.click(button.x + BUTTON_W / 2, button.y + BUTTON_H / 2, w, h), Click::Count);
         assert_eq!(term.clicks(), 1);
+    }
+
+    #[test]
+    fn an_accepted_click_gives_the_widget_the_focus() {
+        let (w, h) = (426u32, 266u32);
+        let button = button_rect(w, h);
+        let reset = reset_rect(w, h);
+        let mut term = Term::new();
+        assert_eq!(term.focus(), None);
+        // A miss focuses nothing; the two accepted clicks focus their widgets.
+        let _ = term.click(0, 0, w, h);
+        assert_eq!(term.focus(), None);
+        let _ = term.click(reset.x + crate::widget::RESET_W / 2, reset.y + BUTTON_H / 2, w, h);
+        assert_eq!(term.focus(), Some(crate::widget::RESET_ID));
+        let _ = term.click(button.x + BUTTON_W / 2, button.y + BUTTON_H / 2, w, h);
+        assert_eq!(term.focus(), Some(crate::widget::BUTTON_ID));
+        // A window whose strip places nothing cannot focus anything.
+        let mut tiny = Term::new();
+        let _ = tiny.click(0, 0, 64, 64);
+        assert_eq!(tiny.focus(), None);
+    }
+
+    #[test]
+    fn tab_moves_the_focus_and_never_reaches_the_transcript() {
+        let (w, h) = (426u32, 266u32);
+        let mut term = Term::new();
+        assert_eq!(term.line(0), b"zc> ");
+        // From nothing, the first Tab takes the strip's first widget; further
+        // Tabs advance and wrap across the placed widgets.
+        assert!(term.key(b'\t', w, h).is_none());
+        assert_eq!(term.focus(), Some(crate::widget::BUTTON_ID));
+        assert!(term.key(b'\t', w, h).is_none());
+        assert_eq!(term.focus(), Some(crate::widget::RESET_ID));
+        assert!(term.key(b'\t', w, h).is_none());
+        assert_eq!(term.focus(), Some(crate::widget::BUTTON_ID));
+        // Tab is a widget key: the transcript is byte-identical.
+        assert_eq!(term.line(0), b"zc> ");
+        assert_eq!(term.rows(), 1);
+        // A window whose strip places nothing refuses to move the focus.
+        let mut tiny = Term::new();
+        assert!(tiny.key(b'\t', 64, 64).is_none());
+        assert_eq!(tiny.focus(), None);
+        // Every other byte still goes to the transcript editor.
+        assert!(term.key(b'h', w, h).is_none());
+        assert_eq!(term.line(0), b"zc> h");
+    }
+
+    #[test]
+    fn the_ring_paints_on_the_focused_widget_only() {
+        let (w, h) = (426u32, 266u32);
+        let button = button_rect(w, h);
+        let reset = reset_rect(w, h);
+        let mut term = Term::new();
+        let _ = term.click(button.x + BUTTON_W / 2, button.y + BUTTON_H / 2, w, h);
+        // The focused button's whole border wears the focus edge — the ring
+        // is the widget's own border, never a mark beside it.
+        let mut focused_edge = 0;
+        let mut ly = button.y;
+        while ly < button.bottom() {
+            let mut lx = button.x;
+            while lx < button.right() {
+                if term.render(Font::embedded(), lx, ly, w, h) == crate::widget::FOCUS_EDGE {
+                    focused_edge += 1;
+                }
+                lx += 1;
+            }
+            ly += 1;
+        }
+        assert_eq!(focused_edge, 2 * (BUTTON_W + BUTTON_H) - 4, "the ring is the full border");
+        // The unfocused reset keeps the plain edge on its whole border.
+        let mut plain_edge = 0;
+        let mut ly = reset.y;
+        while ly < reset.bottom() {
+            let mut lx = reset.x;
+            while lx < reset.right() {
+                if term.render(Font::embedded(), lx, ly, w, h) == crate::widget::BUTTON_EDGE {
+                    plain_edge += 1;
+                }
+                lx += 1;
+            }
+            ly += 1;
+        }
+        assert_eq!(plain_edge, 2 * (crate::widget::RESET_W + BUTTON_H) - 4);
     }
 
     #[test]

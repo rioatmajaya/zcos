@@ -353,14 +353,16 @@ jobs:
         grep -q "wm: pointer routed" build/boot.log
         grep -q "task 8: client: pointer ok" build/boot.log
         # The strip's widgets, and a scripted detour the verifier replays
-        # (F8e-4, ADR 0035; the reset target, ADR 0088). The client must have
-        # hit both widgets and the kernel must have derived the same presses,
-        # or the content check would be trusting the client's labels rather
-        # than recomputing them.
+        # (F8e-4, ADR 0035; the reset target, ADR 0088; the focus, ADR 0089).
+        # The client must have hit both widgets and taken the focus, and the
+        # kernel must have derived the same presses, or the content check
+        # would be trusting the client's labels rather than recomputing them.
         grep -q "task 8: client: click ok" build/boot.log
         grep -q "task 8: client: reset ok" build/boot.log
+        grep -q "task 8: client: focus ok" build/boot.log
         grep -q "wm: click ok" build/boot.log
         grep -q "wm: reset ok" build/boot.log
+        grep -q "wm: focus ok" build/boot.log
         # A directory can be listed (F8h-0, ADR 0036). The shell's `ls` walks the
         # root and /dev through SYS_READDIR; the window's scripted `ls` is the
         # same command over the client's syscall and the kernel's mount table,
@@ -447,11 +449,14 @@ jobs:
         grep -q "wm: pointer routed" build/boot-close.log
         grep -q "task 8: client: pointer ok" build/boot-close.log
         # The widget detour is in the shared prefix, so the close run proves
-        # both widgets too before the window is erased (ADR 0088).
+        # both widgets and the focus too before the window is erased
+        # (ADR 0088, ADR 0089).
         grep -q "task 8: client: click ok" build/boot-close.log
         grep -q "task 8: client: reset ok" build/boot-close.log
+        grep -q "task 8: client: focus ok" build/boot-close.log
         grep -q "wm: click ok" build/boot-close.log
         grep -q "wm: reset ok" build/boot-close.log
+        grep -q "wm: focus ok" build/boot-close.log
         # The listing is in the shared prefix too, so the close run proves the
         # window's `ls` reached the VFS before the window is erased.
         grep -q "task 8: client: ls ok" build/boot-close.log
@@ -514,11 +519,13 @@ jobs:
         # (file manager), so exactly two `wm: content ok` lines.
         test "$(grep -c 'wm: content ok' build/boot-fm.log)" -eq 2
         # Window 0 shares the widget detour, so the two-window run proves both
-        # widgets as well (ADR 0088).
+        # widgets and the focus as well (ADR 0088, ADR 0089).
         grep -q "task 8: client: click ok" build/boot-fm.log
         grep -q "task 8: client: reset ok" build/boot-fm.log
+        grep -q "task 8: client: focus ok" build/boot-fm.log
         grep -q "wm: click ok" build/boot-fm.log
         grep -q "wm: reset ok" build/boot-fm.log
+        grep -q "wm: focus ok" build/boot-fm.log
         grep -q "clock: proof" build/boot-fm.log
         grep -q "compositor: clock fixed" build/boot-fm.log
         ! grep -q "compositor: clock tick" build/boot-fm.log

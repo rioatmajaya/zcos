@@ -3571,25 +3571,28 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface, window: u32) {
     // image) is the file manager: the kernel lists the same directory through
     // its own mount table into the same `Fm` the client builds from
     // `SYS_READDIR`.
-    let font = verifier_font();
-    // SAFETY: owned here; reset before the content is derived.
-    unsafe { addr_of_mut!(WINDOW_VFS_READS).write(0) };
-    // SAFETY: as above.
-    unsafe { addr_of_mut!(WINDOW_LS_ENTRIES).write(0) };
-    if window == 0 {
-        let mut terminal = Term::new();
-        let mut key = 0;
-        while key < SCRIPT.len() {
-            if let Some(line) = terminal.push_key(SCRIPT[key]) {
-                run_command_with(
-                    &mut terminal,
-                    line.as_bytes(),
-                    kernel_read_file,
-                    kernel_list_dir,
-                );
+        let font = verifier_font();
+        // SAFETY: owned here; reset before the content is derived.
+        unsafe { addr_of_mut!(WINDOW_VFS_READS).write(0) };
+        // SAFETY: as above.
+        unsafe { addr_of_mut!(WINDOW_LS_ENTRIES).write(0) };
+        if window == 0 {
+            let mut terminal = Term::new();
+            let mut key = 0;
+            while key < SCRIPT.len() {
+                // The routed door, like the client reads: a widget key would
+                // move the focus instead of typing, so the replay must go
+                // through the same entry point the event loop does.
+                if let Some(line) = terminal.key(SCRIPT[key], surface.width, surface.height) {
+                    run_command_with(
+                        &mut terminal,
+                        line.as_bytes(),
+                        kernel_read_file,
+                        kernel_list_dir,
+                    );
+                }
+                key += 1;
             }
-            key += 1;
-        }
         // SAFETY: `kernel_read_file` owns the counter and ran above.
         if unsafe { addr_of!(WINDOW_VFS_READS).read() } == 0 {
             crate::fail("window script read no file");
@@ -3624,6 +3627,14 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface, window: u32) {
         }
         crate::serial::write_str("wm: click ok\n");
         crate::serial::write_str("wm: reset ok\n");
+        // Every accepted click gives its widget the focus; the ring the
+        // verifier recomputes sits on the detour's last target, and a client
+        // whose focus model disagreed paints the ring elsewhere and fails the
+        // pixel compare.
+        if terminal.focus() != Some(zc_abi::widget::BUTTON_ID) {
+            crate::fail("window script's focus missed the button");
+        }
+        crate::serial::write_str("wm: focus ok\n");
         hash_window_surface(&terminal, surface, font, format, &wm, window);
         return;
     }

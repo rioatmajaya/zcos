@@ -183,6 +183,11 @@ mod tests {
         // and one a script without the reset could not produce.
         assert_eq!(replay(false).clicks(), 1);
         assert_eq!(replay(true).clicks(), 1);
+        // Every accepted click gives its widget the focus, so the detour ends
+        // with the ring on the button — the last widget it pressed, and the
+        // one the kernel's verifier demands.
+        assert_eq!(replay(false).focus(), Some(crate::widget::BUTTON_ID));
+        assert_eq!(replay(true).focus(), Some(crate::widget::BUTTON_ID));
     }
 
     #[test]

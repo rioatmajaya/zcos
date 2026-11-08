@@ -375,6 +375,20 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **A click gives a widget the focus** (F8, desktop): `zc_abi::widget` owns
+  the window's `Focus`, keyed by widget id like the press counters — an
+  accepted click gives its widget the focus, Tab moves it around the placed
+  widgets (`Term::key` routes it, so it never reaches the transcript), and
+  the focused widget wears the ring: its own border recolored
+  (`FOCUS_EDGE`), inside the rect the hit-test reads. The scripted detour
+  ends on the button, so the pinned frame shows the ring there; the
+  verifier demands that focus (`wm: focus ok`) and the client logs its own
+  (`client: focus ok`), so a focus model that disagreed fails the pixel
+  compare. The `--test` checksum moved `0x5484547c0bf080af` →
+  `0x18f9ce724a929efc` and `--fm` `0xafa71a77f8d7687b` →
+  `0xf89e1ca133f3e8dc`; the close checksum did not move, as before — that
+  run erases the window before its final frame. See
+  [ADR 0089](docs/adr/0089-a-click-gives-a-widget-the-focus.md).
 - **A second widget resets the first** (F8, desktop): the strip's second
   widget is a reset target that zeroes the click counter when pressed —
   `Buttons::reset` refuses a target outside the strip the way `press`
