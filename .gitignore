@@ -1,10 +1,11 @@
-/target/
 /build/
+.idea/
 *.img
 *.iso
-*.qcow2
+kernel/zc-kernel-image/target/
 *.log
-__pycache__/
 *.pyc
-.idea/
+__pycache__/
+*.qcow2
+/target/
 .vscode/

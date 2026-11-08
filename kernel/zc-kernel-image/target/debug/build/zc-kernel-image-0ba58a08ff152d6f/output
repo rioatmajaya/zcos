@@ -1,2 +1,0 @@
-cargo:rustc-link-arg=-Tkernel.ld
-cargo:rerun-if-changed=kernel.ld
