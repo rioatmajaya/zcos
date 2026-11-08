@@ -79,6 +79,7 @@ ps
 wait 0
 spawn .waiter.elf
 event 1
+raise 0 1
 notify 0 2
 wait 0
 notify 4 1

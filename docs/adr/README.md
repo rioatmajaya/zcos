@@ -88,6 +88,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0079](0079-service-discovery-at-boot.md) | Service discovery at boot | Accepted |
 | [0080](0080-smp-bring-up-is-parked.md) | SMP bring-up is parked | Accepted |
 | [0081](0081-signal-registration-and-raise.md) | Signal registration and raise | Accepted |
+| [0082](0082-a-peers-signal-runs-at-the-targets-next-kernel-entry.md) | A peer's signal runs at the target's next kernel entry | Accepted |
 
 ## Adding a decision
 

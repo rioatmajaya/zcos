@@ -207,6 +207,12 @@ const FB_VIRT: u64 = 0x10_00000;
 /// Virtual address of the signal trampoline mapped into every task.
 const TRAMPOLINE_VIRT: u64 = 0x5F_0000;
 
+/// Page-table flags for the trampoline page: present and user accessible.
+///
+/// The task runs the trampoline and reads it, so it is mapped like any other
+/// user page; it stays read-only because the kernel writes the page once.
+const TRAMPOLINE_FLAGS: u64 = 0x05;
+
 /// Size of the framebuffer window reserved in every address space.
 ///
 /// Matches the two-page-table ceiling [`build_fb_tables`] enforces, so the
@@ -352,6 +358,14 @@ static mut DOMAIN_STACK: [u64; TASK_COUNT] = [0; TASK_COUNT];
 /// The kernel reads the ring through the identity map; the domain reaches
 /// the same page at [`zc_abi::INPUT_RING_VIRT`] and writes there.
 static mut INPUT_RING_PHYS: u64 = 0;
+
+/// Physical frame of the shared signal trampoline page.
+///
+/// The page carries the trampoline every task returns through, and it is
+/// mapped into every task's address space — the boot tasks and the tasks a
+/// runtime spawn creates — so a signal reaches a handler wherever the target
+/// runs.
+static mut TRAMPOLINE_PHYS: u64 = 0;
 
 /// Per-task cursor into the scripted terminal session.
 ///
@@ -813,6 +827,66 @@ fn denied_fd(me: usize, access: &str, fd: u32) -> u64 {
     u64::MAX
 }
 
+/// Returns the address a signal handler's return address goes in.
+///
+/// The slot is either the gap the CPU left when it aligned the stack or the
+/// syscall stub's padding below the frame. Both belong to the interrupted
+/// task's own stack, but the padding can fall into a page the task never
+/// mapped when the stack is nearly exhausted, so the slot is checked against
+/// the task's page table before anything is written there. Returns `None`
+/// when the task has no room for the handler.
+fn handler_stack_slot(tasks: &TaskTable<TASK_COUNT>, frame: &IrqFrame) -> Option<u64> {
+    let frame_top = frame as *const IrqFrame as u64 + core::mem::size_of::<IrqFrame>() as u64;
+    let slot = zc_kernel::task::signal_return_slot(frame_top, frame.rsp);
+    let pt = current_user_pt(tasks)?;
+    check_user_range(pt, slot, 8, 8).map(|()| slot)
+}
+
+/// Redirects the running task into a signal handler.
+///
+/// The handler runs on the interrupted task's own stack: the kernel writes
+/// the trampoline address where the handler's `ret` will find it, points the
+/// instruction pointer at the handler, and passes the signal number in `rdi`.
+/// `SYS_SIGRETURN` restores the saved context, so a handler that returns
+/// normally lands on the trampoline and the task resumes exactly where it
+/// was interrupted.
+///
+/// The saved context is what the task returns to: the register block, the
+/// instruction pointer, and the stack pointer. The caller decides what those
+/// are — the return point of the call that raised the signal, or the call the
+/// handler interrupted.
+///
+/// Returns whether the handler was entered. A task whose stack has no room
+/// for the handler keeps running, and the caller re-arms the signal.
+fn deliver_signal(
+    tasks: &mut TaskTable<TASK_COUNT>,
+    regs: &mut SyscallRegs,
+    frame: &mut IrqFrame,
+    sig: u8,
+    handler: u64,
+    saved: SyscallRegs,
+    saved_rip: u64,
+    saved_rsp: u64,
+) -> bool {
+    // The handler returns through the trampoline, so the address it returns
+    // to has to be where its own `ret` looks for it.
+    let Some(slot) = handler_stack_slot(tasks, frame) else {
+        return false;
+    };
+    tasks.save_signal_context(saved, saved_rip, saved_rsp);
+    tasks.set_in_signal(true);
+    // SAFETY: the slot is inside the interrupted task's own stack, and the
+    // task's page tables are the ones loaded while this handler runs.
+    unsafe {
+        *(slot as *mut u64) = TRAMPOLINE_VIRT;
+    }
+    frame.rsp = slot;
+    frame.rip = handler;
+    regs.rdi = u64::from(sig);
+    regs.rax = 0;
+    true
+}
+
 /// Dispatches one userspace syscall.
 ///
 /// The stub passes both saved areas. The dispatcher writes the result into
@@ -829,6 +903,27 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
     // SAFETY: the task table and endpoints are owned here; traps cannot
     // nest because every gate runs with interrupts masked.
     let tasks = unsafe { &mut *addr_of_mut!(TASKS) };
+    // A signal raised on this task by a peer runs here: the handler gets the
+    // CPU before the syscall does, and the interrupted call starts again when
+    // the handler returns. The context saved for that return is the syscall
+    // itself, rewound to its `int $0x80`, so no call is left half-served.
+    if let Some((sig, handler)) = tasks.take_deliverable_signal() {
+        let me = tasks.current();
+        let saved = *regs;
+        let restart = frame.rip.wrapping_sub(2);
+        if deliver_signal(tasks, regs, frame, sig, handler, saved, restart, frame.rsp) {
+            let _ = crate::serial::print(format_args!(
+                "signal: delivered {sig} to {me}\n",
+            ));
+            return 0;
+        }
+        // The task's stack has no room for the handler, so the signal waits
+        // for the next entry instead of running half-served.
+        tasks.set_signal_pending(sig);
+        let _ = crate::serial::print(format_args!(
+            "signal: task {me} has no stack for the handler\n",
+        ));
+    }
     // A task that was blocked on a filesystem reply is replaying its syscall;
     // any other entry is a fresh one. The bridge needs to tell them apart so a
     // replay is answered from its log instead of re-sending earlier calls.
@@ -1318,6 +1413,14 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                     page_index(SPAWN_STACK_PAGE),
                     stack.start_address() | USER_PAGE_FLAGS,
                 );
+                // The signal trampoline is shared by every task, so a spawned
+                // task receives a signal exactly like a boot task: its
+                // handler returns through the same page.
+                set_table_entry(
+                    pt,
+                    page_index(TRAMPOLINE_VIRT),
+                    trampoline_phys() | TRAMPOLINE_FLAGS,
+                );
             }
             let owner = tasks.current_owner();
             // `rdx` names the session to spawn into; zero inherits the
@@ -1651,13 +1754,21 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
         Ok(Action::SigReturn) => {
             // Restore the saved context. With no saved context this is a
             // no-op return, which keeps a stray call from crashing.
-            if let Some((regs_saved, rip, rsp)) = tasks.restore_signal_context() {
-                *regs = regs_saved;
-                frame.rip = rip;
-                // Restore the stack pointer through the saved frame.
-                frame.rsp = rsp;
+            //
+            // The restored registers are the interrupted call's, and their
+            // `rax` is part of that context: it is the syscall number of a
+            // call the handler interrupted, so the call starts again. Writing
+            // a result over it would replace the number with a value and
+            // restart the wrong call.
+            match tasks.restore_signal_context() {
+                Some((regs_saved, rip, rsp)) => {
+                    *regs = regs_saved;
+                    frame.rip = rip;
+                    // Restore the stack pointer through the saved frame.
+                    frame.rsp = rsp;
+                }
+                None => regs.set_result(0),
             }
-            regs.set_result(0);
             0
         }
         Ok(Action::Raise) => {
@@ -1688,31 +1799,32 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 regs.set_result(u64::MAX);
                 return 0;
             }
-            // Wake a blocked target so it observes the signal.
+            // Wake a blocked target so it observes the signal: the peer runs
+            // it at its own next kernel entry.
             tasks.unblock_all();
 
-            // Synchronous self-delivery: if the target is the caller and a
-            // handler is registered, deliver now.
+            // Synchronous self-delivery: the caller sees the handler before
+            // the raise returns, so the raise call itself is what the task
+            // resumes when the handler is done.
             if target == me as usize {
-                let handler = tasks.signal_handler();
-                if handler != 0 && !tasks.in_signal() {
+                if let Some((sig, handler)) = tasks.take_deliverable_signal() {
                     let mut saved = *regs;
                     saved.rax = 0;
-                    tasks.save_signal_context(saved, frame.rip, frame.rsp);
-                    tasks.set_in_signal(true);
-                    let new_rsp = frame.rsp.wrapping_sub(8);
-                    unsafe {
-                        *(new_rsp as *mut u64) = TRAMPOLINE_VIRT;
+                    if deliver_signal(
+                        tasks, regs, frame, sig, handler, saved, frame.rip, frame.rsp,
+                    ) {
+                        let _ = crate::serial::print(format_args!(
+                            "signal: delivered {sig} to {target}\n",
+                        ));
+                        regs.set_result(0);
+                        return 0;
                     }
-                    frame.rsp = new_rsp;
-                    frame.rip = handler;
-                    regs.rdi = u64::from(sig);
-                    tasks.set_signal_pending(0);
+                    // The task's stack has no room for the handler: the signal
+                    // waits for the next entry and the raise still succeeds.
+                    tasks.set_signal_pending(sig);
                     let _ = crate::serial::print(format_args!(
-                        "signal: delivered {sig} to {target}\n",
+                        "signal: task {me} has no stack for the handler\n",
                     ));
-                    regs.set_result(0);
-                    return 0;
                 }
             }
 
@@ -4339,6 +4451,10 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
     // One shared trampoline page, mapped into every task at TRAMPOLINE_VIRT.
     let tramp_frame = alloc.allocate().expect("trampoline frame");
     let tramp_phys = tramp_frame.start_address();
+    // SAFETY: written once during setup, before any task runs.
+    unsafe {
+        addr_of_mut!(TRAMPOLINE_PHYS).write(tramp_phys);
+    }
     unsafe {
         let base = tramp_phys as *mut u8;
         base.add(0).write(0x48);
@@ -4352,7 +4468,7 @@ pub fn enter(alloc: &mut FrameAllocator<'_>, boot_info: *const BootInfo) -> ! {
         base.add(8).write(0x80);
         for pt in pts.iter() {
             let idx = ((TRAMPOLINE_VIRT >> 12) & 0x1FF) as usize;
-            let entry = tramp_phys | 0x05;
+            let entry = tramp_phys | TRAMPOLINE_FLAGS;
             let pt_ptr = *pt as *mut u64;
             core::ptr::write_volatile(pt_ptr.add(idx), entry);
         }
@@ -4786,6 +4902,15 @@ fn map_mmio_into_task(
 /// Resolves the running task's user page table.
 fn current_user_pt(tasks: &TaskTable<TASK_COUNT>) -> Option<u64> {
     task_user_pt(tasks.current_cr3())
+}
+
+/// Returns the physical frame of the shared signal trampoline page.
+///
+/// The page is mapped into every task's address space, so a runtime spawn
+/// maps the same frame a boot task already has.
+fn trampoline_phys() -> u64 {
+    // SAFETY: written once during setup, before any task runs.
+    unsafe { addr_of!(TRAMPOLINE_PHYS).read() }
 }
 
 /// Reports whether a user page table maps the page holding `virt`.

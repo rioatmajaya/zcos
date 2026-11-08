@@ -500,16 +500,29 @@ pub fn session_create() -> u64 {
     syscall0(SYS_SESSION_CREATE)
 }
 
+/// Registers `handler` for signal `sig` in the caller.
+///
+/// A handler of zero restores the default, which is to ignore the signal.
+/// Returns 0 on success and `u64::MAX` when the signal number is refused.
 #[inline(always)]
 pub fn signal(sig: u64, handler: u64) -> u64 {
     syscall2(SYS_SIGNAL, sig, handler)
 }
 
+/// Restores the context the signal handler interrupted.
+///
+/// The trampoline calls this; a handler that returns normally reaches it
+/// through the trampoline's own return address.
 #[inline(always)]
 pub fn sigreturn() -> u64 {
     syscall0(SYS_SIGRETURN)
 }
 
+/// Raises signal `sig` on the task in slot `target`.
+///
+/// A raise on the caller runs the handler before the call returns; a raise on
+/// a peer runs it at the peer's next kernel entry. Returns 0 on success and
+/// `u64::MAX` when the target is refused.
 #[inline(always)]
 pub fn raise(target: u64, sig: u64) -> u64 {
     syscall2(SYS_RAISE, target, sig)

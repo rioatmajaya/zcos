@@ -9,6 +9,8 @@
 //! which the VFS checks against a node's owner. It is set at spawn and kept
 //! across a restart, so reviving a service never changes who it is.
 
+use core::mem::size_of;
+
 use crate::perms::Identity;
 
 /// Marker returned by the dispatcher to leave userspace for good.
@@ -147,6 +149,32 @@ impl IrqFrame {
         rsp: 0,
         ss: 0,
     };
+}
+
+/// Returns the address a signal handler's return address belongs at.
+///
+/// The CPU pushes the interrupt frame below the interrupted stack pointer,
+/// after aligning that pointer down to a sixteen-byte boundary. When the
+/// pointer was not already aligned, the CPU leaves an eight-byte gap just
+/// below it, and that gap is where the address a handler returns to belongs:
+/// it is the word the CPU itself left unused. When there is no gap, the word
+/// below the pointer is the frame's own stack segment selector, and writing
+/// there would break the return to ring 3. The address then goes into the
+/// syscall stub's padding, which sits between the saved registers and the
+/// frame and is never read again.
+///
+/// `frame_top` is the address just above the interrupt frame, and
+/// `saved_rsp` the stack pointer the frame recorded.
+#[must_use]
+pub const fn signal_return_slot(frame_top: u64, saved_rsp: u64) -> u64 {
+    if frame_top + 8 == saved_rsp {
+        // The CPU aligned the stack and left a gap below it.
+        saved_rsp - 8
+    } else {
+        // No gap: the frame reaches the stack pointer, so the address goes
+        // into the stub's padding, just below the frame.
+        saved_rsp - size_of::<IrqFrame>() as u64 - 8
+    }
 }
 
 /// One schedulable task with its saved state.
@@ -630,6 +658,12 @@ impl<const N: usize> TaskTable<N> {
     }
 
     /// Raises `sig` on task `index` if it is alive.
+    ///
+    /// The signal is recorded, not delivered: the target runs it at its next
+    /// kernel entry, where the kernel can save the interrupted context and
+    /// restart the call the handler interrupted. A raise on the caller is
+    /// delivered inside the raise syscall itself, so the handler runs before
+    /// the call returns.
     pub fn raise_signal(&mut self, index: usize, sig: u8) -> Result<(), TaskError> {
         let Some(task) = self.tasks.get_mut(index).and_then(Option::as_mut) else {
             return Err(TaskError::UnknownTask);
@@ -641,17 +675,45 @@ impl<const N: usize> TaskTable<N> {
         Ok(())
     }
 
-    /// Takes the running task's pending signal, if any.
-    pub fn take_signal(&mut self) -> u8 {
-        let Some(task) = self.tasks[self.current].as_mut() else {
-            return 0;
-        };
-        if !task.alive {
-            return 0;
+    /// Returns the pending signal of the slot at `index`, if it holds any task
+    /// at all.
+    ///
+    /// The value is the signal number waiting for delivery, or zero when
+    /// nothing is pending. A dead record reports zero: the kill, exit, and
+    /// restart paths clear the word.
+    #[must_use]
+    pub fn signal_pending_of(&self, index: usize) -> Option<u8> {
+        self.tasks
+            .get(index)
+            .and_then(|slot| slot.map(|task| task.signal_pending))
+    }
+
+    /// Takes the running task's pending signal when it can be delivered.
+    ///
+    /// A signal is deliverable when the task has a handler registered and is
+    /// not already inside one: a handler that is still running owns the
+    /// task, so the signal waits for it to finish. A signal with no handler
+    /// is the default action, and the default action here is to ignore it, so
+    /// it is dropped rather than waiting for a handler that may never come.
+    ///
+    /// Returns the signal number and the handler address, or `None` when
+    /// there was nothing to deliver.
+    pub fn take_deliverable_signal(&mut self) -> Option<(u8, u64)> {
+        let task = self.tasks[self.current].as_mut()?;
+        if !task.alive || task.signal_pending == 0 {
+            return None;
+        }
+        if task.in_signal {
+            // The running handler owns the task; the signal stays pending.
+            return None;
         }
         let sig = task.signal_pending;
         task.signal_pending = 0;
-        sig
+        if task.signal_handler == 0 {
+            // No handler: the default action ignores the signal.
+            return None;
+        }
+        Some((sig, task.signal_handler))
     }
 
     /// Returns whether the running task is inside a signal handler.
@@ -1107,6 +1169,93 @@ mod task_table_tests {
         assert_eq!(table.events_of(one), Some(0));
         assert_eq!(table.notify(one, 0b1), Err(TaskError::UnknownTask));
         assert_eq!(table.notify(9, 0b1), Err(TaskError::UnknownTask));
+    }
+
+    #[test]
+    fn a_raised_signal_reaches_a_peer_and_runs_its_handler() {
+        let mut table = TaskTable::<4>::new();
+        let zero = table
+            .spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000, Identity::ROOT)
+            .unwrap();
+        let one = table
+            .spawn(SyscallRegs::EMPTY, frame(0x200), 0x2000, Identity::ROOT)
+            .unwrap();
+
+        // The raise records the signal on the peer; nothing runs yet.
+        table.raise_signal(one, 2).unwrap();
+        assert_eq!(table.signal_pending_of(one), Some(2));
+        assert_eq!(table.signal_pending_of(zero), Some(0));
+
+        // The peer delivers it at its own next kernel entry.
+        let mut regs = SyscallRegs::EMPTY;
+        let mut irq = IrqFrame::EMPTY;
+        assert_eq!(table.block_current(&mut regs, &mut irq), Some(one));
+        assert_eq!(table.current(), one);
+        // No handler yet: the default action ignores the signal.
+        assert_eq!(table.take_deliverable_signal(), None);
+        assert_eq!(table.signal_pending_of(one), Some(0));
+
+        // With a handler, the same pending signal runs it.
+        table.raise_signal(one, 3).unwrap();
+        table.set_signal_handler(0x4000);
+        assert_eq!(table.take_deliverable_signal(), Some((3, 0x4000)));
+        assert_eq!(table.signal_pending_of(one), Some(0));
+
+        // A dead peer refuses the raise instead of holding a signal no one
+        // can run.
+        table.kill(one, 0).unwrap();
+        assert_eq!(table.raise_signal(one, 1), Err(TaskError::UnknownTask));
+        assert_eq!(table.raise_signal(9, 1), Err(TaskError::UnknownTask));
+    }
+
+    #[test]
+    fn a_signal_waits_for_the_handler_that_is_still_running() {
+        let mut table = TaskTable::<2>::new();
+        table
+            .spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000, Identity::ROOT)
+            .unwrap();
+        table.set_signal_handler(0x4000);
+        table.raise_signal(0, 1).unwrap();
+
+        // The handler is running: the signal cannot be delivered into it.
+        table.set_in_signal(true);
+        assert_eq!(table.take_deliverable_signal(), None);
+        assert_eq!(table.signal_pending_of(0), Some(1));
+
+        // Once it finishes, the pending signal is delivered.
+        table.set_in_signal(false);
+        assert_eq!(table.take_deliverable_signal(), Some((1, 0x4000)));
+        assert_eq!(table.signal_pending_of(0), Some(0));
+    }
+
+    #[test]
+    fn a_killed_task_carries_no_signal_into_its_next_incarnation() {
+        let mut table = TaskTable::<2>::new();
+        let zero = table
+            .spawn(SyscallRegs::EMPTY, frame(0x100), 0x1000, Identity::ROOT)
+            .unwrap();
+        table.set_signal_handler(0x4000);
+        table.raise_signal(zero, 1).unwrap();
+        assert_eq!(table.signal_pending_of(zero), Some(1));
+
+        // The end of a task clears the word and the handler with it.
+        table.kill(zero, 0).unwrap();
+        assert_eq!(table.signal_pending_of(zero), Some(0));
+        table
+            .respawn(zero, SyscallRegs::EMPTY, frame(0x500))
+            .unwrap();
+        assert_eq!(table.signal_pending_of(zero), Some(0));
+        assert_eq!(table.take_deliverable_signal(), None);
+    }
+
+    #[test]
+    fn the_signal_return_slot_avoids_the_frame_it_would_break() {
+        // The CPU aligned the stack and left an eight-byte gap below it: the
+        // gap is where the return address goes.
+        assert_eq!(signal_return_slot(0x1040, 0x1048), 0x1040);
+        // No gap: the word below the stack pointer is the frame's own stack
+        // segment selector, so the address goes into the stub's padding.
+        assert_eq!(signal_return_slot(0x1040, 0x1040), 0x1040 - 48);
     }
 
     #[test]

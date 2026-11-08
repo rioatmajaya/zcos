@@ -366,6 +366,33 @@ any notify, exit, or fault unblocks every task, and a replay with no match
 blocks again. The event word belongs to one incarnation; spawn and respawn
 start it at zero, and kill, exit, and fault restart clear it.
 
+### Signals
+
+`SYS_SIGNAL` (57) registers a handler address for the caller: `rdi` is the
+signal number and `rsi` the handler. Only signals 1..=3 exist, and zero
+restores the default. The default action is to ignore the signal: a raised
+signal with no handler is dropped when the target next enters the kernel,
+rather than waiting for a handler that may never come. Any other signal
+number returns `u64::MAX`.
+
+`SYS_RAISE` (59) raises a signal on another task: `rdi` is the target slot
+and `rsi` the signal. The target must be alive and in the caller's session,
+because a signal is peer traffic inside the group a task was spawned into,
+not lifecycle authority; a cross-session raise returns `u64::MAX`. A raise on
+the caller runs the handler before the call returns. A raise on a peer records
+the signal and wakes the target, which runs the handler at its own next
+kernel entry: the handler gets the CPU before the call the target was making,
+and that call starts again when the handler returns. A task blocked in a
+syscall is therefore interrupted between calls, never in the middle of one.
+
+`SYS_SIGRETURN` (58) restores the context the handler interrupted. The
+handler returns to a shared trampoline page that the kernel maps into every
+task, and the trampoline calls this syscall. The restored registers are the
+interrupted call's, so the call runs again with its own number and arguments;
+a handler that returns without calling this syscall still reaches the
+trampoline, because the kernel put the trampoline's address where the
+handler's own return would look for it.
+
 ### `SYS_WINDOW_CLOSE`
 
 `SYS_WINDOW_CLOSE` (33) ends window `window`'s input session. It carries the

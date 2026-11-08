@@ -345,6 +345,14 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **A peer's signal runs at the target's next kernel entry** (F4, core
+  system): a signal raised on another task is delivered when that task next
+  enters the kernel, the handler runs on the target's own stack, and the
+  call the handler interrupted starts again when the handler returns. The
+  boot proof raises a signal on the blocked waiter, so the transcript shows
+  `raise: task 2 raised 1 on 0`, `signal: delivered 1 to 0`, and
+  `task 0: signal: handled`, and the waiter still wakes on its bit. See
+  [ADR 0082](docs/adr/0082-a-peers-signal-runs-at-the-targets-next-kernel-entry.md).
 - **Signal registration and raise** (F4, core system): `SYS_SIGNAL`
   registers a handler for signals 1..=3, `SYS_RAISE` sets a pending signal
   on a live task in the same session, and `SYS_SIGRETURN` is reserved for the

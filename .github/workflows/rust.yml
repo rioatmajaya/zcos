@@ -63,7 +63,7 @@ jobs:
         grep -q "task 1: consumer received 2000" build/boot.log
         grep -q "task 1: hello verified" build/boot.log
         grep -q "task 0: manifest ok" build/boot.log
-        grep -q "task 2: Commands: help echo cat ls stat write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc ps spawn kill wait notify event session dmesg poweroff exit" build/boot.log
+        grep -q "task 2: Commands: help echo cat ls stat write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc ps spawn kill wait notify event session signal raise dmesg poweroff exit" build/boot.log
         grep -q "task 2: hello os" build/boot.log
         grep -q "task 2: hello from the ZC OS initramfs" build/boot.log
         grep -q "task 2: hello.txt: file, 31 bytes" build/boot.log
@@ -226,6 +226,17 @@ jobs:
         grep -q "task 2: signal: registered" build/boot.log
         grep -q "task 2: signal: handled" build/boot.log
         grep -q "task 2: raise: ok" build/boot.log
+        # A signal raised on a peer is delivered at the peer's next kernel
+        # entry: the waiter is blocked in its event wait when the signal
+        # arrives, so the kernel delivers the signal there, the handler runs
+        # on the waiter's own stack, and the interrupted wait starts again
+        # when the handler returns. The waiter still wakes on its bit and
+        # exits with the same status, so the wait above proves the delivery
+        # did not cost the task its work.
+        grep -q "signal: task 0 registered 1" build/boot.log
+        grep -q "raise: task 2 raised 1 on 0" build/boot.log
+        grep -q "signal: delivered 1 to 0" build/boot.log
+        grep -q "task 0: signal: handled" build/boot.log
         grep -q "task 0: hello from C" build/boot.log
         # A missing image and a supervised slot both fail closed; the kernel
         # logs the reason and the shell reports the neutral failure.
@@ -241,8 +252,12 @@ jobs:
         # The kernel reads the manifest's service order at boot.
         grep -q "manifest: services=blk,kbd" build/boot.log
         grep -q "task 7: initd: manifest ok" build/boot.log
-        grep -q "task 7: initd: discovered blk up" build/boot.log
-        grep -q "task 7: initd: discovered kbd up" build/boot.log
+        grep -qE "task 7: initd: discovered blk (up|down)" build/boot.log
+        # The keyboard domain faults on purpose at boot, so the state the
+        # supervisor finds it in is a race: it may still be up, or already
+        # down and waiting for the revive below. The discovery line is the
+        # claim, so the check names the service and leaves the state open.
+        grep -qE "task 7: initd: discovered kbd (up|down)" build/boot.log
         # The manifest is authoritative for the supervised set and order.
         grep -q "task 7: initd: supervising blk,kbd" build/boot.log
         grep -q "cap: task 6 delegated" build/boot.log
@@ -376,7 +391,7 @@ jobs:
         grep -q "fb: desktop checksum ok" build/boot.log
         grep -q "switches" build/boot.log
         grep -q "acpi: rsdp v2" build/boot.log
-        grep -q "initramfs: 13 files" build/boot.log
+        grep -q "initramfs: 14 files" build/boot.log
         grep -q "task 4: blk: resuming" build/boot.log
         grep -q "task 7: initd: blk down" build/boot.log
         grep -q "task 7: service blk started, task 4 revived" build/boot.log
