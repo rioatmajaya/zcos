@@ -171,6 +171,25 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Fixed
 
+- **The boot no longer dies inside `ExitBootServices`** (F1, loader): the
+  loader installed its own minimal GDT before calling the firmware, but the
+  firmware re-enables interrupts during that call and services its timer
+  through its own IDT — whose exception gates name a code selector the
+  loader's table does not carry, so one interrupt nested into #DF and reset
+  the machine before the kernel ran. The firmware's tables now stay the
+  installed pair for the call itself; the loader masks interrupts again when
+  it returns and only then swaps the GDT. This was the intermittent
+  early-boot `emulator status 0` CI failure. See
+  [ADR 0085](docs/adr/0085-the-firmwares-tables-stay-installed-for-exitbootservices.md).
+- **A block with no runnable peer waits for one** (F4, kernel): blocking on
+  an IPC endpoint while every other task was blocked failed the boot as
+  `ipc deadlock`, but the same state is a legal idle instant — the
+  compositor waits for a window event while the shell waits for the next
+  scripted byte. The block now logs `ipc idle` with the event trace and
+  sleeps with interrupts enabled until a tick makes a peer runnable; a
+  genuine wedge is still bounded by the boot watchdog. This was the flaky
+  compositor deadlock recorded in the handover. See
+  [ADR 0086](docs/adr/0086-a-block-with-no-runnable-peer-waits-for-one.md).
 - **The host zcfs checker replays every record kind** (F7e, host tooling):
   `tools/zcfs.py` stopped at the first `UNLINK`/`RMDIR`/`RENAME`/`OWNER`
   record, so `tools/check-disk-zcfs.sh` failed on a healthy disk — the

@@ -91,6 +91,8 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0082](0082-a-peers-signal-runs-at-the-targets-next-kernel-entry.md) | A peer's signal runs at the target's next kernel entry | Accepted |
 | [0083](0083-the-host-checker-replays-every-record-kind.md) | The host checker replays every record kind the guest writes | Accepted |
 | [0084](0084-a-service-publishes-its-endpoint-at-runtime.md) | A service publishes its endpoint at runtime | Accepted |
+| [0085](0085-the-firmwares-tables-stay-installed-for-exitbootservices.md) | The firmware's tables stay installed for ExitBootServices | Accepted |
+| [0086](0086-a-block-with-no-runnable-peer-waits-for-one.md) | A block with no runnable peer waits for one | Accepted |
 
 ## Adding a decision
 

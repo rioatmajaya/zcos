@@ -240,13 +240,21 @@ pub unsafe extern "efiapi" fn efi_main(
         stack_top,
     ));
 
-    // The firmware IDT and GDT live in memory that ExitBootServices releases,
-    // so mask interrupts before installing our own GDT; a firmware interrupt
-    // must not arrive between `lgdt` and the CS reload.
+    // The firmware IDT and GDT stay installed for the ExitBootServices call
+    // itself: the firmware runs its own code there — and it re-enables
+    // interrupts while it does, so its timer (observed as vector 0x20 with IF
+    // set) can fire mid-call. Servicing one of those through the firmware IDT
+    // with our minimal GDT loaded triple-faults, because the firmware's
+    // exception gates name a code selector this table does not carry; the
+    // nested #GP becomes #DF and the machine resets before the kernel runs.
+    // With the firmware tables paired, the interrupt is handled and returns
+    // normally. Only once the call has returned do we mask interrupts again
+    // and install our own GDT — no firmware code runs after that point, so
+    // the table swap needs no further protection.
+    disable_interrupts();
+    exit_boot_services(boot_services, image_handle, &mut map_buffers, boot_info);
     disable_interrupts();
     load_gdt();
-
-    exit_boot_services(boot_services, image_handle, &mut map_buffers, boot_info);
 
     serial::write_str("boot services exited; entering kernel\n");
 

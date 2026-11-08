@@ -3375,14 +3375,36 @@ fn block_with_retry(
             0
         }
         None => {
+            // Every other live task was blocked too. That used to fail the
+            // boot as a deadlock, but it is also the shape of a legal idle
+            // instant: the compositor waits for a window event while the
+            // shell waits for the next scripted byte, and the two have no
+            // work for each other until external input arrives. The tick is
+            // what makes a peer runnable again — drained input runs
+            // `unblock_all` — so the wait below sleeps with interrupts
+            // enabled and switches to the first peer that wakes. A real
+            // deadlock still cannot hide: nothing would ever wake, and the
+            // boot watchdog bounds the run.
             let _ = crate::serial::print(format_args!(
-                "deadlock: current {} alive {} endpoint len {}\n",
+                "ipc idle: current {} alive {} endpoint len {}\n",
                 tasks.current(),
                 tasks.alive_count(),
                 queue_len,
             ));
             dump_trace();
-            crate::fail("ipc deadlock")
+            loop {
+                if tasks.poll_peer(regs, frame).is_some() {
+                    publish_next_cr3(tasks);
+                    return 0;
+                }
+                // Interrupts stay masked through the syscall dispatch, so the
+                // idle wait opens its own interrupt window: `sti` takes
+                // effect after the `hlt`, the machine sleeps wakable, and the
+                // timer keeps ticking. A tick that finds a peer preempts this
+                // wait and switches on its own, abandoning this stack like
+                // any blocked task's.
+                unsafe { core::arch::asm!("sti", "hlt", options(nomem, nostack)) };
+            }
         }
     }
 }
@@ -3626,6 +3648,16 @@ fn snapshot_window_surface(surface: &zc_kernel::surface::Surface, window: u32) {
         );
     });
     if fm.path() != b"/hello.txt" || !fm.previewing() {
+        // Diagnostic: what the replay actually landed on, so a flake here
+        // says which half (path or preview) disagreed with the script.
+        let path = fm.path();
+        crate::serial::write_str("fm replay: path=");
+        crate::serial::write_str(core::str::from_utf8(path).unwrap_or("?"));
+        let _ = crate::serial::print(format_args!(
+            " preview={} bytes={}\n",
+            fm.previewing(),
+            path.len(),
+        ));
         crate::fail("fm window did not open hello.txt");
     }
     // SAFETY: `kernel_read_file` owns the counter and ran during the replay.

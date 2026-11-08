@@ -901,6 +901,19 @@ impl<const N: usize> TaskTable<N> {
         None
     }
 
+    /// Checks once for a runnable peer and switches to it.
+    ///
+    /// The companion to [`Self::block_current`]'s rare `None`: the current
+    /// task is already saved and blocked, and every other live task was
+    /// blocked too. Returns `None` again while the machine stays idle, so the
+    /// caller can open an interrupt window and poll again; the first peer a
+    /// tick or IRQ makes runnable is loaded into the stub areas and returned.
+    pub fn poll_peer(&mut self, regs: &mut SyscallRegs, frame: &mut IrqFrame) -> Option<usize> {
+        let next = self.next_runnable(self.current)?;
+        self.load_into(next, regs, frame);
+        Some(next)
+    }
+
     /// Makes `index` current and copies its state into the stub areas.
     fn load_into(&mut self, index: usize, regs: &mut SyscallRegs, frame: &mut IrqFrame) {
         if let Some(task) = self.tasks[index] {
