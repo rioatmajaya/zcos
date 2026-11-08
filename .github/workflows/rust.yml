@@ -134,6 +134,12 @@ jobs:
         # supervisor asks for; `svc` reads them through SYS_SERVICE_HEALTH.
         grep -q "task 2: svc: blk up ready restarts=1 faults=1" build/boot.log
         grep -q "task 2: svc: kbd up ready restarts=1 faults=1" build/boot.log
+        # Runtime discovery (ADR 0084): blk publishes the channel it serves
+        # on, the shell resolves the name the way any client would, and the
+        # claim dies with the incarnation that made it.
+        grep -q "task 4: blk: endpoint 2 published" build/boot.log
+        grep -q "task 2: svc: blk up ready restarts=1 faults=1 endpoint=2" build/boot.log
+        grep -q "service blk endpoint 2 withdrawn" build/boot.log
         # `ps` reads the generation, so a revived service is distinguishable
         # from its first incarnation even though it keeps its slot index.
         grep -q "task 2: ps: slot 4 gen 2 uid=1 gid=1 up ready" build/boot.log

@@ -90,6 +90,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0081](0081-signal-registration-and-raise.md) | Signal registration and raise | Accepted |
 | [0082](0082-a-peers-signal-runs-at-the-targets-next-kernel-entry.md) | A peer's signal runs at the target's next kernel entry | Accepted |
 | [0083](0083-the-host-checker-replays-every-record-kind.md) | The host checker replays every record kind the guest writes | Accepted |
+| [0084](0084-a-service-publishes-its-endpoint-at-runtime.md) | A service publishes its endpoint at runtime | Accepted |
 
 ## Adding a decision
 

@@ -17,7 +17,8 @@ pub use zc_abi::{
     SYS_GETID, SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT, SYS_LOG_READ, SYS_LOG_WRITE, SYS_MAP_FRAME,
     SYS_MKDIR, SYS_MMIO_MAP, SYS_MOUNT, SYS_MOUSE_READ, SYS_OPEN, SYS_PORT_CLAIM, SYS_POWEROFF, SYS_READ,
     SYS_READDIR, SYS_RECV, SYS_RECV_FROM, SYS_RENAME, SYS_RMDIR, SYS_SEEK, SYS_SEND, SYS_SEND_TO,
-    SYS_SERIAL_READ, SYS_SERVICE_HEALTH, SYS_SERVICE_READY, SYS_SERVICE_START, SYS_SERVICE_STATUS,
+    SYS_SERIAL_READ, SYS_SERVICE_HEALTH, SYS_SERVICE_LOOKUP, SYS_SERVICE_PUBLISH,
+    SYS_SERVICE_READY, SYS_SERVICE_START, SYS_SERVICE_STATUS,
     SYS_SERVICE_STOP, SYS_SESSION, SYS_STAT, SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY, SYS_SURFACE_MAP,
     SYS_SPAWN, SYS_TASK_EXIT, SYS_TASK_INFO, SYS_TERM_READ, SYS_UMOUNT, SYS_UNLINK, SYS_SYNC,
     SYS_WAIT, SYS_KILL, SYS_NOTIFY, SYS_EVENT_WAIT, SYS_SESSION_CREATE, SYS_SIGNAL, SYS_SIGRETURN, SYS_RAISE, SYS_WINDOW_CLOSE, SYS_WINDOW_ID,
@@ -773,6 +774,28 @@ pub fn session() -> u64 {
 #[inline(always)]
 pub fn service_ready() -> u64 {
     syscall0(SYS_SERVICE_READY)
+}
+
+/// Publishes `channel` as the endpoint the calling service serves on,
+/// returning 0 or `u64::MAX`.
+///
+/// Only a task named in [`zc_abi::SERVICE_CATALOG`] may publish, and only for
+/// the service that task occupies. The kernel clears the claim on revive, so
+/// a restarted service publishes again once it is serving.
+#[inline(always)]
+pub fn service_publish(channel: u64) -> u64 {
+    syscall1(SYS_SERVICE_PUBLISH, channel)
+}
+
+/// Resolves a service name to the channel it published, or `u64::MAX`.
+///
+/// Discovery is unprivileged: the word is the channel a live service
+/// announced with [`service_publish`], or `u64::MAX` when the name matches no
+/// catalog service, the service is down, or it has published nothing since
+/// its last spawn.
+#[inline(always)]
+pub fn service_lookup(name: &[u8]) -> u64 {
+    syscall2(SYS_SERVICE_LOOKUP, name.as_ptr() as u64, name.len() as u64)
 }
 
 /// Terminates the calling task with status `0`; never returns.

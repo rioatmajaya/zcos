@@ -398,6 +398,23 @@ pub const SYS_SIGRETURN: u64 = 58;
 /// Raises signal `sig` on task `target`.
 pub const SYS_RAISE: u64 = 59;
 
+/// Publishes the IPC channel the calling supervised service serves on.
+///
+/// `rdi` is the channel index. Only a task the catalog names may publish, and
+/// only for the service that task occupies, so a publication is always the
+/// service's own claim. The channel must be in range. Returns 0, or
+/// `u64::MAX` for an unsupervised caller or an out-of-range channel.
+pub const SYS_SERVICE_PUBLISH: u64 = 60;
+
+/// Resolves a service name to the channel it published.
+///
+/// `rdi`/`rsi` point at the name bytes. Discovery is unprivileged and
+/// read-only: it hands back where a live service is serving, an answer every
+/// client needs before it can hold any authority over that service. Returns
+/// the channel, or `u64::MAX` when the name matches no catalog service, the
+/// service is down, or it has published nothing since its last spawn.
+pub const SYS_SERVICE_LOOKUP: u64 = 61;
+
 /// Packs a user and group id into the one word [`SYS_GETID`] returns.
 #[must_use]
 pub const fn identity_word(uid: u32, gid: u32) -> u64 {

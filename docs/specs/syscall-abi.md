@@ -93,6 +93,8 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 57 | `SYS_SIGNAL` | signal, handler | 0 | `u64::MAX` |
 | 58 | `SYS_SIGRETURN` | — | 0 | `u64::MAX` |
 | 59 | `SYS_RAISE` | target slot, signal | 0 | `u64::MAX` |
+| 60 | `SYS_SERVICE_PUBLISH` | channel index | 0 | `u64::MAX` |
+| 61 | `SYS_SERVICE_LOOKUP` | name ptr, length | the published channel | `u64::MAX` |
 
 ### Clock
 
@@ -145,6 +147,26 @@ zero counters and prints, for example, `svc: blk up ready restarts=1 faults=1`.
 
 `SYS_SERVICE_STATUS` remains the smaller call for a caller that only needs the
 state bits.
+
+### Service endpoints
+
+`SYS_SERVICE_PUBLISH` (60) is the runtime half of discovery: a supervised
+service announces the IPC channel it serves on, and `SYS_SERVICE_LOOKUP` (61)
+resolves a service *name* to that channel. The publication is the service's
+own claim — only the task the catalog names for that service may publish, and
+only a channel inside the IPC fabric. Lookup is unprivileged and read-only:
+it hands back where a live service is serving, the answer a client needs
+before it could hold any authority over that service, and the channels are
+already open to every task for send and receive.
+
+A publication belongs to the incarnation that made it. The kernel withdraws
+the claim — and logs `service <name> endpoint <channel> withdrawn` — whenever
+the service dies by fault, clean exit, or stop, and the revive path clears
+whatever a previous incarnation left, so a restarted service must publish
+again before clients can find it, exactly like readiness. Lookup returns
+`u64::MAX` for an unknown name, a down service, or a service that has
+published nothing; `svc` appends `endpoint=<channel>` to a line whose service
+resolved. See [ADR 0084](../adr/0084-a-service-publishes-its-endpoint-at-runtime.md).
 
 ### Task registry
 

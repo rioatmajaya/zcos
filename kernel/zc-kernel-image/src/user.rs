@@ -47,6 +47,14 @@ static mut SESSION_OWNER: [u32; 64] = [0; 64];
 /// rather than policy. A task can read it but never write it.
 static mut SERVICE_HEALTH: service::ServiceHealth = service::ServiceHealth::new();
 
+/// The serving endpoints supervised services have published at run time.
+///
+/// A publication is the service's own claim about where it lives (ADR 0084);
+/// the lookup arm hands it to any caller whose name resolves. The revive path
+/// withdraws the previous incarnation's claim, so a restarted service must
+/// publish again before clients can find it.
+static mut SERVICE_ENDPOINTS: service::ServiceEndpoints = service::ServiceEndpoints::new();
+
 /// Base virtual address user task images are linked at.
 const USER_CODE_VIRT: u64 = 0x40_0000;
 
@@ -770,6 +778,15 @@ pub unsafe extern "C" fn user_exception_entry(
         // SAFETY: owned here; the ledger is a plain table and traps cannot
         // nest inside this handler.
         unsafe { (*addr_of_mut!(SERVICE_HEALTH)).record_fault(entry.id) };
+        // The publication dies with the incarnation it described, and the
+        // transcript says so when there was one to erase.
+        // SAFETY: owned here; the registry is a plain table.
+        if let Some(channel) = unsafe { (*addr_of_mut!(SERVICE_ENDPOINTS)).withdraw(entry.id) } {
+            let _ = crate::serial::print(format_args!(
+                "task {me}: service {} endpoint {} withdrawn\n",
+                entry.name, channel,
+            ));
+        }
         post_supervise(me, SERVICE_KIND_FAULT);
     }
     match tasks.exit_current(regs, frame_mut) {
@@ -945,6 +962,20 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             // unblocks every task, so the event must already be queued when
             // `initd` wakes. A task that is not a supervised service posts
             // nothing.
+            if let Some(entry) = service::for_task(me as usize) {
+                // The publication dies with the incarnation it described, and
+                // the transcript says so when there was one to erase — this
+                // is the path a stopped serving domain actually leaves by.
+                // SAFETY: owned here; the registry is a plain table.
+                if let Some(channel) =
+                    unsafe { (*addr_of_mut!(SERVICE_ENDPOINTS)).withdraw(entry.id) }
+                {
+                    let _ = crate::serial::print(format_args!(
+                        "task {me}: service {} endpoint {} withdrawn\n",
+                        entry.name, channel,
+                    ));
+                }
+            }
             post_supervise(me as usize, SERVICE_KIND_EXIT);
             // The shell anchors the window input session: when it exits there
             // is no more input to route, so a client blocked in a window read
@@ -2568,6 +2599,19 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                     // this ledger records what the kernel actually did.
                     // SAFETY: owned here; traps cannot nest inside a handler.
                     unsafe { (*addr_of_mut!(SERVICE_HEALTH)).record_restart(entry.id) };
+                    // A publication belongs to the incarnation that made it:
+                    // the revived slot starts unpublished, like its ready
+                    // flag, so clients cannot find the new run through the
+                    // old run's claim.
+                    // SAFETY: owned here; the registry is a plain table.
+                    if let Some(channel) =
+                        unsafe { (*addr_of_mut!(SERVICE_ENDPOINTS)).withdraw(entry.id) }
+                    {
+                        let _ = crate::serial::print(format_args!(
+                            "task {me}: service {} endpoint {} withdrawn\n",
+                            entry.name, channel,
+                        ));
+                    }
                     let _ = crate::serial::print(format_args!(
                         "task {me}: service {} started, task {} revived\n",
                         entry.name, entry.task,
@@ -2601,6 +2645,18 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 // dies, exactly as the fault path does: a stale TSS bitmap
                 // entry, region, or surface would otherwise outlive the task.
                 revoke_task_resources(entry.task);
+                // The endpoint claim is runtime authority too: a stopped
+                // service serves on nothing, and the withdrawal is the one
+                // place the transcript shows a publication being erased.
+                // SAFETY: owned here; the registry is a plain table.
+                if let Some(channel) =
+                    unsafe { (*addr_of_mut!(SERVICE_ENDPOINTS)).withdraw(entry.id) }
+                {
+                    let _ = crate::serial::print(format_args!(
+                        "task {me}: service {} endpoint {} withdrawn\n",
+                        entry.name, channel,
+                    ));
+                }
                 let _ = tasks.kill(entry.task, 0);
                 let _ = crate::serial::print(format_args!(
                     "task {me}: service {} stopped, task {} killed\n",
@@ -2713,6 +2769,52 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 return 0;
             }
             regs.set_result(if tasks.mark_current_ready() { 0 } else { u64::MAX });
+            0
+        }
+        Ok(Action::ServicePublish) => {
+            // Publishing is the runtime half of discovery: the service tells
+            // the kernel where it serves, and the registry remembers. Only
+            // the service's own task may make the claim, so a publication is
+            // always first-party.
+            let me = tasks.current();
+            let Some(entry) = service::for_task(me) else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            // SAFETY: owned here; the registry is a plain table.
+            let published =
+                unsafe { (*addr_of_mut!(SERVICE_ENDPOINTS)).publish(entry.id, regs.rdi as u32) };
+            regs.set_result(if published { 0 } else { u64::MAX });
+            0
+        }
+        Ok(Action::ServiceLookup) => {
+            // Discovery is unprivileged and read-only: it hands back where a
+            // live service is serving, the answer a client needs before it
+            // could hold any authority over that service. The channels are
+            // already open to every task for send and receive, so a channel
+            // number leaks nothing the caller could not probe anyway.
+            let name = match validate_user_slice(tasks, regs.rdi, regs.rsi) {
+                Some(name) => name,
+                None => {
+                    regs.set_result(u64::MAX);
+                    return 0;
+                }
+            };
+            let Some(entry) = service::SERVICES
+                .iter()
+                .find(|service| service.name.as_bytes() == name)
+            else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            // A publication describes a serving task: a down service is
+            // nowhere, even if its claim has not been withdrawn yet.
+            // SAFETY: owned here; the registry is a plain table.
+            let channel = unsafe { (*addr_of!(SERVICE_ENDPOINTS)).channel(entry.id) };
+            regs.set_result(match (tasks.is_alive(entry.task), channel) {
+                (true, Some(channel)) => u64::from(channel),
+                _ => u64::MAX,
+            });
             0
         }
         Ok(Action::LogRead) => {

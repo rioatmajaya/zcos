@@ -53,7 +53,8 @@ use zc_user::{
     READDIR_ENTRY, SERVICE_CATALOG, Stat, TASK_SLOTS, TaskInfo, chmod, close, create, getid,
     identity_gid, identity_uid, log, log_parts, log_read, mount, open, poweroff, read, readdir,
     send_to, serial_read, service_faults, service_health, service_is_ready, service_is_up,
-    service_restarts, session, spawn, stat, task_exit_with, task_info, umount, unlink, mkdir, rmdir,
+    service_lookup, service_restarts, session, spawn, stat, task_exit_with, task_info, umount,
+    unlink, mkdir, rmdir,
     rename, seek, sync, wait, write, kill, notify, event_wait, session_create, spawn_in, signal, raise,
 };
 
@@ -732,6 +733,15 @@ fn run(line: &[u8]) -> bool {
                     out_u64(u64::from(restarts));
                     out_bytes(b" faults=");
                     out_u64(u64::from(faults));
+                }
+                // Discovery is a runtime lookup, not a compiled-in channel:
+                // the shell resolves the name the same way any client would,
+                // and a service that published nothing (or is down) simply
+                // shows no endpoint.
+                let endpoint = service_lookup(service.name.as_bytes());
+                if endpoint != u64::MAX {
+                    out_bytes(b" endpoint=");
+                    out_u64(endpoint);
                 }
                 out_bytes(b"\n");
                 out_flush();

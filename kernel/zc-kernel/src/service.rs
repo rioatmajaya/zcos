@@ -247,6 +247,91 @@ fn index_of(id: u32) -> Option<usize> {
     SERVICES.iter().position(|service| service.id == id)
 }
 
+/// Registry of the serving endpoints supervised services publish at runtime.
+///
+/// A service that serves requests over an IPC channel announces that channel
+/// once its bring-up reaches the serving state, and any task can then resolve
+/// the service's name to it. This is the runtime half of discovery (ADR 0084):
+/// a client learns where a service lives from the kernel at run time instead
+/// of compiling the channel in, the way the fixed channel constants used to
+/// be spelled at both ends of the wire.
+///
+/// A publication is a claim of the *current* incarnation. The lookup arms gate
+/// on liveness, so a dead service resolves to nothing even before its record
+/// is cleared, and the revive path withdraws whatever the previous incarnation
+/// published, so a restarted service must publish again — the same rule the
+/// ready flag follows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ServiceEndpoints {
+    channels: [u32; zc_abi::SERVICE_CATALOG.len()],
+}
+
+impl ServiceEndpoints {
+    /// The value an unpublished service's slot holds.
+    pub const UNPUBLISHED: u32 = u32::MAX;
+
+    /// Creates a registry with every service unpublished.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            channels: [Self::UNPUBLISHED; zc_abi::SERVICE_CATALOG.len()],
+        }
+    }
+
+    /// Records that the service with `id` now serves on `channel`.
+    ///
+    /// Returns `false` for an unknown id or a channel outside the IPC fabric,
+    /// so a service can only ever publish a channel a send could reach. A
+    /// service that publishes again simply moves its claim; the newest one is
+    /// the one a client should find.
+    pub fn publish(&mut self, id: u32, channel: u32) -> bool {
+        let Some(index) = index_of(id) else {
+            return false;
+        };
+        // The sentinel is beyond the bound too, so an unpublished slot can
+        // never be written back in through the publish path.
+        if channel as usize >= zc_abi::IPC_CHANNELS {
+            return false;
+        }
+        self.channels[index] = channel;
+        true
+    }
+
+    /// Clears whatever the service with `id` published, returning the channel
+    /// that was withdrawn.
+    ///
+    /// `None` means an unknown id or nothing to withdraw, so the revive path
+    /// can log only the publications it actually erases. A dead service's
+    /// record stays until its next spawn clears it: the lookup gates on
+    /// liveness, so the stale claim is unreachable while the slot is down.
+    pub fn withdraw(&mut self, id: u32) -> Option<u32> {
+        let index = index_of(id)?;
+        let channel = self.channels[index];
+        if channel == Self::UNPUBLISHED {
+            return None;
+        }
+        self.channels[index] = Self::UNPUBLISHED;
+        Some(channel)
+    }
+
+    /// Returns the channel the service with `id` published, if any.
+    ///
+    /// The caller gates on liveness: a publication describes the serving
+    /// state of a live task, and a down service is nowhere.
+    #[must_use]
+    pub fn channel(&self, id: u32) -> Option<u32> {
+        index_of(id).and_then(|index| {
+            (self.channels[index] != Self::UNPUBLISHED).then_some(self.channels[index])
+        })
+    }
+}
+
+impl Default for ServiceEndpoints {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,5 +455,63 @@ mod tests {
         }
         assert_eq!(health.faults(KBD_SERVICE), Some(u32::from(u8::MAX)));
         assert_eq!(health.restarts(KBD_SERVICE), Some(u32::from(u8::MAX)));
+    }
+
+    #[test]
+    fn a_published_endpoint_resolves_by_id() {
+        let mut endpoints = ServiceEndpoints::new();
+        assert_eq!(endpoints.channel(BLK_SERVICE), None);
+        assert!(endpoints.publish(BLK_SERVICE, zc_abi::IPC_FS as u32));
+        assert_eq!(endpoints.channel(BLK_SERVICE), Some(zc_abi::IPC_FS as u32));
+        // The keyboard service publishes nothing, so it resolves to nothing.
+        assert_eq!(endpoints.channel(KBD_SERVICE), None);
+    }
+
+    #[test]
+    fn a_service_can_only_publish_a_real_channel() {
+        let mut endpoints = ServiceEndpoints::new();
+        assert!(!endpoints.publish(BLK_SERVICE, zc_abi::IPC_CHANNELS as u32));
+        assert!(!endpoints.publish(BLK_SERVICE, u32::MAX));
+        assert_eq!(endpoints.channel(BLK_SERVICE), None);
+        assert!(endpoints.publish(BLK_SERVICE, 0));
+    }
+
+    #[test]
+    fn a_republish_moves_the_claim() {
+        let mut endpoints = ServiceEndpoints::new();
+        assert!(endpoints.publish(BLK_SERVICE, 1));
+        assert!(endpoints.publish(BLK_SERVICE, 2));
+        assert_eq!(endpoints.channel(BLK_SERVICE), Some(2));
+    }
+
+    #[test]
+    fn an_unknown_service_publishes_and_resolves_nothing() {
+        let mut endpoints = ServiceEndpoints::new();
+        assert!(!endpoints.publish(99, 0));
+        assert_eq!(endpoints.channel(99), None);
+        assert_eq!(endpoints.withdraw(99), None);
+    }
+
+    #[test]
+    fn a_withdraw_returns_the_claim_and_clears_it() {
+        let mut endpoints = ServiceEndpoints::new();
+        assert!(endpoints.publish(BLK_SERVICE, 2));
+        assert_eq!(endpoints.withdraw(BLK_SERVICE), Some(2));
+        assert_eq!(endpoints.channel(BLK_SERVICE), None);
+        // Withdrawing again has nothing to erase, so a revive logs only the
+        // publications it actually replaced.
+        assert_eq!(endpoints.withdraw(BLK_SERVICE), None);
+    }
+
+    #[test]
+    fn a_revived_service_publishes_fresh() {
+        let mut endpoints = ServiceEndpoints::new();
+        assert!(endpoints.publish(BLK_SERVICE, 2));
+        // The revive path withdraws the previous incarnation's claim...
+        assert_eq!(endpoints.withdraw(BLK_SERVICE), Some(2));
+        // ...and lookup sees nothing until the new incarnation publishes.
+        assert_eq!(endpoints.channel(BLK_SERVICE), None);
+        assert!(endpoints.publish(BLK_SERVICE, 2));
+        assert_eq!(endpoints.channel(BLK_SERVICE), Some(2));
     }
 }

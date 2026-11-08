@@ -11,6 +11,7 @@ use zc_abi::{
     SYS_IRQ_CLAIM, SYS_IRQ_TEST, SYS_IRQ_WAIT, SYS_LOG_READ, SYS_LOG_WRITE, SYS_MAP_FRAME, SYS_MKDIR, SYS_MMIO_MAP, SYS_MOUNT,
     SYS_MOUSE_READ, SYS_OPEN, SYS_PORT_CLAIM, SYS_POWEROFF, SYS_READ, SYS_READDIR, SYS_RECV,
     SYS_RECV_FROM, SYS_RENAME, SYS_RMDIR, SYS_SEEK, SYS_SEND, SYS_SEND_TO, SYS_SERIAL_READ, SYS_SERVICE_HEALTH,
+    SYS_SERVICE_LOOKUP, SYS_SERVICE_PUBLISH,
     SYS_SERVICE_READY, SYS_SERVICE_START, SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_SESSION,
     SYS_STAT,
     SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY,
@@ -144,6 +145,10 @@ pub enum Action {
     GetId,
     /// Declare the running service ready to serve.
     ServiceReady,
+    /// Publish the IPC channel the calling service serves on.
+    ServicePublish,
+    /// Resolve a service name to the channel it published.
+    ServiceLookup,
     /// Copy the kernel's diagnostic log ring into a caller buffer.
     LogRead,
 }
@@ -195,6 +200,8 @@ pub const fn dispatch(number: u64) -> Result<Action, SyscallError> {
         SYS_CLOCK => Ok(Action::Clock),
         SYS_GETID => Ok(Action::GetId),
         SYS_SERVICE_READY => Ok(Action::ServiceReady),
+        SYS_SERVICE_PUBLISH => Ok(Action::ServicePublish),
+        SYS_SERVICE_LOOKUP => Ok(Action::ServiceLookup),
         SYS_LOG_READ => Ok(Action::LogRead),
         SYS_SERVICE_HEALTH => Ok(Action::ServiceHealth),
         SYS_TASK_INFO => Ok(Action::TaskInfo),
@@ -265,6 +272,8 @@ mod tests {
         assert_eq!(dispatch(SYS_CLOCK), Ok(Action::Clock));
         assert_eq!(dispatch(SYS_GETID), Ok(Action::GetId));
         assert_eq!(dispatch(SYS_SERVICE_READY), Ok(Action::ServiceReady));
+        assert_eq!(dispatch(SYS_SERVICE_PUBLISH), Ok(Action::ServicePublish));
+        assert_eq!(dispatch(SYS_SERVICE_LOOKUP), Ok(Action::ServiceLookup));
         assert_eq!(dispatch(SYS_LOG_READ), Ok(Action::LogRead));
         assert_eq!(dispatch(SYS_SERVICE_HEALTH), Ok(Action::ServiceHealth));
         assert_eq!(dispatch(SYS_TASK_INFO), Ok(Action::TaskInfo));
@@ -288,8 +297,8 @@ mod tests {
 
     #[test]
     fn unknown_numbers_are_rejected() {
-        // The last assigned number is SYS_RAISE (59), so probe past it.
-        assert_eq!(dispatch(60), Err(SyscallError::InvalidNumber));
+        // The last assigned number is SYS_SERVICE_LOOKUP (61), so probe past it.
+        assert_eq!(dispatch(62), Err(SyscallError::InvalidNumber));
         assert_eq!(
             dispatch(u64::MAX),
             Err(SyscallError::InvalidNumber)

@@ -356,6 +356,18 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **A service publishes its endpoint at runtime** (F7f, core system):
+  `SYS_SERVICE_PUBLISH` (60) lets a supervised service announce the IPC
+  channel it serves on, and `SYS_SERVICE_LOOKUP` (61) resolves a service
+  name to that channel — unprivileged and read-only, the answer a client
+  needs before it could hold any authority over the service. The claim
+  belongs to the incarnation that made it: the kernel withdraws it, with a
+  logged line, when the service dies by fault, exit, or stop, and a revived
+  service must publish again, exactly like readiness. The block driver
+  publishes the filesystem bridge channel after every revive, and `svc`
+  resolves each name the way any client would, printing `endpoint=2` for
+  `blk`. See
+  [ADR 0084](docs/adr/0084-a-service-publishes-its-endpoint-at-runtime.md).
 - **A peer's signal runs at the target's next kernel entry** (F4, core
   system): a signal raised on another task is delivered when that task next
   enters the kernel, the handler runs on the target's own stack, and the

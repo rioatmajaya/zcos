@@ -103,7 +103,12 @@ disk through the same `FileSystem` trait; `persist` proves durability by
 unmounting, remounting from the device, and reading its own write back. The
 supervisor `initd` watches the block domain over the supervision channel and
 restarts it after a deliberate fault, so a service the kernel did not choose
-to keep alive comes back on a userspace decision. The host formatter plants a
+to keep alive comes back on a userspace decision. Discovery is runtime data
+too: a service publishes the channel it serves on
+(`SYS_SERVICE_PUBLISH`/`SYS_SERVICE_LOOKUP`,
+[ADR 0084](docs/adr/0084-a-service-publishes-its-endpoint-at-runtime.md)),
+the claim dies with the incarnation that made it, and the shell's `svc`
+resolves each name the way any client would. The host formatter plants a
 torn, over-claiming tail so every boot must recover before serving, and both
 `zcfs` implementations clamp the log head to what actually reached the disk.
 

@@ -196,7 +196,7 @@ The current tree has:
 | Capability | Reference | Current | Status and gap |
 |---|---|---|---|
 | Service catalog | 19 endpoints, driver catalog, loader sandbox | 2 supervised services in one ABI catalog with boot order | ❌ Most service roles are absent, and the catalog is compile-time only. |
-| Discovery / loading | service discovery by name, driver match rules, dynamic spawn | runtime task creation by initramfs name (`SYS_SPAWN`), fixed boot indices, `SYS_SERVICE_START`/`STOP`; `SYS_SERVICE_HEALTH` reports restart and fault counters | 🟡 Runtime spawn exists, but services are still a compile-time catalog with no manifest-driven loader, driver match, or packaging. |
+| Discovery / loading | service discovery by name, driver match rules, dynamic spawn | runtime task creation by initramfs name (`SYS_SPAWN`), fixed boot indices, `SYS_SERVICE_START`/`STOP`; `SYS_SERVICE_HEALTH` reports restart and fault counters; a service publishes the channel it serves on (`SYS_SERVICE_PUBLISH`) and any task resolves a name to it (`SYS_SERVICE_LOOKUP`) | 🟡 Runtime spawn and runtime name-to-endpoint discovery exist ([ADR 0084](adr/0084-a-service-publishes-its-endpoint-at-runtime.md)), but services are still a compile-time catalog with no manifest-driven loader, driver match, or packaging. |
 | Logging | `logd` | kernel diagnostic ring readable through `SYS_LOG_READ` and the shell's `dmesg`; task logs remain serial-only | 🟡 The kernel half is user-visible and bounded; there is still no persistent or task-facing log service. |
 | Clipboard | `clipboardd` | none | ❌ |
 | Process/session manager | `procmgr`, sessions, job control | fixed slots | ❌ |

@@ -47,7 +47,7 @@ use zc_storage::virtio;
 use zc_storage::zcfs::{self, BlockIo, ZcfsError};
 use zc_user::{
     abort, log, port_claim, port_inb, port_inl, port_inw, port_outb, port_outl, port_outw,
-    recv_from, send_to, service_ready, task_exit,
+    recv_from, send_to, service_publish, service_ready, task_exit,
 };
 
 /// Upper bound on completion-poll spins before giving up.
@@ -1293,8 +1293,13 @@ fn zcfs_serve(device: &mut Device, cache: &mut Cache<CACHE_SLOTS>, flush_offered
     // Alive is not the same as ready: the kernel counts this slot as up from
     // spawn, but the device has only finished probed and mounted now. Both
     // the first serve and the post-revive resume enter here, so readiness is
-    // re-declared after every restart.
+    // re-declared after every restart — and so is the publication: the
+    // revive withdrew the previous incarnation's claim (ADR 0084), so a
+    // client can only find this run through a claim this run made.
     let _ = service_ready();
+    if service_publish(IPC_FS as u64) == 0 {
+        log("blk: endpoint 2 published\n");
+    }
     log("blk: zcfs serving\n");
     loop {
         let word = recv_from(IPC_FS as u64);
