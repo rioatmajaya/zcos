@@ -11,6 +11,15 @@
 
 #![no_std]
 
+/// Canonical operating system name.
+pub const OS_NAME: &[u8] = b"ZC OS";
+/// Canonical kernel release / version.
+pub const OS_RELEASE: &[u8] = b"0.1.0";
+/// Canonical machine architecture.
+pub const OS_ARCH: &[u8] = b"x86_64";
+/// Canonical system node name.
+pub const OS_NODENAME: &[u8] = b"zcos";
+
 pub mod clock;
 pub mod cursor;
 pub mod desktop;
@@ -479,5 +488,17 @@ mod tests {
         assert_eq!(PixelFormat::from_raw(7), None);
         // A round trip through the discriminant is stable.
         assert_eq!(PixelFormat::from_raw(PixelFormat::Rgbx8888 as u32), Some(PixelFormat::Rgbx8888));
+    }
+
+    #[test]
+    fn system_identifiers_are_ascii_and_non_empty() {
+        assert_eq!(OS_NAME, b"ZC OS");
+        assert_eq!(OS_RELEASE, b"0.1.0");
+        assert_eq!(OS_ARCH, b"x86_64");
+        assert_eq!(OS_NODENAME, b"zcos");
+        assert!(OS_NAME.is_ascii());
+        assert!(OS_RELEASE.is_ascii());
+        assert!(OS_ARCH.is_ascii());
+        assert!(OS_NODENAME.is_ascii());
     }
 }

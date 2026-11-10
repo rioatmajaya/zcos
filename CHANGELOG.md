@@ -388,6 +388,14 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **System and device inspection in the shell** (F7, shell): `zc_shell` adds
+  `uname` and `dev` commands. `uname` prints system metadata (`ZC OS`, `zcos`,
+  `0.1.0`, `x86_64`) supporting standard POSIX options (`-s`, `-n`, `-r`, `-m`,
+  `-a`). `dev` walks `/dev` through `readdir` and reports device names and kinds.
+  Canonical system identity constants `OS_NAME`, `OS_RELEASE`, `OS_ARCH`, and
+  `OS_NODENAME` are defined in `zc_abi` and re-exported by `zc_user`.
+  See [ADR 0094](docs/adr/0094-system-and-device-inspection-in-the-shell.md).
+
 - **The shell inspects the system clock** (F7, shell): `zc_shell` adds `date`
   and `time` commands backed by `SYS_CLOCK` and `zc_abi::Clock`. In interactive
   and live boots, the command reports `date: HH:MM:SS (rtc)`; under proof

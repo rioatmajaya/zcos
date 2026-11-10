@@ -67,7 +67,7 @@ def main() -> int:
     parser.add_argument(
         "--feed-timeout",
         type=float,
-        default=4.0,
+        default=15.0,
         help="seconds without progress before re-sending the body",
     )
     parser.add_argument("--watchdog", type=float, default=240.0)

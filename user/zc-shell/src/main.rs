@@ -4,7 +4,7 @@
 //! backspace support, and runs `help`, `echo`, `cat`, `ls`, `stat`, `write`,
 //! `append`, `rm`, `mkdir`, `rmdir`, `mv`, `sync`, `tmp`, `persist`, `chmod`,
 //! `mount`, `umount`, `id`, `svc`, `ps`, `spawn`, `kill`, `wait`, `notify`,
-//! `event`, `session`, `signal`, `raise`, `dmesg`, `date`, `poweroff`, and `exit`. Output goes
+//! `event`, `session`, `signal`, `raise`, `dmesg`, `date`, `dev`, `uname`, `poweroff`, and `exit`. Output goes
 //! through the log syscall, so the transcript appears in the kernel serial log.
 //!
 //! `id` asks the kernel for this task's user and group ids plus its session.
@@ -49,7 +49,7 @@
 #![allow(unsafe_code)]
 
 use zc_user::{
-    Clock, CLOCK_LIVE, clock,
+    Clock, CLOCK_LIVE, OS_ARCH, OS_NAME, OS_NODENAME, OS_RELEASE, clock,
     DIRENT_LEN, DirEntry, FS_ID_ZCFS, FS_OP_STOP, IPC_FS, KIND_CHR, KIND_DIR, READDIR_END,
     READDIR_ENTRY, SERVICE_CATALOG, Stat, TASK_SLOTS, TaskInfo, chmod, close, create, getid,
     identity_gid, identity_uid, log, log_parts, log_read, mount, open, poweroff, read, readdir,
@@ -319,7 +319,7 @@ fn run(line: &[u8]) -> bool {
     }
     match argv[0] {
         b"help" => {
-            log("Commands: help echo cat ls stat write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc ps spawn kill wait notify event session signal raise dmesg date poweroff exit\n");
+            log("Commands: help echo cat ls stat write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc dev uname ps spawn kill wait notify event session signal raise dmesg date poweroff exit\n");
         }
         b"echo" => {
             for index in 1..count {
@@ -747,6 +747,93 @@ fn run(line: &[u8]) -> bool {
                 out_bytes(b"\n");
                 out_flush();
             }
+        }
+        b"dev" => {
+            let mut index = 0;
+            let mut buffer = [0u8; DIRENT_LEN];
+            loop {
+                match readdir("/dev", index, &mut buffer) {
+                    READDIR_ENTRY => {
+                        if let Some(entry) = DirEntry::read_from(&buffer) {
+                            let name = entry.name();
+                            out_bytes(b"dev: ");
+                            out_bytes(name);
+                            if entry.kind == KIND_CHR {
+                                out_bytes(b" (char)\n");
+                            } else if entry.kind == KIND_DIR {
+                                out_bytes(b" (dir)\n");
+                            } else {
+                                out_bytes(b" (file)\n");
+                            }
+                            out_flush();
+                        }
+                        index += 1;
+                    }
+                    READDIR_END => break,
+                    _ => {
+                        log("dev: cannot read /dev\n");
+                        break;
+                    }
+                }
+            }
+        }
+        b"uname" => {
+            let mut show_sys = false;
+            let mut show_node = false;
+            let mut show_rel = false;
+            let mut show_arch = false;
+            if count == 1 {
+                show_sys = true;
+            } else {
+                for arg in &argv[1..count] {
+                    for &byte in *arg {
+                        match byte {
+                            b'-' => {}
+                            b's' => show_sys = true,
+                            b'n' => show_node = true,
+                            b'r' => show_rel = true,
+                            b'm' => show_arch = true,
+                            b'a' => {
+                                show_sys = true;
+                                show_node = true;
+                                show_rel = true;
+                                show_arch = true;
+                            }
+                            _ => {
+                                log("uname: invalid option\n");
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+            let mut first = true;
+            if show_sys {
+                out_bytes(OS_NAME);
+                first = false;
+            }
+            if show_node {
+                if !first {
+                    out_bytes(b" ");
+                }
+                out_bytes(OS_NODENAME);
+                first = false;
+            }
+            if show_rel {
+                if !first {
+                    out_bytes(b" ");
+                }
+                out_bytes(OS_RELEASE);
+                first = false;
+            }
+            if show_arch {
+                if !first {
+                    out_bytes(b" ");
+                }
+                out_bytes(OS_ARCH);
+            }
+            out_bytes(b"\n");
+            out_flush();
         }
         b"ps" => {
             // The registry view is read-only: the shell learns each slot's
