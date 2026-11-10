@@ -56,6 +56,13 @@ write /tmp/ap A
 append /tmp/ap B
 cat /tmp/ap
 ls /tmp
+touch /tmp/touched
+stat /tmp/touched
+cp hello.txt /tmp/hello-copy.txt
+head /tmp/hello-copy.txt
+wc /tmp/hello-copy.txt
+rm /tmp/touched
+rm /tmp/hello-copy.txt
 stat /dev/blk
 id
 session

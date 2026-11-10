@@ -1,10 +1,11 @@
 //! Shell task: an interactive command line over the serial port.
 //!
 //! Reads keystrokes with blocking serial reads, edits a single line with
-//! backspace support, and runs `help`, `echo`, `cat`, `ls`, `stat`, `write`,
-//! `append`, `rm`, `mkdir`, `rmdir`, `mv`, `sync`, `tmp`, `persist`, `chmod`,
-//! `mount`, `umount`, `id`, `svc`, `ps`, `spawn`, `kill`, `wait`, `notify`,
-//! `event`, `session`, `signal`, `raise`, `dmesg`, `date`, `dev`, `uname`, `poweroff`, and `exit`. Output goes
+//! backspace support, and runs `help`, `echo`, `cat`, `head`, `wc`, `ls`, `stat`,
+//! `touch`, `cp`, `write`, `append`, `rm`, `mkdir`, `rmdir`, `mv`, `sync`, `tmp`,
+//! `persist`, `chmod`, `mount`, `umount`, `id`, `svc`, `ps`, `spawn`, `kill`, `wait`,
+//! `notify`, `event`, `session`, `signal`, `raise`, `dmesg`, `date`, `dev`, `uname`,
+//! `free`, `uptime`, `poweroff`, and `exit`. Output goes
 //! through the log syscall, so the transcript appears in the kernel serial log.
 //!
 //! `id` asks the kernel for this task's user and group ids plus its session.
@@ -319,7 +320,7 @@ fn run(line: &[u8]) -> bool {
     }
     match argv[0] {
         b"help" => {
-            log("Commands: help echo cat ls stat write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc dev uname free ps spawn kill wait notify event session signal raise dmesg date uptime poweroff exit\n");
+            log("Commands: help echo cat head wc ls stat touch cp write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc dev uname free ps spawn kill wait notify event session signal raise dmesg date uptime poweroff exit\n");
         }
         b"echo" => {
             for index in 1..count {
@@ -355,6 +356,83 @@ fn run(line: &[u8]) -> bool {
             }
             close(fd);
             log("\n");
+        }
+        b"head" => {
+            if count < 2 {
+                log("usage: head <file>\n");
+                return false;
+            }
+            let path = core::str::from_utf8(argv[1]).unwrap_or("");
+            let fd = open(path);
+            if fd == u64::MAX {
+                log("head: cannot open\n");
+                return false;
+            }
+            let mut buffer = [0u8; 64];
+            let mut lines = 0;
+            'outer: loop {
+                let got = read(fd, &mut buffer);
+                if got == u64::MAX || got == 0 {
+                    break;
+                }
+                for &b in &buffer[..got as usize] {
+                    out_bytes(&[b]);
+                    if b == b'\n' {
+                        lines += 1;
+                        if lines >= 10 {
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+            close(fd);
+            out_flush();
+        }
+        b"wc" => {
+            if count < 2 {
+                log("usage: wc <file>\n");
+                return false;
+            }
+            let path = core::str::from_utf8(argv[1]).unwrap_or("");
+            let fd = open(path);
+            if fd == u64::MAX {
+                log("wc: cannot open\n");
+                return false;
+            }
+            let mut buffer = [0u8; 64];
+            let mut lines = 0u64;
+            let mut words = 0u64;
+            let mut bytes = 0u64;
+            let mut in_word = false;
+            loop {
+                let got = read(fd, &mut buffer);
+                if got == u64::MAX || got == 0 {
+                    break;
+                }
+                bytes += got;
+                for &b in &buffer[..got as usize] {
+                    if b == b'\n' {
+                        lines += 1;
+                    }
+                    if b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' {
+                        in_word = false;
+                    } else if !in_word {
+                        in_word = true;
+                        words += 1;
+                    }
+                }
+            }
+            close(fd);
+            out_bytes(b"wc: lines ");
+            out_u64(lines);
+            out_bytes(b" words ");
+            out_u64(words);
+            out_bytes(b" bytes ");
+            out_u64(bytes);
+            out_bytes(b" ");
+            out_bytes(argv[1]);
+            out_bytes(b"\n");
+            out_flush();
         }
         b"ls" => {
             let path = if count < 2 {
@@ -507,6 +585,84 @@ fn run(line: &[u8]) -> bool {
                 // A missing source, a denied parent, a directory target, or a
                 // cross-mount move all surface as `u64::MAX`.
                 log("mv: cannot move\n");
+            }
+        }
+        b"touch" => {
+            if count < 2 {
+                log("usage: touch <file>\n");
+                return false;
+            }
+            let path = core::str::from_utf8(argv[1]).unwrap_or("");
+            let fd = open(path);
+            if fd != u64::MAX {
+                close(fd);
+                out_bytes(b"touch: updated ");
+                out_bytes(argv[1]);
+                out_bytes(b"\n");
+                out_flush();
+            } else if create(path) == 0 {
+                out_bytes(b"touch: created ");
+                out_bytes(argv[1]);
+                out_bytes(b"\n");
+                out_flush();
+            } else {
+                log("touch: cannot create\n");
+            }
+        }
+        b"cp" => {
+            if count < 3 {
+                log("usage: cp <src> <dst>\n");
+                return false;
+            }
+            let src = core::str::from_utf8(argv[1]).unwrap_or("");
+            let dst = core::str::from_utf8(argv[2]).unwrap_or("");
+            let src_fd = open(src);
+            if src_fd == u64::MAX {
+                log("cp: cannot open source\n");
+                return false;
+            }
+            let mut dst_fd = open(dst);
+            if dst_fd == u64::MAX {
+                if create(dst) != 0 {
+                    close(src_fd);
+                    log("cp: cannot create destination\n");
+                    return false;
+                }
+                dst_fd = open(dst);
+                if dst_fd == u64::MAX {
+                    close(src_fd);
+                    log("cp: cannot open destination\n");
+                    return false;
+                }
+            }
+            let mut buffer = [0u8; 64];
+            let mut failed = false;
+            loop {
+                let got = read(src_fd, &mut buffer);
+                if got == u64::MAX {
+                    failed = true;
+                    break;
+                }
+                if got == 0 {
+                    break;
+                }
+                let written = write(dst_fd, &buffer[..got as usize]);
+                if written == u64::MAX || written != got {
+                    failed = true;
+                    break;
+                }
+            }
+            close(src_fd);
+            close(dst_fd);
+            if failed {
+                log("cp: copy failed\n");
+            } else {
+                out_bytes(b"cp: copied ");
+                out_bytes(argv[1]);
+                out_bytes(b" -> ");
+                out_bytes(argv[2]);
+                out_bytes(b"\n");
+                out_flush();
             }
         }
         b"append" => {

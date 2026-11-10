@@ -388,6 +388,14 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **File utilities in the shell: cp, touch, head, and wc** (F7j, F4, shell): `zc_shell`
+  adds built-in commands `touch` (ensures file existence or creates via `SYS_CREATE`),
+  `cp` (streams file content in 64-byte chunks via `SYS_READ` and `SYS_WRITE`), `head`
+  (previews initial lines up to 10 newlines or EOF), and `wc` (counts lines, words,
+  and bytes). `tools/boot-script.txt` exercises file creation, copying, and inspection
+  under the scripted proof.
+  See [ADR 0098](docs/adr/0098-file-utilities-in-the-shell.md).
+
 - **Explicit service dependencies and failure health states** (F7f, core): `ServiceSpec`
   declares direct service dependencies via `requires: &'static [u32]`. `libs/zc-supervise`
   adds `validate_catalog_dependencies` to enforce an acyclic DAG consistent with boot

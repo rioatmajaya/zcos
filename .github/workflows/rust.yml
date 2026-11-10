@@ -63,7 +63,10 @@ jobs:
         grep -q "task 1: consumer received 2000" build/boot.log
         grep -q "task 1: hello verified" build/boot.log
         grep -q "task 0: manifest ok" build/boot.log
-        grep -q "task 2: Commands: help echo cat ls stat write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc dev uname free ps spawn kill wait notify event session signal raise dmesg date uptime poweroff exit" build/boot.log
+        grep -q "task 2: Commands: help echo cat head wc ls stat touch cp write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc dev uname free ps spawn kill wait notify event session signal raise dmesg date uptime poweroff exit" build/boot.log
+        grep -q "task 2: touch: created /tmp/touched" build/boot.log
+        grep -q "task 2: cp: copied hello.txt -> /tmp/hello-copy.txt" build/boot.log
+        grep -q "task 2: wc: lines 1 words 6 bytes 31 /tmp/hello-copy.txt" build/boot.log
         grep -q "task 2: hello os" build/boot.log
         grep -q "task 2: hello from the ZC OS initramfs" build/boot.log
         grep -q "task 2: hello.txt: file, 31 bytes" build/boot.log
