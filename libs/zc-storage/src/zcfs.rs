@@ -1361,7 +1361,7 @@ mod tests {
         assert!(volume.lookup(ROOT_NODE, b"moved").is_ok());
         volume.mark_clean(&mut io).expect("clean");
 
-        let mut reloaded = Volume::<8>::mount(0, &mut io).expect("remount");
+        let reloaded = Volume::<8>::mount(0, &mut io).expect("remount");
         assert_eq!(reloaded.lookup(ROOT_NODE, b"scratch"), Err(ZcfsError::NotFound));
         let moved = reloaded.lookup(ROOT_NODE, b"moved").expect("moved");
         assert_eq!(moved, scratch);

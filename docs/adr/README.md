@@ -97,6 +97,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0088](0088-a-second-widget-resets-the-first.md) | A second widget resets the first | Accepted |
 | [0089](0089-a-click-gives-a-widget-the-focus.md) | A click gives a widget the focus | Accepted |
 | [0090](0090-the-verifier-replays-what-the-kernel-served.md) | The verifier replays what the kernel served | Accepted |
+| [0091](0091-space-activates-the-focused-widget.md) | Space activates the focused widget at a bare prompt | Accepted |
 
 ## Adding a decision
 

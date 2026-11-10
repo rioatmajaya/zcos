@@ -388,6 +388,14 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **Space activates the focused widget at a bare prompt** (F8, desktop):
+  `Term::activate` unifies pointer clicks and keyboard activation across the
+  placed strip widgets (`BUTTON_ID` and `RESET_ID`). When a widget holds the
+  focus and the terminal input line is at a bare prompt, pressing `Space`
+  activates the focused widget without typing into the transcript; once a
+  command is being typed, `Space` appends as normal, and `Escape` clears the
+  widget focus (`Focus::clear`). All three proof checksums remain unchanged.
+  See [ADR 0091](docs/adr/0091-space-activates-the-focused-widget.md).
 - **A click gives a widget the focus** (F8, desktop): `zc_abi::widget` owns
   the window's `Focus`, keyed by widget id like the press counters — an
   accepted click gives its widget the focus, Tab moves it around the placed

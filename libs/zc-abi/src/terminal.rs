@@ -139,41 +139,81 @@ impl Term {
     /// The button is the window's first widget and the boot proof's first
     /// clickable target; the reset target zeroes the counter when pressed.
     /// Either accepted click gives that widget the focus — the ring it wears
-    /// is part of the pinned frame. The scripted session presses both, and
-    /// the kernel replays the same reports through
-    /// [`crate::session::replay_pointer`] so the label the client paints is
-    /// recomputed, not trusted. A miss changes nothing, so a routed
+    /// is part of the pinned frame — and activates it through the same
+    /// per-widget path a keyboard press on the focused widget uses. The
+    /// scripted session presses both, and the kernel replays the same reports
+    /// through [`crate::session::replay_pointer`] so the label the client
+    /// paints is recomputed, not trusted. A miss changes nothing, so a routed
     /// coordinate that lands beside a widget fails the content check instead
     /// of passing silently.
     pub fn click(&mut self, x: u32, y: u32, w: u32, h: u32) -> Click {
         let layout = widgets(w, h);
         if layout.rect_of(crate::widget::BUTTON_ID).contains(x, y) {
-            let _ = self.buttons.press(crate::widget::BUTTON_ID);
             let _ = self.focused.take(crate::widget::BUTTON_ID, layout.len());
-            return Click::Count;
+            return self.activate(crate::widget::BUTTON_ID);
         }
         if layout.rect_of(crate::widget::RESET_ID).contains(x, y) {
-            let _ = self.buttons.reset(crate::widget::BUTTON_ID);
             let _ = self.focused.take(crate::widget::RESET_ID, layout.len());
-            return Click::Reset;
+            return self.activate(crate::widget::RESET_ID);
         }
         Click::Miss
+    }
+
+    /// Activates widget `id` — the shared effect of a pointer press on it or
+    /// a Space press while it holds the focus.
+    fn activate(&mut self, id: u8) -> Click {
+        match id {
+            crate::widget::BUTTON_ID => {
+                let _ = self.buttons.press(crate::widget::BUTTON_ID);
+                Click::Count
+            }
+            crate::widget::RESET_ID => {
+                let _ = self.buttons.reset(crate::widget::BUTTON_ID);
+                Click::Reset
+            }
+            _ => Click::Miss,
+        }
     }
 
     /// Applies one keystroke, routing the widget layer's keys first.
     ///
     /// Tab never reaches the transcript: it moves the focus around the
     /// widgets the geometry places, the way a click moves it — the focused
-    /// widget's ring repaints on the next frame. Every other byte goes to
+    /// widget's ring repaints on the next frame. When a placed widget holds
+    /// the focus and the input line is at a bare prompt, Space activates that
+    /// widget through [`Self::activate`] instead of appending to the
+    /// transcript; once the user has started typing a command (`echo a b`,
+    /// `cat hello.txt`), Space goes to the command line as usual, and Escape
+    /// clears the widget focus back to `None`. Every other byte goes to
     /// [`Self::push_key`] unchanged. This is the door a real client reads
     /// events through; the transcript-only editor stays [`Self::push_key`],
     /// the way [`run_command_with`] wraps [`run_command`].
     pub fn key(&mut self, ch: u8, w: u32, h: u32) -> Option<Line> {
+        let count = widgets(w, h).len();
         if ch == b'\t' {
-            let _ = self.focused.advance(widgets(w, h).len());
+            let _ = self.focused.advance(count);
             return None;
         }
+        if ch == 0x1b {
+            self.focused.clear();
+            return None;
+        }
+        if ch == b' ' && self.at_bare_prompt() {
+            if let Some(id) = self.focused.id() {
+                if (id as usize) < count {
+                    let _ = self.activate(id);
+                    return None;
+                }
+            }
+        }
         self.push_key(ch)
+    }
+
+    /// Returns whether the current input line holds only the prompt.
+    #[must_use]
+    const fn at_bare_prompt(&self) -> bool {
+        let row = (self.rows - 1) as usize;
+        self.len[row] as usize == PROMPT_LEN
     }
 
     /// Returns the focused widget's id, or `None` when nothing holds focus.
@@ -1132,6 +1172,43 @@ mod tests {
         // Every other byte still goes to the transcript editor.
         assert!(term.key(b'h', w, h).is_none());
         assert_eq!(term.line(0), b"zc> h");
+    }
+
+    #[test]
+    fn space_activates_the_focused_widget_at_a_bare_prompt_and_types_mid_command() {
+        let (w, h) = (426u32, 266u32);
+        let mut term = Term::new();
+        // With no widget focused, Space at a bare prompt goes to the editor.
+        assert!(term.key(b' ', w, h).is_none());
+        assert_eq!(term.line(0), b"zc>  ");
+        assert_eq!(term.clicks(), 0);
+        let _ = term.key(8, w, h);
+        assert_eq!(term.line(0), b"zc> ");
+        // Tab focuses the click button; Space at a bare prompt presses it and
+        // never reaches the transcript.
+        assert!(term.key(b'\t', w, h).is_none());
+        assert_eq!(term.focus(), Some(crate::widget::BUTTON_ID));
+        assert!(term.key(b' ', w, h).is_none());
+        assert!(term.key(b' ', w, h).is_none());
+        assert_eq!(term.clicks(), 2);
+        assert_eq!(term.line(0), b"zc> ");
+        // A second Tab moves focus to the reset target; Space zeroes the
+        // counter through the same activation path a click uses.
+        assert!(term.key(b'\t', w, h).is_none());
+        assert_eq!(term.focus(), Some(crate::widget::RESET_ID));
+        assert!(term.key(b' ', w, h).is_none());
+        assert_eq!(term.clicks(), 0);
+        assert_eq!(term.line(0), b"zc> ");
+        // Once the user starts typing a command, Space goes to the command
+        // line even while a widget still wears the focus ring.
+        for &ch in b"cat hello.txt" {
+            assert!(term.key(ch, w, h).is_none());
+        }
+        assert_eq!(term.line(0), b"zc> cat hello.txt");
+        assert_eq!(term.clicks(), 0);
+        // Escape drops the widget focus back to None.
+        assert!(term.key(0x1b, w, h).is_none());
+        assert_eq!(term.focus(), None);
     }
 
     #[test]

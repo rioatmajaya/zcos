@@ -307,6 +307,11 @@ impl Focus {
         self.id = Some(next as u8);
         true
     }
+
+    /// Clears the focus so no widget wears the ring.
+    pub fn clear(&mut self) {
+        self.id = None;
+    }
 }
 
 impl Default for Focus {
@@ -586,6 +591,8 @@ mod tests {
         assert_eq!(focus.id(), Some(RESET_ID));
         assert!(focus.advance(2));
         assert_eq!(focus.id(), Some(BUTTON_ID), "the focus wraps to the first");
+        focus.clear();
+        assert_eq!(focus.id(), None);
     }
 
     #[test]
