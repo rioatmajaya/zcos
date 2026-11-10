@@ -424,6 +424,13 @@ pub const SYS_SERVICE_LOOKUP: u64 = 61;
 /// or system monitor can observe physical memory usage.
 pub const SYS_MEM_INFO: u64 = 62;
 
+/// Returns the system uptime in milliseconds since timer calibration.
+///
+/// Takes no arguments. Returns the monotonic tick counter. Needs no authority:
+/// elapsed monotonic time is an unprivileged diagnostic available to any task
+/// measuring durations, scheduling work, or reporting system uptime.
+pub const SYS_UPTIME: u64 = 63;
+
 /// Packs a user and group id into the one word [`SYS_GETID`] returns.
 #[must_use]
 pub const fn identity_word(uid: u32, gid: u32) -> u64 {
@@ -565,6 +572,7 @@ mod tests {
         assert_eq!(SYS_SERVICE_PUBLISH, 60);
         assert_eq!(SYS_SERVICE_LOOKUP, 61);
         assert_eq!(SYS_MEM_INFO, 62);
+        assert_eq!(SYS_UPTIME, 63);
         assert_eq!(READDIR_ENTRY, 0);
         assert_eq!(READDIR_END, 1);
     }

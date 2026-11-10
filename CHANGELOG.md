@@ -388,6 +388,12 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **Monotonic time and the uptime command** (F4, core): `SYS_UPTIME` (63) exposes
+  monotonic elapsed milliseconds from the kernel's calibrated local APIC timer tick
+  counter. `zc_user` wraps `uptime`, and `zc_shell` adds the `uptime` command to
+  display formatted elapsed seconds (`uptime: <seconds>.<frac>s`).
+  See [ADR 0096](docs/adr/0096-monotonic-time-and-the-uptime-command.md).
+
 - **Physical memory introspection and the free command** (F4, core): `FrameAllocator`
   tracks allocated physical frames and reports total usable, allocated, and free bytes.
   `SYS_MEM_INFO` (62) exposes physical memory statistics via the 32-byte `MemInfo`

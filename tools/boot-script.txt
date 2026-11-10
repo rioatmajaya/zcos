@@ -93,4 +93,5 @@ uname
 uname -a
 dev
 free
+uptime
 exit

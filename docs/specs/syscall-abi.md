@@ -96,6 +96,7 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 60 | `SYS_SERVICE_PUBLISH` | channel index | 0 | `u64::MAX` |
 | 61 | `SYS_SERVICE_LOOKUP` | name ptr, length | the published channel | `u64::MAX` |
 | 62 | `SYS_MEM_INFO` | `MemInfo` out ptr, length | 0 | `u64::MAX` |
+| 63 | `SYS_UPTIME` | — | monotonic ticks (ms) | — |
 
 ### Clock
 
@@ -112,6 +113,12 @@ never receives a tick, so the proof frame's taskbar is exactly the fixed label
 its checksum was recorded with. A malformed or unavailable RTC falls back to
 that same fixed reading rather than inventing a time; the kernel logs
 `clock: rtc ok`, `clock: rtc unavailable`, or `clock: proof` once.
+
+### Uptime
+
+`SYS_UPTIME` (63) returns monotonic elapsed milliseconds from the kernel's
+calibrated local APIC timer tick counter. It takes no arguments and needs no
+authority. The shell's `uptime` command uses it to report elapsed system time.
 
 ### Service state
 

@@ -2865,6 +2865,10 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             });
             0
         }
+        Ok(Action::Uptime) => {
+            regs.set_result(crate::apic::ticks());
+            0
+        }
         Ok(Action::SurfaceCreate) => {
             let me = tasks.current();
             // Factory gate: only a task the setup granted the factory may mint
