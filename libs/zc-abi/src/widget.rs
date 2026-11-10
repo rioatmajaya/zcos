@@ -43,6 +43,8 @@ const BUTTON_BG: (u8, u8, u8) = (48, 54, 66);
 pub const BUTTON_EDGE: (u8, u8, u8) = (92, 102, 122);
 /// Label color shared by every strip button's glyph.
 pub const BUTTON_FG: (u8, u8, u8) = (235, 238, 245);
+/// Foreground color for static text labels.
+pub const LABEL_FG: (u8, u8, u8) = (176, 182, 192);
 /// The edge color a focused widget wears instead of [`BUTTON_EDGE`].
 pub const FOCUS_EDGE: (u8, u8, u8) = (152, 170, 200);
 /// Click-button width in pixels: twelve 8-pixel cells.
@@ -131,6 +133,107 @@ impl Layout {
         }
         Rect::EMPTY
     }
+
+    /// Returns the kind of widget with `id`, or `None` if not placed.
+    #[must_use]
+    pub const fn kind_of(&self, id: u8) -> Option<WidgetKind> {
+        let mut index = 0;
+        while index < self.len {
+            if self.widgets[index].id == id {
+                return Some(self.widgets[index].kind);
+            }
+            index += 1;
+        }
+        None
+    }
+
+    /// Returns the placed widget containing window-local coordinate `(x, y)`, if any.
+    #[must_use]
+    pub const fn hit_test(&self, x: u32, y: u32) -> Option<Widget> {
+        let mut index = 0;
+        while index < self.len {
+            if self.widgets[index].rect.contains(x, y) {
+                return Some(self.widgets[index]);
+            }
+            index += 1;
+        }
+        None
+    }
+}
+
+/// Specification of a widget in a strip before layout.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WidgetSpec {
+    /// What kind of widget it is.
+    pub kind: WidgetKind,
+    /// Width of the widget in pixels.
+    pub width: u32,
+}
+
+impl WidgetSpec {
+    /// Creates a button widget specification.
+    #[must_use]
+    pub const fn button(width: u32) -> Self {
+        Self {
+            kind: WidgetKind::Button,
+            width,
+        }
+    }
+
+    /// Creates a static text label widget specification.
+    #[must_use]
+    pub const fn label(width: u32) -> Self {
+        Self {
+            kind: WidgetKind::Label,
+            width,
+        }
+    }
+}
+
+/// Places `count` widgets as a bottom-right strip in a `w` x `h` window according to `specs`.
+///
+/// Each widget sits [`WIDGET_GAP`] from its neighbor and [`STRIP_INSET`] from the window's
+/// edge, so the rightmost widget never moves when later widgets join to its left. The strip
+/// stays below `content_top`. A window too small places nothing.
+#[must_use]
+pub const fn strip_specs(
+    w: u32,
+    h: u32,
+    content_top: u32,
+    specs: &[WidgetSpec; WIDGET_SLOTS],
+    count: usize,
+) -> Layout {
+    let count = if count > WIDGET_SLOTS { WIDGET_SLOTS } else { count };
+    if count == 0 {
+        return Layout::empty();
+    }
+    // The strip's total width: every widget plus the gaps between them.
+    let mut total = (count as u32 - 1) * WIDGET_GAP;
+    let mut index = 0;
+    while index < count {
+        total += specs[index].width;
+        index += 1;
+    }
+    if w < total + STRIP_INSET * 2 || h < content_top + STRIP_H + STRIP_INSET {
+        return Layout::empty();
+    }
+    let y = h - STRIP_INSET - STRIP_H;
+    let mut layout = Layout::empty();
+    let mut right = w - STRIP_INSET;
+    index = 0;
+    while index < count {
+        let spec = specs[index];
+        let rect = Rect::new(right - spec.width, y, spec.width, STRIP_H);
+        layout.widgets[index] = Widget {
+            kind: spec.kind,
+            id: index as u8,
+            rect,
+        };
+        layout.len = index + 1;
+        right = right - spec.width - WIDGET_GAP;
+        index += 1;
+    }
+    layout
 }
 
 /// Places `count` widgets as a bottom-right strip in a `w` x `h` window.
@@ -151,37 +254,13 @@ pub const fn strip(
     widths: &[u32; WIDGET_SLOTS],
     count: usize,
 ) -> Layout {
-    let count = if count > WIDGET_SLOTS { WIDGET_SLOTS } else { count };
-    if count == 0 {
-        return Layout::empty();
+    let mut specs = [WidgetSpec::button(0); WIDGET_SLOTS];
+    let mut i = 0;
+    while i < WIDGET_SLOTS {
+        specs[i] = WidgetSpec::button(widths[i]);
+        i += 1;
     }
-    // The strip's total width: every widget plus the gaps between them.
-    let mut total = (count as u32 - 1) * WIDGET_GAP;
-    let mut index = 0;
-    while index < count {
-        total += widths[index];
-        index += 1;
-    }
-    if w < total + STRIP_INSET * 2 || h < content_top + STRIP_H + STRIP_INSET {
-        return Layout::empty();
-    }
-    let y = h - STRIP_INSET - STRIP_H;
-    let mut layout = Layout::empty();
-    let mut right = w - STRIP_INSET;
-    index = 0;
-    while index < count {
-        let width = widths[index];
-        let rect = Rect::new(right - width, y, width, STRIP_H);
-        layout.widgets[index] = Widget {
-            kind: WidgetKind::Button,
-            id: index as u8,
-            rect,
-        };
-        layout.len = index + 1;
-        right = right - width - WIDGET_GAP;
-        index += 1;
-    }
-    layout
+    strip_specs(w, h, content_top, &specs, count)
 }
 
 /// Per-widget press counters for a window's buttons.
@@ -308,6 +387,44 @@ impl Focus {
         true
     }
 
+    /// Focuses `id` if it is a placed button in `layout`.
+    ///
+    /// Non-button widgets (such as labels) refuse focus, ensuring only
+    /// interactive targets take keyboard events.
+    pub fn take_in(&mut self, id: u8, layout: &Layout) -> bool {
+        if let Some(kind) = layout.kind_of(id) {
+            if kind == WidgetKind::Button {
+                self.id = Some(id);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Moves focus to the next focusable (Button) widget in `layout`.
+    ///
+    /// Labels and non-interactive widgets are skipped automatically.
+    pub fn advance_in(&mut self, layout: &Layout) -> bool {
+        if layout.is_empty() {
+            return false;
+        }
+        let count = layout.len();
+        let start = match self.id {
+            None => 0,
+            Some(id) => (id as usize + 1) % count,
+        };
+        let mut i = 0;
+        while i < count {
+            let candidate = (start + i) % count;
+            if layout.widget(candidate).kind == WidgetKind::Button {
+                self.id = Some(candidate as u8);
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
+
     /// Clears the focus so no widget wears the ring.
     pub fn clear(&mut self) {
         self.id = None;
@@ -384,6 +501,34 @@ const fn labeled_button_pixel(
         }
     }
     BUTTON_BG
+}
+
+/// Renders one pixel of a static text label, in widget-local coordinates.
+///
+/// Unlike buttons, a label has no border ring and does not take focus. It paints
+/// `text` using `font`, padded by [`BUTTON_PAD_X`], on top of `bg` color using
+/// `fg` color for the glyphs.
+#[must_use]
+pub const fn label_pixel(
+    font: Font<'_>,
+    text: &[u8],
+    w: u32,
+    bg: (u8, u8, u8),
+    fg: (u8, u8, u8),
+    x: u32,
+    y: u32,
+) -> (u8, u8, u8) {
+    if x >= BUTTON_PAD_X && y >= 1 && y < 1 + GLYPH_H {
+        let col = (x - BUTTON_PAD_X) / GLYPH_W;
+        if (col as usize) < text.len() && col < w / GLYPH_W {
+            let ch = text[col as usize];
+            let gx = x - BUTTON_PAD_X;
+            if glyph_bit(font, ch, y - 1, gx % GLYPH_W) {
+                return fg;
+            }
+        }
+    }
+    bg
 }
 
 /// Returns the label byte at cell `col` of a click button.
@@ -633,5 +778,85 @@ mod tests {
         // the four digits stays blank.
         assert_eq!(button_label_byte(10_000, 11), b'9');
         assert_eq!(button_label_byte(10_000, 12), b' ');
+    }
+
+    #[test]
+    fn strip_specs_places_buttons_and_labels() {
+        let specs = [
+            WidgetSpec::button(BUTTON_W),
+            WidgetSpec::label(64),
+            WidgetSpec::button(RESET_W),
+            WidgetSpec::label(32),
+        ];
+        let layout = strip_specs(500, 200, 24, &specs, 4);
+        assert_eq!(layout.len(), 4);
+        assert_eq!(layout.widget(0).kind, WidgetKind::Button);
+        assert_eq!(layout.widget(1).kind, WidgetKind::Label);
+        assert_eq!(layout.widget(2).kind, WidgetKind::Button);
+        assert_eq!(layout.widget(3).kind, WidgetKind::Label);
+        assert_eq!(layout.kind_of(0), Some(WidgetKind::Button));
+        assert_eq!(layout.kind_of(1), Some(WidgetKind::Label));
+        assert_eq!(layout.kind_of(4), None);
+
+        // Hit-test finds the right widget
+        let w1 = layout.widget(1);
+        let hit = layout.hit_test(w1.rect.x + 10, w1.rect.y + 5);
+        assert_eq!(hit, Some(w1));
+        assert_eq!(layout.hit_test(0, 0), None);
+    }
+
+    #[test]
+    fn focus_skips_labels_and_navigates_buttons() {
+        let specs = [
+            WidgetSpec::button(BUTTON_W),
+            WidgetSpec::label(64),
+            WidgetSpec::button(RESET_W),
+            WidgetSpec::label(32),
+        ];
+        let layout = strip_specs(500, 200, 24, &specs, 4);
+        let mut focus = Focus::new();
+
+        // Label refuses focus
+        assert!(!focus.take_in(1, &layout));
+        assert_eq!(focus.id(), None);
+
+        // Button accepts focus
+        assert!(focus.take_in(0, &layout));
+        assert_eq!(focus.id(), Some(0));
+
+        // Advance skips label (1) directly to next button (2)
+        assert!(focus.advance_in(&layout));
+        assert_eq!(focus.id(), Some(2));
+
+        // Advance skips label (3) and wraps back to button (0)
+        assert!(focus.advance_in(&layout));
+        assert_eq!(focus.id(), Some(0));
+    }
+
+    #[test]
+    fn label_paints_text_on_background() {
+        let font = crate::font::Font::embedded();
+        let bg = (20, 20, 20);
+        let fg = (200, 200, 200);
+        let text = b"Ready";
+
+        // Background outside glyphs is bg
+        assert_eq!(label_pixel(font, text, 64, bg, fg, 0, 0), bg);
+
+        // Glyph area paints fg for lit pixels and bg for unlit
+        let mut saw_fg = false;
+        let mut y = 1;
+        while y < 1 + GLYPH_H {
+            let mut x = BUTTON_PAD_X;
+            while x < BUTTON_PAD_X + 5 * GLYPH_W {
+                let p = label_pixel(font, text, 64, bg, fg, x, y);
+                if p == fg {
+                    saw_fg = true;
+                }
+                x += 1;
+            }
+            y += 1;
+        }
+        assert!(saw_fg, "label pixels did not paint foreground glyphs");
     }
 }

@@ -388,6 +388,14 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **Static text label widget** (F8e, desktop): `zc_abi::widget` adds `WidgetSpec`
+  and `strip_specs` to place static text labels alongside buttons in the widget
+  strip. `Layout::hit_test` unifies coordinate lookups, while `Focus::advance_in`
+  and `Focus::take_in` skip non-interactive labels during Tab navigation and
+  pointer clicks. `label_pixel` renders centered glyphs without borders or focus
+  rings. All three proof checksums remain unchanged.
+  See [ADR 0092](docs/adr/0092-static-text-label-widget.md).
+
 - **Space activates the focused widget at a bare prompt** (F8, desktop):
   `Term::activate` unifies pointer clicks and keyboard activation across the
   placed strip widgets (`BUTTON_ID` and `RESET_ID`). When a widget holds the

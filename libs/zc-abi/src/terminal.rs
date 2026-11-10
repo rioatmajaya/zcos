@@ -148,13 +148,11 @@ impl Term {
     /// of passing silently.
     pub fn click(&mut self, x: u32, y: u32, w: u32, h: u32) -> Click {
         let layout = widgets(w, h);
-        if layout.rect_of(crate::widget::BUTTON_ID).contains(x, y) {
-            let _ = self.focused.take(crate::widget::BUTTON_ID, layout.len());
-            return self.activate(crate::widget::BUTTON_ID);
-        }
-        if layout.rect_of(crate::widget::RESET_ID).contains(x, y) {
-            let _ = self.focused.take(crate::widget::RESET_ID, layout.len());
-            return self.activate(crate::widget::RESET_ID);
+        let Some(widget) = layout.hit_test(x, y) else {
+            return Click::Miss;
+        };
+        if self.focused.take_in(widget.id, &layout) {
+            return self.activate(widget.id);
         }
         Click::Miss
     }
@@ -189,9 +187,9 @@ impl Term {
     /// events through; the transcript-only editor stays [`Self::push_key`],
     /// the way [`run_command_with`] wraps [`run_command`].
     pub fn key(&mut self, ch: u8, w: u32, h: u32) -> Option<Line> {
-        let count = widgets(w, h).len();
+        let layout = widgets(w, h);
         if ch == b'\t' {
-            let _ = self.focused.advance(count);
+            let _ = self.focused.advance_in(&layout);
             return None;
         }
         if ch == 0x1b {
@@ -200,7 +198,7 @@ impl Term {
         }
         if ch == b' ' && self.at_bare_prompt() {
             if let Some(id) = self.focused.id() {
-                if (id as usize) < count {
+                if (id as usize) < layout.len() {
                     let _ = self.activate(id);
                     return None;
                 }
