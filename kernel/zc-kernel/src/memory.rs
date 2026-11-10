@@ -63,6 +63,7 @@ pub struct FrameAllocator<'a> {
     recycled_count: usize,
     reserved: [(u64, u64); RESERVED_RANGES],
     reserved_count: usize,
+    allocated_frames: u64,
 }
 
 impl<'a> FrameAllocator<'a> {
@@ -77,6 +78,7 @@ impl<'a> FrameAllocator<'a> {
             recycled_count: 0,
             reserved: [(0, 0); RESERVED_RANGES],
             reserved_count: 0,
+            allocated_frames: 0,
         }
     }
 
@@ -127,6 +129,7 @@ impl<'a> FrameAllocator<'a> {
     pub fn allocate(&mut self) -> Option<PhysFrame> {
         if self.recycled_count > 0 {
             self.recycled_count -= 1;
+            self.allocated_frames = self.allocated_frames.saturating_add(1);
             return Some(PhysFrame(self.recycled[self.recycled_count]));
         }
         while self.region_index < self.regions.len() {
@@ -172,6 +175,7 @@ impl<'a> FrameAllocator<'a> {
             if frame_end <= end {
                 let frame = PhysFrame(self.next_address);
                 self.next_address = frame_end;
+                self.allocated_frames = self.allocated_frames.saturating_add(1);
                 return Some(frame);
             }
             self.advance_region();
@@ -238,6 +242,7 @@ impl<'a> FrameAllocator<'a> {
                     // Found a run: commit the cursor past it and return.
                     self.region_index = index;
                     self.next_address = run_end;
+                    self.allocated_frames = self.allocated_frames.saturating_add(frames as u64);
                     return Some(PhysFrame(address));
                 }
             }
@@ -265,6 +270,7 @@ impl<'a> FrameAllocator<'a> {
         }
         self.recycled[self.recycled_count] = frame.0;
         self.recycled_count += 1;
+        self.allocated_frames = self.allocated_frames.saturating_sub(1);
         true
     }
 
@@ -272,6 +278,30 @@ impl<'a> FrameAllocator<'a> {
     #[must_use]
     pub const fn recycled_count(&self) -> usize {
         self.recycled_count
+    }
+
+    /// Returns the total usable bytes across all loader regions.
+    #[must_use]
+    pub const fn total_usable_bytes(&self) -> u64 {
+        usable_bytes(self.regions)
+    }
+
+    /// Returns the number of physical frames currently allocated.
+    #[must_use]
+    pub const fn allocated_frames(&self) -> u64 {
+        self.allocated_frames
+    }
+
+    /// Returns the memory in bytes currently allocated.
+    #[must_use]
+    pub const fn used_bytes(&self) -> u64 {
+        self.allocated_frames.saturating_mul(PAGE_SIZE)
+    }
+
+    /// Returns the remaining free memory in bytes.
+    #[must_use]
+    pub const fn free_bytes(&self) -> u64 {
+        self.total_usable_bytes().saturating_sub(self.used_bytes())
     }
 }
 
@@ -403,6 +433,45 @@ mod tests {
         assert_eq!(allocator.allocate(), Some(PhysFrame(0x2000)));
         assert_eq!(allocator.allocate(), Some(PhysFrame(0x3000)));
         assert_eq!(allocator.allocate(), None);
+    }
+
+    #[test]
+    fn memory_tracking_records_allocation_and_free() {
+        let regions = [
+            region(0x1000, PAGE_SIZE * 4, MemoryKind::Usable),
+            region(0x8000, PAGE_SIZE * 2, MemoryKind::Reserved),
+        ];
+        let mut allocator = FrameAllocator::new(&regions);
+        assert_eq!(allocator.total_usable_bytes(), PAGE_SIZE * 4);
+        assert_eq!(allocator.allocated_frames(), 0);
+        assert_eq!(allocator.used_bytes(), 0);
+        assert_eq!(allocator.free_bytes(), PAGE_SIZE * 4);
+
+        let f1 = allocator.allocate().expect("frame 1");
+        assert_eq!(allocator.allocated_frames(), 1);
+        assert_eq!(allocator.used_bytes(), PAGE_SIZE);
+        assert_eq!(allocator.free_bytes(), PAGE_SIZE * 3);
+
+        let f2 = allocator.allocate().expect("frame 2");
+        assert_eq!(allocator.allocated_frames(), 2);
+        assert_eq!(allocator.used_bytes(), PAGE_SIZE * 2);
+
+        assert!(allocator.free(f1));
+        assert_eq!(allocator.allocated_frames(), 1);
+        assert_eq!(allocator.used_bytes(), PAGE_SIZE);
+        assert_eq!(allocator.free_bytes(), PAGE_SIZE * 3);
+
+        // Reallocating consumes the recycled frame and keeps tracking correct.
+        let f3 = allocator.allocate().expect("frame 3");
+        assert_eq!(f3, f1);
+        assert_eq!(allocator.allocated_frames(), 2);
+        assert_eq!(allocator.used_bytes(), PAGE_SIZE * 2);
+
+        assert!(allocator.free(f2));
+        assert!(allocator.free(f3));
+        assert_eq!(allocator.allocated_frames(), 0);
+        assert_eq!(allocator.used_bytes(), 0);
+        assert_eq!(allocator.free_bytes(), PAGE_SIZE * 4);
     }
 
     #[test]

@@ -95,6 +95,7 @@ them. (Scheduling is preemptive, so nothing currently needs `SYS_YIELD`.)
 | 59 | `SYS_RAISE` | target slot, signal | 0 | `u64::MAX` |
 | 60 | `SYS_SERVICE_PUBLISH` | channel index | 0 | `u64::MAX` |
 | 61 | `SYS_SERVICE_LOOKUP` | name ptr, length | the published channel | `u64::MAX` |
+| 62 | `SYS_MEM_INFO` | `MemInfo` out ptr, length | 0 | `u64::MAX` |
 
 ### Clock
 
@@ -222,6 +223,14 @@ needs no capability: the ring is read-only diagnostic data. The ring holds 8
 KiB and drops the oldest bytes when full, so `dmesg` is a snapshot of the most
 recent kernel diagnostics, not an unbounded transcript. The shell's `dmesg`
 command reads the ring once at offset zero and prints it line by line.
+
+### Memory info
+
+`SYS_MEM_INFO` (62) writes one `zc_abi::MemInfo` — 32 bytes: `total_bytes`,
+`used_bytes`, `free_bytes`, and `page_size` (4096) — for the system into `rdi`.
+`rsi` is the buffer length, which must be exactly `zc_abi::MEM_INFO_LEN` (32).
+The call needs no authority: it exposes physical memory allocation statistics
+for tools such as `free` or system monitors.
 
 ### Identity
 `SYS_GETID` (39) returns the caller's user and group ids packed into one word:

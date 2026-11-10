@@ -13,6 +13,7 @@ use core::arch::asm;
 pub use zc_abi::{
     Clock, CLOCK_LIVE,
     OS_ARCH, OS_NAME, OS_NODENAME, OS_RELEASE,
+    MemInfo, MEM_INFO_LEN, SYS_MEM_INFO,
     DIRENT_LEN, DirEntry, FS_ID_ZCFS, FS_OP_STOP, IPC_FS, IPC_SUPERVISE, IPC_WM, IPC_WM_REPLY,
     KIND_CHR, KIND_DIR, KIND_FILE, READDIR_END, READDIR_ENTRY, SERVICE_CATALOG, SERVICE_KIND_EXIT,
     SERVICE_KIND_FAULT, SYS_CAP_DELEGATE, SYS_CHMOD, SYS_CLOCK, SYS_CLOSE, SYS_CREATE, SYS_FB_INFO,
@@ -756,6 +757,18 @@ pub fn task_info(index: u64, info: &mut TaskInfo) -> bool {
         index,
         core::ptr::from_mut(info) as u64,
         TASK_INFO_LEN as u64,
+    ) == 0
+}
+
+/// Reads physical memory information into `info`.
+///
+/// Returns `true` on success, `false` on error.
+#[inline(always)]
+pub fn mem_info(info: &mut MemInfo) -> bool {
+    syscall2(
+        SYS_MEM_INFO,
+        core::ptr::from_mut(info) as u64,
+        MEM_INFO_LEN as u64,
     ) == 0
 }
 

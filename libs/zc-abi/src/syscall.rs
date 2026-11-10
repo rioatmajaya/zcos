@@ -415,6 +415,15 @@ pub const SYS_SERVICE_PUBLISH: u64 = 60;
 /// service is down, or it has published nothing since its last spawn.
 pub const SYS_SERVICE_LOOKUP: u64 = 61;
 
+/// Reads physical memory information into a caller buffer.
+///
+/// Arguments are the [`crate::MemInfo`] out pointer (`rdi`) and the buffer
+/// length (`rsi`), which must be exactly [`crate::MEM_INFO_LEN`]. Returns `0`
+/// on success and `u64::MAX` for an invalid buffer or length. The call needs no
+/// authority: it provides diagnostic memory visibility so a `free`-style tool
+/// or system monitor can observe physical memory usage.
+pub const SYS_MEM_INFO: u64 = 62;
+
 /// Packs a user and group id into the one word [`SYS_GETID`] returns.
 #[must_use]
 pub const fn identity_word(uid: u32, gid: u32) -> u64 {
@@ -553,6 +562,9 @@ mod tests {
         assert_eq!(SYS_SIGNAL, 57);
         assert_eq!(SYS_SIGRETURN, 58);
         assert_eq!(SYS_RAISE, 59);
+        assert_eq!(SYS_SERVICE_PUBLISH, 60);
+        assert_eq!(SYS_SERVICE_LOOKUP, 61);
+        assert_eq!(SYS_MEM_INFO, 62);
         assert_eq!(READDIR_ENTRY, 0);
         assert_eq!(READDIR_END, 1);
     }

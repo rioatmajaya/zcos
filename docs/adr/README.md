@@ -101,6 +101,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0092](0092-static-text-label-widget.md) | Static text label widget | Accepted |
 | [0093](0093-the-shell-inspects-the-system-clock.md) | The shell inspects the system clock | Accepted |
 | [0094](0094-system-and-device-inspection-in-the-shell.md) | System and device inspection in the shell | Accepted |
+| [0095](0095-physical-memory-introspection-and-the-free-command.md) | Physical memory introspection and the free command | Accepted |
 
 ## Adding a decision
 

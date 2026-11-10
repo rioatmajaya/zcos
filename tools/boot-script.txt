@@ -92,4 +92,5 @@ date
 uname
 uname -a
 dev
+free
 exit

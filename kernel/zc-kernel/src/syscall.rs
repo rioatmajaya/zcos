@@ -14,6 +14,7 @@ use zc_abi::{
     SYS_SERVICE_LOOKUP, SYS_SERVICE_PUBLISH,
     SYS_SERVICE_READY, SYS_SERVICE_START, SYS_SERVICE_STATUS, SYS_SERVICE_STOP, SYS_SESSION,
     SYS_STAT,
+    SYS_MEM_INFO,
     SYS_SURFACE_CREATE, SYS_SURFACE_DESTROY,
     SYS_SPAWN, SYS_SURFACE_MAP, SYS_TASK_EXIT, SYS_TASK_INFO, SYS_TERM_READ, SYS_UMOUNT, SYS_UNLINK,
     SYS_SYNC, SYS_WAIT, SYS_KILL, SYS_NOTIFY, SYS_EVENT_WAIT, SYS_SESSION_CREATE,
@@ -151,6 +152,8 @@ pub enum Action {
     ServiceLookup,
     /// Copy the kernel's diagnostic log ring into a caller buffer.
     LogRead,
+    /// Read physical memory information into a caller buffer.
+    MemInfo,
 }
 
 /// Maps a raw syscall number to its [`Action`].
@@ -202,6 +205,7 @@ pub const fn dispatch(number: u64) -> Result<Action, SyscallError> {
         SYS_SERVICE_READY => Ok(Action::ServiceReady),
         SYS_SERVICE_PUBLISH => Ok(Action::ServicePublish),
         SYS_SERVICE_LOOKUP => Ok(Action::ServiceLookup),
+        SYS_MEM_INFO => Ok(Action::MemInfo),
         SYS_LOG_READ => Ok(Action::LogRead),
         SYS_SERVICE_HEALTH => Ok(Action::ServiceHealth),
         SYS_TASK_INFO => Ok(Action::TaskInfo),
@@ -274,6 +278,7 @@ mod tests {
         assert_eq!(dispatch(SYS_SERVICE_READY), Ok(Action::ServiceReady));
         assert_eq!(dispatch(SYS_SERVICE_PUBLISH), Ok(Action::ServicePublish));
         assert_eq!(dispatch(SYS_SERVICE_LOOKUP), Ok(Action::ServiceLookup));
+        assert_eq!(dispatch(SYS_MEM_INFO), Ok(Action::MemInfo));
         assert_eq!(dispatch(SYS_LOG_READ), Ok(Action::LogRead));
         assert_eq!(dispatch(SYS_SERVICE_HEALTH), Ok(Action::ServiceHealth));
         assert_eq!(dispatch(SYS_TASK_INFO), Ok(Action::TaskInfo));
@@ -297,8 +302,8 @@ mod tests {
 
     #[test]
     fn unknown_numbers_are_rejected() {
-        // The last assigned number is SYS_SERVICE_LOOKUP (61), so probe past it.
-        assert_eq!(dispatch(62), Err(SyscallError::InvalidNumber));
+        // The last assigned number is SYS_MEM_INFO (62), so probe past it.
+        assert_eq!(dispatch(63), Err(SyscallError::InvalidNumber));
         assert_eq!(
             dispatch(u64::MAX),
             Err(SyscallError::InvalidNumber)

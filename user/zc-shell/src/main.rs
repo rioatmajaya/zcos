@@ -49,10 +49,10 @@
 #![allow(unsafe_code)]
 
 use zc_user::{
-    Clock, CLOCK_LIVE, OS_ARCH, OS_NAME, OS_NODENAME, OS_RELEASE, clock,
+    Clock, CLOCK_LIVE, MemInfo, OS_ARCH, OS_NAME, OS_NODENAME, OS_RELEASE, clock,
     DIRENT_LEN, DirEntry, FS_ID_ZCFS, FS_OP_STOP, IPC_FS, KIND_CHR, KIND_DIR, READDIR_END,
     READDIR_ENTRY, SERVICE_CATALOG, Stat, TASK_SLOTS, TaskInfo, chmod, close, create, getid,
-    identity_gid, identity_uid, log, log_parts, log_read, mount, open, poweroff, read, readdir,
+    identity_gid, identity_uid, log, log_parts, log_read, mem_info, mount, open, poweroff, read, readdir,
     send_to, serial_read, service_faults, service_health, service_is_ready, service_is_up,
     service_lookup, service_restarts, session, spawn, stat, task_exit_with, task_info, umount,
     unlink, mkdir, rmdir,
@@ -319,7 +319,7 @@ fn run(line: &[u8]) -> bool {
     }
     match argv[0] {
         b"help" => {
-            log("Commands: help echo cat ls stat write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc dev uname ps spawn kill wait notify event session signal raise dmesg date poweroff exit\n");
+            log("Commands: help echo cat ls stat write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc dev uname free ps spawn kill wait notify event session signal raise dmesg date poweroff exit\n");
         }
         b"echo" => {
             for index in 1..count {
@@ -834,6 +834,26 @@ fn run(line: &[u8]) -> bool {
             }
             out_bytes(b"\n");
             out_flush();
+        }
+        b"free" | b"mem" => {
+            let mut info = MemInfo {
+                total_bytes: 0,
+                used_bytes: 0,
+                free_bytes: 0,
+                page_size: 0,
+            };
+            if mem_info(&mut info) {
+                out_bytes(b"mem: total ");
+                out_u64(info.total_bytes / 1024);
+                out_bytes(b" KB used ");
+                out_u64(info.used_bytes / 1024);
+                out_bytes(b" KB free ");
+                out_u64(info.free_bytes / 1024);
+                out_bytes(b" KB\n");
+                out_flush();
+            } else {
+                log("free: failed to read memory info\n");
+            }
         }
         b"ps" => {
             // The registry view is read-only: the shell learns each slot's

@@ -388,6 +388,13 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **Physical memory introspection and the free command** (F4, core): `FrameAllocator`
+  tracks allocated physical frames and reports total usable, allocated, and free bytes.
+  `SYS_MEM_INFO` (62) exposes physical memory statistics via the 32-byte `MemInfo`
+  structure. `zc_user` wraps `mem_info`, and `zc_shell` adds `free` (and `mem`) to
+  display memory usage in kilobytes (`mem: total <N> KB used <N> KB free <N> KB`).
+  See [ADR 0095](docs/adr/0095-physical-memory-introspection-and-the-free-command.md).
+
 - **System and device inspection in the shell** (F7, shell): `zc_shell` adds
   `uname` and `dev` commands. `uname` prints system metadata (`ZC OS`, `zcos`,
   `0.1.0`, `x86_64`) supporting standard POSIX options (`-s`, `-n`, `-r`, `-m`,

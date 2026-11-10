@@ -2841,6 +2841,30 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
             regs.set_result(crate::serial::log_read(offset, out) as u64);
             0
         }
+        Ok(Action::MemInfo) => {
+            const INFO_LEN: u64 = zc_abi::MEM_INFO_LEN as u64;
+            if regs.rsi != INFO_LEN {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
+            let Some(out) = validate_user_slice_mut(tasks, regs.rdi, INFO_LEN) else {
+                regs.set_result(u64::MAX);
+                return 0;
+            };
+            let alloc = crate::frames();
+            let info = zc_abi::MemInfo {
+                total_bytes: alloc.total_usable_bytes(),
+                used_bytes: alloc.used_bytes(),
+                free_bytes: alloc.free_bytes(),
+                page_size: zc_kernel::memory::PAGE_SIZE,
+            };
+            regs.set_result(if info.write_into(out).is_some() {
+                0
+            } else {
+                u64::MAX
+            });
+            0
+        }
         Ok(Action::SurfaceCreate) => {
             let me = tasks.current();
             // Factory gate: only a task the setup granted the factory may mint
