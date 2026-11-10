@@ -4,7 +4,7 @@
 //! backspace support, and runs `help`, `echo`, `cat`, `ls`, `stat`, `write`,
 //! `append`, `rm`, `mkdir`, `rmdir`, `mv`, `sync`, `tmp`, `persist`, `chmod`,
 //! `mount`, `umount`, `id`, `svc`, `ps`, `spawn`, `kill`, `wait`, `notify`,
-//! `event`, `session`, `dmesg`, and `exit`. Output goes
+//! `event`, `session`, `signal`, `raise`, `dmesg`, `date`, `poweroff`, and `exit`. Output goes
 //! through the log syscall, so the transcript appears in the kernel serial log.
 //!
 //! `id` asks the kernel for this task's user and group ids plus its session.
@@ -49,6 +49,7 @@
 #![allow(unsafe_code)]
 
 use zc_user::{
+    Clock, CLOCK_LIVE, clock,
     DIRENT_LEN, DirEntry, FS_ID_ZCFS, FS_OP_STOP, IPC_FS, KIND_CHR, KIND_DIR, READDIR_END,
     READDIR_ENTRY, SERVICE_CATALOG, Stat, TASK_SLOTS, TaskInfo, chmod, close, create, getid,
     identity_gid, identity_uid, log, log_parts, log_read, mount, open, poweroff, read, readdir,
@@ -318,7 +319,7 @@ fn run(line: &[u8]) -> bool {
     }
     match argv[0] {
         b"help" => {
-            log("Commands: help echo cat ls stat write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc ps spawn kill wait notify event session signal raise dmesg poweroff exit\n");
+            log("Commands: help echo cat ls stat write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc ps spawn kill wait notify event session signal raise dmesg date poweroff exit\n");
         }
         b"echo" => {
             for index in 1..count {
@@ -938,7 +939,7 @@ fn run(line: &[u8]) -> bool {
             out_flush();
         }
         b"signal" => {
-            if signal(1, zc_signal_handler as u64) == u64::MAX {
+            if signal(1, zc_signal_handler as *const () as u64) == u64::MAX {
                 log("signal: cannot register\n");
                 return false;
             }
@@ -972,6 +973,21 @@ fn run(line: &[u8]) -> bool {
                 log("dmesg: cannot read\n");
             } else {
                 print_lines(&buffer[..got as usize]);
+            }
+        }
+        b"date" | b"time" => {
+            let word = clock();
+            if let Some(clock) = Clock::from_word(word) {
+                out_bytes(b"date: ");
+                out_bytes(clock.label(true).as_bytes());
+                if (word & CLOCK_LIVE) != 0 {
+                    out_bytes(b" (rtc)\n");
+                } else {
+                    out_bytes(b" (proof)\n");
+                }
+                out_flush();
+            } else {
+                log("date: bad clock reading\n");
             }
         }
         b"exit" => {

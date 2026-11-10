@@ -260,15 +260,31 @@ impl MountTable {
         }
     }
 
+    /// Returns whether `point` is currently mounted.
+    #[must_use]
+    pub fn is_mounted(&self, point: &[u8]) -> bool {
+        let Ok(wanted) = normalize_path(point) else {
+            return false;
+        };
+        self.mounts
+            .iter()
+            .flatten()
+            .any(|mount| normalize_path(mount.point) == Ok(wanted))
+    }
+
     /// Mounts `fs` at `point`, which must be `'static` like the filesystem.
     ///
-    /// Returns [`VfsError::TableFull`] when no slot is free.
+    /// Returns [`VfsError::TableFull`] when no slot is free, or
+    /// [`VfsError::PermissionDenied`] when `point` is already mounted.
     pub fn mount(
         &mut self,
         point: &'static [u8],
         fs: &'static dyn FileSystem,
     ) -> Result<(), VfsError> {
-        normalize_path(point)?;
+        let _ = normalize_path(point)?;
+        if self.is_mounted(point) {
+            return Err(VfsError::PermissionDenied);
+        }
         let Some(slot) = self.mounts.iter_mut().find(|slot| slot.is_none()) else {
             return Err(VfsError::TableFull);
         };
@@ -1327,12 +1343,23 @@ mod tests {
     }
 
     #[test]
+    fn mount_refuses_duplicate_mount_point() {
+        let mut table = MountTable::new();
+        table.mount(b"/data", &DATA_FS).expect("mount");
+        assert_eq!(table.mount(b"/data", &DATA_FS), Err(VfsError::PermissionDenied));
+        assert_eq!(table.mount(b"data", &DATA_FS), Err(VfsError::PermissionDenied));
+    }
+
+    #[test]
     fn mount_table_fills_up() {
         let mut table = MountTable::new();
-        for _ in 0..MAX_MOUNTS {
-            table.mount(b"/", &ROOT_FS).expect("mount");
+        let paths: [&'static [u8]; MAX_MOUNTS] = [
+            b"/a", b"/b", b"/c", b"/d", b"/e", b"/f", b"/g", b"/h",
+        ];
+        for path in paths {
+            table.mount(path, &ROOT_FS).expect("mount");
         }
-        assert_eq!(table.mount(b"/", &ROOT_FS), Err(VfsError::TableFull));
+        assert_eq!(table.mount(b"/extra", &ROOT_FS), Err(VfsError::TableFull));
     }
 
     #[test]

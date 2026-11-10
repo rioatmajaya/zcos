@@ -2107,6 +2107,12 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                 regs.set_result(u64::MAX);
                 return 0;
             }
+            // SAFETY: mounted once during setup; this task owns the table.
+            let mounts = unsafe { &mut *core::ptr::addr_of_mut!(MOUNTS) };
+            if mounts.is_mounted(b"/data") {
+                regs.set_result(u64::MAX);
+                return 0;
+            }
             match crate::zcfs_proxy::mount() {
                 Ok(()) => {}
                 Err(VfsError::WouldBlock) => {
@@ -2118,8 +2124,6 @@ pub unsafe extern "C" fn user_syscall(regs: *mut SyscallRegs, frame: *mut IrqFra
                     return 0;
                 }
             }
-            // SAFETY: mounted once during setup; this task owns the table.
-            let mounts = unsafe { &mut *core::ptr::addr_of_mut!(MOUNTS) };
             match mounts.mount(b"/data", &crate::zcfs_proxy::PROXY) {
                 Ok(()) => {
                     regs.set_result(0);
@@ -3843,7 +3847,7 @@ static mut WINDOW_LS_ENTRIES: u32 = 0;
 /// many entries per directory. The terminal lists `/`; the file manager walks
 /// `/`, `/dev`, and back — a handful of paths, a dozen entries each.
 const LS_PATH_SLOTS: usize = 4;
-const LS_PATH_ENTRIES: usize = 16;
+const LS_PATH_ENTRIES: usize = 24;
 /// The longest recorded listing path.
 const LS_PATH_CAP: usize = 32;
 

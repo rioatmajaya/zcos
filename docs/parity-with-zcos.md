@@ -314,7 +314,7 @@ Applications and the host runner are not part of this order. They come later.
 
 **Goal.** A shell that can bring up, inspect, and shut down the system.
 
-- Complete the command set for files, mounts, processes, services, devices, logs, time, and power. `svc` now inspects the service catalog with a read-only grant; processes, devices, logs, and time have no command yet.
+- Complete the command set for files, mounts, processes, services, devices, logs, time, and power. `svc` inspects the service catalog with a read-only grant; processes (`ps`, `spawn`, `kill`, `wait`), logs (`dmesg`), time (`date`/`time`, [ADR 0093](adr/0093-the-shell-inspects-the-system-clock.md)), and power (`poweroff`) are done; device inspection is still open.
 - Add pipelines, redirection, background jobs, history, completion, and scripts only as far as the core services can support them.
 - Share one command layer between the serial shell and the window terminal.
 - Report failures through exit status and stderr, not only a printed line.

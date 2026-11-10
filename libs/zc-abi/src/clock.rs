@@ -131,6 +131,12 @@ impl ClockLabel {
         core::str::from_utf8(&self.bytes[..self.len]).unwrap_or("12:00")
     }
 
+    /// Returns the label as an ASCII byte slice.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+
     /// Number of characters in the label.
     #[must_use]
     pub const fn len(&self) -> usize {
@@ -163,6 +169,7 @@ mod tests {
         assert_eq!(clock.label(false).as_str(), "01:02");
         assert_eq!(clock.label(false).len(), 5);
         assert_eq!(clock.label(true).as_str(), "01:02:03");
+        assert_eq!(clock.label(true).as_bytes(), b"01:02:03");
         assert_eq!(clock.label(true).len(), 8);
     }
 

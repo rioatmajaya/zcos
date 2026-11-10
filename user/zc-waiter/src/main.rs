@@ -42,7 +42,7 @@ pub unsafe extern "C" fn _start() -> ! {
     log("waiter running\n");
     // The handler is registered before the task announces itself, so the
     // shell's raise cannot arrive before there is somewhere to run it.
-    if signal(1, zc_waiter_signal_handler as u64) == u64::MAX {
+    if signal(1, zc_waiter_signal_handler as *const () as u64) == u64::MAX {
         abort();
     }
     if notify(SHELL_SLOT, READY) == u64::MAX {

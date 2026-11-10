@@ -388,6 +388,16 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **The shell inspects the system clock** (F7, shell): `zc_shell` adds `date`
+  and `time` commands backed by `SYS_CLOCK` and `zc_abi::Clock`. In interactive
+  and live boots, the command reports `date: HH:MM:SS (rtc)`; under proof
+  harnesses with a fixed clock, it reports `date: HH:MM:SS (proof)`. `ClockLabel`
+  exposes `as_bytes()` to allow allocation-free formatting. The mount table
+  also rejects duplicate mounts of the same path, and `LS_PATH_ENTRIES` is
+  expanded to 24 entries to prevent truncation in directory listings. All three
+  proof checksums remain unchanged. See
+  [ADR 0093](docs/adr/0093-the-shell-inspects-the-system-clock.md).
+
 - **Static text label widget** (F8e, desktop): `zc_abi::widget` adds `WidgetSpec`
   and `strip_specs` to place static text labels alongside buttons in the widget
   strip. `Layout::hit_test` unifies coordinate lookups, while `Focus::advance_in`

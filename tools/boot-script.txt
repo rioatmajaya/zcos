@@ -88,4 +88,5 @@ wait 4
 ps
 spawn .hello-c.elf
 dmesg
+date
 exit
