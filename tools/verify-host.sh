@@ -49,10 +49,10 @@ if command -v rustup >/dev/null 2>&1; then
     fi
 fi
 
-if [ -d /usr/share/OVMF ] || [ -d /usr/share/ovmf ]; then
+if [ -d /usr/share/OVMF ] || [ -d /usr/share/ovmf ] || [ -d /usr/share/edk2 ] || [ -d /usr/share/edk2-ovmf ]; then
     printf 'found: OVMF firmware directory\n'
 else
-    printf 'missing: OVMF firmware (install your distribution package, often ovmf)\n' >&2
+    printf 'missing: OVMF firmware (install your distribution package, often ovmf or edk2-ovmf)\n' >&2
     missing=1
 fi
 

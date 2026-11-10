@@ -62,8 +62,8 @@ fulllog="build/poweroff-serial.log"
 
 # Locate a 4 MB OVMF code/variables pair, as run-qemu.sh does.
 ovmf=""
-for dir in /usr/share/OVMF /usr/share/ovmf /usr/share/edk2*; do
-    for pair in "OVMF_CODE.fd:OVMF_VARS.fd" "OVMF_CODE_4M.fd:OVMF_VARS_4M.fd"; do
+for dir in /usr/share/OVMF /usr/share/ovmf /usr/share/edk2* /usr/share/edk2*/x64; do
+    for pair in "OVMF_CODE.fd:OVMF_VARS.fd" "OVMF_CODE_4M.fd:OVMF_VARS_4M.fd" "OVMF_CODE.4m.fd:OVMF_VARS.4m.fd"; do
         code=${pair%%:*}
         vars=${pair##*:}
         if [ -f "$dir/$code" ] && [ -f "$dir/$vars" ]; then

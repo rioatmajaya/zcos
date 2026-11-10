@@ -1,7 +1,7 @@
 # Carry-over from the earlier ZC OS
 
 Before this open-source rewrite there was a closed prototype at
-`~/Desktop/Project/new-os/zcos`. It reached bare metal (USB boot, working
+`/home/rhiiyu/Desktop/Dataku/OS_Build/zcos-original`. It reached bare metal (USB boot, working
 keyboard) and built the hard parts of an OS — a capability kernel, IPC, a
 compositor, a GUI toolkit, apps, a signed binary format, and a host emulator.
 Its one failure was strategic: every driver was written by hand, and that did

@@ -84,7 +84,11 @@ vars_src=""
 for pair in \
     "/usr/share/OVMF/OVMF_CODE_4M.fd:/usr/share/OVMF/OVMF_VARS_4M.fd" \
     "/usr/share/OVMF/OVMF_CODE.fd:/usr/share/OVMF/OVMF_VARS.fd" \
-    "/usr/share/ovmf/OVMF_CODE.fd:/usr/share/ovmf/OVMF_VARS.fd"
+    "/usr/share/ovmf/OVMF_CODE.fd:/usr/share/ovmf/OVMF_VARS.fd" \
+    "/usr/share/edk2/x64/OVMF_CODE.4m.fd:/usr/share/edk2/x64/OVMF_VARS.4m.fd" \
+    "/usr/share/edk2-ovmf/x64/OVMF_CODE.4m.fd:/usr/share/edk2-ovmf/x64/OVMF_VARS.4m.fd" \
+    "/usr/share/edk2/x64/OVMF_CODE.fd:/usr/share/edk2/x64/OVMF_VARS.fd" \
+    "/usr/share/edk2-ovmf/x64/OVMF_CODE.fd:/usr/share/edk2-ovmf/x64/OVMF_VARS.fd"
 do
     candidate_code=${pair%%:*}
     candidate_vars=${pair##*:}
@@ -95,7 +99,7 @@ do
     fi
 done
 if [ -z "$code" ]; then
-    echo "error: no OVMF firmware found (install the ovmf package)" >&2
+    echo "error: no OVMF firmware found (install the ovmf or edk2-ovmf package)" >&2
     exit 1
 fi
 
