@@ -862,14 +862,29 @@ mod tests {
 
     /// A writable filesystem: root holds `a` (a file) and `dir` (a directory),
     /// and `create` counts how many names it has been asked to make.
-    struct WritableFs;
+    struct WritableFs {
+        created: AtomicU32,
+        removed: AtomicU32,
+        mkdirs: AtomicU32,
+        rmdirs: AtomicU32,
+        renames: AtomicU32,
+    }
 
-    static WRITABLE_FS: WritableFs = WritableFs;
-    static CREATED: AtomicU32 = AtomicU32::new(0);
-    static REMOVED: AtomicU32 = AtomicU32::new(0);
-    static MKDIRS: AtomicU32 = AtomicU32::new(0);
-    static RMDIRS: AtomicU32 = AtomicU32::new(0);
-    static RENAMES: AtomicU32 = AtomicU32::new(0);
+    impl WritableFs {
+        const fn new() -> Self {
+            Self {
+                created: AtomicU32::new(0),
+                removed: AtomicU32::new(0),
+                mkdirs: AtomicU32::new(0),
+                rmdirs: AtomicU32::new(0),
+                renames: AtomicU32::new(0),
+            }
+        }
+    }
+
+    fn writable_fs() -> &'static WritableFs {
+        std::boxed::Box::leak(std::boxed::Box::new(WritableFs::new()))
+    }
 
     impl FileSystem for WritableFs {
         fn name(&self) -> &str {
@@ -921,7 +936,7 @@ mod tests {
             if name.is_empty() {
                 return Err(VfsError::BadPath);
             }
-            CREATED.fetch_add(1, Ordering::Relaxed);
+            self.created.fetch_add(1, Ordering::Relaxed);
             Ok(3 + dir)
         }
 
@@ -929,7 +944,7 @@ mod tests {
             if name.is_empty() {
                 return Err(VfsError::BadPath);
             }
-            REMOVED.fetch_add(1, Ordering::Relaxed);
+            self.removed.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
 
@@ -943,7 +958,7 @@ mod tests {
             if name.is_empty() {
                 return Err(VfsError::BadPath);
             }
-            MKDIRS.fetch_add(1, Ordering::Relaxed);
+            self.mkdirs.fetch_add(1, Ordering::Relaxed);
             Ok(100 + dir)
         }
 
@@ -951,7 +966,7 @@ mod tests {
             if name.is_empty() {
                 return Err(VfsError::BadPath);
             }
-            RMDIRS.fetch_add(1, Ordering::Relaxed);
+            self.rmdirs.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
 
@@ -966,7 +981,7 @@ mod tests {
             if old_name.is_empty() || new_name.is_empty() {
                 return Err(VfsError::BadPath);
             }
-            RENAMES.fetch_add(1, Ordering::Relaxed);
+            self.renames.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
     }
@@ -1016,7 +1031,7 @@ mod tests {
     fn create_resolves_the_parent_then_creates() {
         let mut table = MountTable::new();
         table.mount(b"/", &ROOT_FS).expect("root mount");
-        table.mount(b"/data", &WRITABLE_FS).expect("data mount");
+        table.mount(b"/data", writable_fs()).expect("data mount");
 
         // Directly under the mount point: the parent is the mount root.
         assert!(table.create(b"/data/new", 0o644, Identity::ROOT).is_ok());
@@ -1044,28 +1059,28 @@ mod tests {
     #[test]
     fn create_checks_write_and_search_on_the_parent() {
         let mut table = MountTable::new();
-        table.mount(b"/data", &WRITABLE_FS).expect("mount");
+        let fs = writable_fs();
+        table.mount(b"/data", fs).expect("mount");
 
         // The test filesystem's root is `0755` owned by root. A non-owner has
         // neither write nor search, so the create is refused before the
         // filesystem is asked.
         let stranger = Identity::new(7, 9);
-        let before = CREATED.load(Ordering::Relaxed);
         assert_eq!(
             table.create(b"/data/new", 0o644, stranger),
             Err(VfsError::PermissionDenied)
         );
-        assert_eq!(CREATED.load(Ordering::Relaxed), before);
+        assert_eq!(fs.created.load(Ordering::Relaxed), 0);
         // Root bypasses the parent check and reaches the filesystem.
         assert!(table.create(b"/data/new", 0o644, Identity::ROOT).is_ok());
-        assert_eq!(CREATED.load(Ordering::Relaxed), before + 1);
+        assert_eq!(fs.created.load(Ordering::Relaxed), 1);
     }
 
     #[test]
     fn unlink_resolves_the_parent_then_removes() {
         let mut table = MountTable::new();
         table.mount(b"/", &ROOT_FS).expect("root mount");
-        table.mount(b"/data", &WRITABLE_FS).expect("data mount");
+        table.mount(b"/data", writable_fs()).expect("data mount");
 
         assert!(table.unlink(b"/data/gone", Identity::ROOT).is_ok());
         // Below a directory: the parent is resolved through `lookup` first.
@@ -1098,25 +1113,25 @@ mod tests {
     #[test]
     fn unlink_checks_write_and_search_on_the_parent() {
         let mut table = MountTable::new();
-        table.mount(b"/data", &WRITABLE_FS).expect("mount");
+        let fs = writable_fs();
+        table.mount(b"/data", fs).expect("mount");
 
         let stranger = Identity::new(7, 9);
-        let before = REMOVED.load(Ordering::Relaxed);
         assert_eq!(
             table.unlink(b"/data/gone", stranger),
             Err(VfsError::PermissionDenied)
         );
-        assert_eq!(REMOVED.load(Ordering::Relaxed), before);
+        assert_eq!(fs.removed.load(Ordering::Relaxed), 0);
         // Root bypasses the parent check and reaches the filesystem.
         assert!(table.unlink(b"/data/gone", Identity::ROOT).is_ok());
-        assert_eq!(REMOVED.load(Ordering::Relaxed), before + 1);
+        assert_eq!(fs.removed.load(Ordering::Relaxed), 1);
     }
 
     #[test]
     fn mkdir_resolves_the_parent_then_creates() {
         let mut table = MountTable::new();
         table.mount(b"/", &ROOT_FS).expect("root mount");
-        table.mount(b"/data", &WRITABLE_FS).expect("data mount");
+        table.mount(b"/data", writable_fs()).expect("data mount");
 
         assert!(table.mkdir(b"/data/sub", 0o755, Identity::ROOT).is_ok());
         // Below a directory: the parent is resolved through `lookup` first.
@@ -1136,16 +1151,16 @@ mod tests {
     #[test]
     fn mkdir_checks_write_and_search_on_the_parent() {
         let mut table = MountTable::new();
-        table.mount(b"/data", &WRITABLE_FS).expect("mount");
+        let fs = writable_fs();
+        table.mount(b"/data", fs).expect("mount");
         let stranger = Identity::new(7, 9);
-        let before = MKDIRS.load(Ordering::Relaxed);
         assert_eq!(
             table.mkdir(b"/data/sub", 0o755, stranger),
             Err(VfsError::PermissionDenied)
         );
-        assert_eq!(MKDIRS.load(Ordering::Relaxed), before);
+        assert_eq!(fs.mkdirs.load(Ordering::Relaxed), 0);
         assert!(table.mkdir(b"/data/sub", 0o755, Identity::ROOT).is_ok());
-        assert_eq!(MKDIRS.load(Ordering::Relaxed), before + 1);
+        assert_eq!(fs.mkdirs.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -1160,16 +1175,16 @@ mod tests {
     #[test]
     fn rmdir_checks_write_and_search_on_the_parent() {
         let mut table = MountTable::new();
-        table.mount(b"/data", &WRITABLE_FS).expect("mount");
+        let fs = writable_fs();
+        table.mount(b"/data", fs).expect("mount");
         let stranger = Identity::new(7, 9);
-        let before = RMDIRS.load(Ordering::Relaxed);
         assert_eq!(
             table.rmdir(b"/data/sub", stranger),
             Err(VfsError::PermissionDenied)
         );
-        assert_eq!(RMDIRS.load(Ordering::Relaxed), before);
+        assert_eq!(fs.rmdirs.load(Ordering::Relaxed), 0);
         assert!(table.rmdir(b"/data/sub", Identity::ROOT).is_ok());
-        assert_eq!(RMDIRS.load(Ordering::Relaxed), before + 1);
+        assert_eq!(fs.rmdirs.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -1185,7 +1200,7 @@ mod tests {
     fn rename_rejects_a_cross_mount_move() {
         let mut table = MountTable::new();
         table.mount(b"/", &ROOT_FS).expect("root mount");
-        table.mount(b"/data", &WRITABLE_FS).expect("data mount");
+        table.mount(b"/data", writable_fs()).expect("data mount");
         // Moving between filesystems would be a copy, so it is refused rather
         // than half-done.
         assert_eq!(
@@ -1197,18 +1212,18 @@ mod tests {
     #[test]
     fn rename_checks_write_and_search_on_both_parents() {
         let mut table = MountTable::new();
-        table.mount(b"/data", &WRITABLE_FS).expect("mount");
+        let fs = writable_fs();
+        table.mount(b"/data", fs).expect("mount");
         let stranger = Identity::new(7, 9);
-        let before = RENAMES.load(Ordering::Relaxed);
         // The test filesystem's root is 0755 owned by root, so a stranger is
         // refused before the filesystem is asked.
         assert_eq!(
             table.rename(b"/data/a", b"/data/b", stranger),
             Err(VfsError::PermissionDenied)
         );
-        assert_eq!(RENAMES.load(Ordering::Relaxed), before);
+        assert_eq!(fs.renames.load(Ordering::Relaxed), 0);
         assert!(table.rename(b"/data/a", b"/data/b", Identity::ROOT).is_ok());
-        assert_eq!(RENAMES.load(Ordering::Relaxed), before + 1);
+        assert_eq!(fs.renames.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -1277,11 +1292,11 @@ mod tests {
     #[test]
     fn writable_fs_records_each_create() {
         let mut table = MountTable::new();
-        table.mount(b"/data", &WRITABLE_FS).expect("mount");
-        let before = CREATED.load(Ordering::Relaxed);
+        let fs = writable_fs();
+        table.mount(b"/data", fs).expect("mount");
         table.create(b"/data/one", 0o644, Identity::ROOT).expect("create");
         table.create(b"/data/two", 0o644, Identity::ROOT).expect("create");
-        assert_eq!(CREATED.load(Ordering::Relaxed), before + 2);
+        assert_eq!(fs.created.load(Ordering::Relaxed), 2);
     }
 
     #[test]
