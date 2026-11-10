@@ -26,6 +26,8 @@ pub struct ServiceSpec {
     pub id: u32,
     /// Short name for logs and diagnostics.
     pub name: &'static str,
+    /// Identifiers of services this service directly depends on.
+    pub requires: &'static [u32],
 }
 
 /// Supervised services in boot order.
@@ -36,10 +38,12 @@ pub const SERVICE_CATALOG: [ServiceSpec; 2] = [
     ServiceSpec {
         id: BLK_SERVICE,
         name: "blk",
+        requires: &[],
     },
     ServiceSpec {
         id: KBD_SERVICE,
         name: "kbd",
+        requires: &[],
     },
 ];
 
@@ -205,8 +209,10 @@ mod tests {
         assert_eq!(SERVICE_CATALOG.len(), 2);
         assert_eq!(SERVICE_CATALOG[0].id, BLK_SERVICE);
         assert_eq!(SERVICE_CATALOG[0].name, "blk");
+        assert_eq!(SERVICE_CATALOG[0].requires, &[]);
         assert_eq!(SERVICE_CATALOG[1].id, KBD_SERVICE);
         assert_eq!(SERVICE_CATALOG[1].name, "kbd");
+        assert_eq!(SERVICE_CATALOG[1].requires, &[]);
 
         for (index, service) in SERVICE_CATALOG.iter().enumerate() {
             assert_ne!(service.name, "");

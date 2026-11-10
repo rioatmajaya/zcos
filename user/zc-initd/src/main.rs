@@ -74,7 +74,7 @@ pub unsafe extern "C" fn _start() -> ! {
         }
 
         match kind {
-            SERVICE_KIND_FAULT => restart(service, &mut budget),
+            SERVICE_KIND_FAULT => restart(service, &mut budget, &plan),
             SERVICE_KIND_EXIT => {
                 log_parts(&["initd: ", service.name, " stopped\n"]);
                 stop_live_services(&plan);
@@ -192,11 +192,20 @@ fn retire_unplanned(plan: &SupervisionPlan) {
 
 /// Revives `service` after a fault, or gives up when its budget is spent.
 ///
+/// When the restart budget is exhausted, any planned services that depend on
+/// this service are stopped to avoid leaving broken dependents running.
 /// The status check only feeds the "down" diagnostic; `service_start` is
 /// idempotent, so an already-live service is never reset by a duplicate event.
-fn restart(service: ServiceSpec, budget: &mut RestartBudget) {
+fn restart(service: ServiceSpec, budget: &mut RestartBudget, plan: &SupervisionPlan) {
     if !budget.record(service.id) {
         log_parts(&["initd: ", service.name, " restart budget spent\n"]);
+        for dep in plan.dependents_of(service.id) {
+            if service_is_up(service_status(u64::from(dep.id))) {
+                if service_stop(u64::from(dep.id)) == 0 {
+                    log_parts(&["initd: ", dep.name, " depends on ", service.name, ", stopped\n"]);
+                }
+            }
+        }
         return;
     }
     if !service_is_up(service_status(u64::from(service.id))) {

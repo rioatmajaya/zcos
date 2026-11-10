@@ -103,6 +103,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0094](0094-system-and-device-inspection-in-the-shell.md) | System and device inspection in the shell | Accepted |
 | [0095](0095-physical-memory-introspection-and-the-free-command.md) | Physical memory introspection and the free command | Accepted |
 | [0096](0096-monotonic-time-and-the-uptime-command.md) | Monotonic time and the uptime command | Accepted |
+| [0097](0097-explicit-service-dependencies-and-failure-health-states.md) | Explicit service dependencies and failure health states | Accepted |
 
 ## Adding a decision
 

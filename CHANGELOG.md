@@ -388,6 +388,15 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **Explicit service dependencies and failure health states** (F7f, core): `ServiceSpec`
+  declares direct service dependencies via `requires: &'static [u32]`. `libs/zc-supervise`
+  adds `validate_catalog_dependencies` to enforce an acyclic DAG consistent with boot
+  order, and `SupervisionPlan::dependencies_satisfied` to ensure that a selected manifest
+  subset includes all required prerequisites. `RestartBudget` adds `ServiceHealthState`
+  (`Healthy`, `Degraded`, `Exhausted`) via `budget.health(id)`. When a service exhausts its
+  budget, `initd` cascades stops to all live dependents relying on it.
+  See [ADR 0097](docs/adr/0097-explicit-service-dependencies-and-failure-health-states.md).
+
 - **Monotonic time and the uptime command** (F4, core): `SYS_UPTIME` (63) exposes
   monotonic elapsed milliseconds from the kernel's calibrated local APIC timer tick
   counter. `zc_user` wraps `uptime`, and `zc_shell` adds the `uptime` command to

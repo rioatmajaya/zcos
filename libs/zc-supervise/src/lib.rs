@@ -85,6 +85,28 @@ impl SupervisionPlan {
         self.services().iter().rev().copied()
     }
 
+    /// Returns whether all direct dependencies of every planned service are
+    /// also supervised by this plan.
+    #[must_use]
+    pub fn dependencies_satisfied(&self) -> bool {
+        for service in self.services() {
+            for &req in service.requires {
+                if !self.supervises(req) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Returns an iterator yielding all planned services that directly require `id`.
+    pub fn dependents_of(&self, id: u32) -> impl Iterator<Item = ServiceSpec> + '_ {
+        self.services()
+            .iter()
+            .copied()
+            .filter(move |service| service.requires.contains(&id))
+    }
+
     /// Returns how many services the plan supervises.
     #[must_use]
     pub const fn len(&self) -> usize {
@@ -106,15 +128,46 @@ impl Default for SupervisionPlan {
 
 /// Chooses the supervised set from an optional manifest.
 ///
-/// A manifest that matches the boot is authoritative; anything else falls back
-/// to the full catalog, because leaving a service unsupervised is worse than
-/// supervising one the file forgot.
+/// A manifest that matches the boot and satisfies all service dependencies is
+/// authoritative; anything else falls back to the full catalog, because leaving
+/// a service unsupervised is worse than supervising one the file forgot.
 #[must_use]
 pub fn plan_for(manifest: Option<&Manifest<'_>>) -> SupervisionPlan {
     match manifest {
-        Some(manifest) if manifest.matches_boot() => SupervisionPlan::from_manifest(manifest),
+        Some(manifest) if manifest.matches_boot() => {
+            let plan = SupervisionPlan::from_manifest(manifest);
+            if plan.dependencies_satisfied() {
+                plan
+            } else {
+                SupervisionPlan::full()
+            }
+        }
         _ => SupervisionPlan::full(),
     }
+}
+
+/// Validates that a service catalog's explicit dependencies form an acyclic DAG
+/// consistent with boot order.
+///
+/// Specifically:
+/// 1. No service requires itself.
+/// 2. Every required id exists in `catalog`.
+/// 3. Every required service appears earlier in `catalog` than the service that
+///    requires it (ensuring acyclic dependencies and valid reverse shutdown).
+#[must_use]
+pub fn validate_catalog_dependencies(catalog: &[ServiceSpec]) -> bool {
+    for (index, service) in catalog.iter().enumerate() {
+        for &req in service.requires {
+            if req == service.id {
+                return false;
+            }
+            let valid_prior = catalog[..index].iter().any(|prior| prior.id == req);
+            if !valid_prior {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Restarts one service may receive in a single boot.
@@ -124,6 +177,17 @@ pub fn plan_for(manifest: Option<&Manifest<'_>>) -> SupervisionPlan {
 /// faults (one each for the block and keyboard domains) with room to retry a
 /// transient failure, then `initd` leaves the service down and logs it.
 pub const MAX_RESTARTS: u32 = 3;
+
+/// Health classification of a supervised service based on its restart budget.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServiceHealthState {
+    /// No faults or restarts recorded during this boot.
+    Healthy,
+    /// Has experienced at least one fault/restart, but remains within budget.
+    Degraded,
+    /// Restart budget exhausted; service will not be revived again.
+    Exhausted,
+}
 
 /// Per-service restart counters for one boot.
 ///
@@ -160,6 +224,19 @@ impl RestartBudget {
     #[must_use]
     pub fn used(&self, id: u32) -> Option<u32> {
         index_of(id).map(|index| self.used[index])
+    }
+
+    /// Returns the health classification of `id`, or `None` for an unknown id.
+    #[must_use]
+    pub fn health(&self, id: u32) -> Option<ServiceHealthState> {
+        let used = self.used(id)?;
+        if used == 0 {
+            Some(ServiceHealthState::Healthy)
+        } else if used <= MAX_RESTARTS {
+            Some(ServiceHealthState::Degraded)
+        } else {
+            Some(ServiceHealthState::Exhausted)
+        }
     }
 }
 
@@ -296,5 +373,91 @@ mod tests {
         let mut order = plan.shutdown();
         assert_eq!(order.next(), Some(SERVICE_CATALOG[0]));
         assert_eq!(order.next(), None);
+    }
+
+    #[test]
+    fn catalog_dependencies_must_form_an_acyclic_boot_order_dag() {
+        assert!(validate_catalog_dependencies(&SERVICE_CATALOG));
+
+        let valid_dag = [
+            ServiceSpec { id: 0, name: "base", requires: &[] },
+            ServiceSpec { id: 1, name: "mid", requires: &[0] },
+            ServiceSpec { id: 2, name: "top", requires: &[0, 1] },
+        ];
+        assert!(validate_catalog_dependencies(&valid_dag));
+
+        // Self-dependency is rejected
+        let self_dep = [
+            ServiceSpec { id: 0, name: "cycle", requires: &[0] },
+        ];
+        assert!(!validate_catalog_dependencies(&self_dep));
+
+        // Forward dependency is rejected (violates boot order & acyclic shutdown)
+        let forward_dep = [
+            ServiceSpec { id: 0, name: "early", requires: &[1] },
+            ServiceSpec { id: 1, name: "late", requires: &[] },
+        ];
+        assert!(!validate_catalog_dependencies(&forward_dep));
+
+        // Unknown dependency is rejected
+        let unknown_dep = [
+            ServiceSpec { id: 0, name: "early", requires: &[99] },
+        ];
+        assert!(!validate_catalog_dependencies(&unknown_dep));
+    }
+
+    #[test]
+    fn plan_dependencies_and_dependents_tracking() {
+        let plan = SupervisionPlan::full();
+        assert!(plan.dependencies_satisfied());
+        assert_eq!(plan.dependents_of(BLK_SERVICE).count(), 0);
+        assert_eq!(plan.dependents_of(KBD_SERVICE).count(), 0);
+
+        let custom_specs = [
+            ServiceSpec { id: 10, name: "core", requires: &[] },
+            ServiceSpec { id: 20, name: "driver", requires: &[10] },
+        ];
+        let mut plan_custom = SupervisionPlan {
+            services: [SERVICE_CATALOG[0]; SERVICE_CATALOG.len()],
+            len: 2,
+        };
+        plan_custom.services[0] = custom_specs[0];
+        plan_custom.services[1] = custom_specs[1];
+
+        assert!(plan_custom.dependencies_satisfied());
+        let mut deps = plan_custom.dependents_of(10);
+        assert_eq!(deps.next().map(|s| s.id), Some(20));
+        assert_eq!(deps.next(), None);
+
+        // If driver is present but core is missing:
+        let mut plan_broken = SupervisionPlan {
+            services: [SERVICE_CATALOG[0]; SERVICE_CATALOG.len()],
+            len: 1,
+        };
+        plan_broken.services[0] = custom_specs[1];
+        assert!(!plan_broken.dependencies_satisfied());
+    }
+
+    #[test]
+    fn budget_health_state_transitions() {
+        let mut budget = RestartBudget::new();
+        assert_eq!(budget.health(BLK_SERVICE), Some(ServiceHealthState::Healthy));
+        assert_eq!(budget.health(99), None);
+
+        // 1 fault: degraded
+        assert!(budget.record(BLK_SERVICE));
+        assert_eq!(budget.health(BLK_SERVICE), Some(ServiceHealthState::Degraded));
+
+        // 2 faults: degraded
+        assert!(budget.record(BLK_SERVICE));
+        assert_eq!(budget.health(BLK_SERVICE), Some(ServiceHealthState::Degraded));
+
+        // 3 faults: still degraded (last permitted restart)
+        assert!(budget.record(BLK_SERVICE));
+        assert_eq!(budget.health(BLK_SERVICE), Some(ServiceHealthState::Degraded));
+
+        // 4 faults: exhausted
+        assert!(!budget.record(BLK_SERVICE));
+        assert_eq!(budget.health(BLK_SERVICE), Some(ServiceHealthState::Exhausted));
     }
 }
