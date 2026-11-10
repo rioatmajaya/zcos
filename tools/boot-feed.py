@@ -8,20 +8,15 @@ the interactive shell from a command file.
 Why the feeding is shaped the way it is:
 
 * QEMU only forwards stdin to the guest while the chardev is actively being
-  written. A single line sent after the shell's prompt can sit unread forever,
-  but a stream that starts at launch is delivered. So the feeder writes from
-  the very first moment and keeps writing.
-* The shell starts reading at an arbitrary byte offset in that stream, so its
-  first line may be a fragment of a command. To recover, the feeder sends the
-  command body (the script minus its final `exit`) and watches the transcript.
-  Once a full pass has begun (the `help` banner appears), it appends `exit` and
-  stops: the shell has already buffered the rest of that pass, so every command
-  runs in order before the shell quits.
-* A whole-script burst overruns the guest's 16550 receive FIFO and the kernel's
-  input ring while the shell is busy on a command, which tears lines. The
-  feeder therefore sends one body per observed progress marker (`stat /dev/blk`
-  output) with a timeout fallback, so at most one pass is ever in flight and no
-  burst is large enough to overflow.
+  written. The feeder waits until the shell signals readiness (`shell ready`),
+  avoiding firmware (OVMF) console consumption or early UART buffer drops during
+  UEFI and kernel boot.
+* Once the shell is ready, the feeder sends the command body and watches the
+  transcript. When a full pass begins (`Commands: help echo`), it appends `exit`
+  and stops: the shell has buffered the pass and runs every command to completion.
+* Pacing on observed progress markers (`stat /dev/blk` output) with a timeout
+  fallback bounds the in-flight stream so the guest's receive buffers do not
+  overflow.
 
 The exit status is QEMU's: the test succeeds when it exits 33 (the loader's
 isa-debug-exit value), and the watchdog kills a wedged guest.
@@ -53,6 +48,11 @@ def split_script(path: str, exit_line: str) -> tuple[bytes, bytes]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--script", required=True, help="command file to drive")
+    parser.add_argument(
+        "--prompt",
+        default="shell ready",
+        help="marker proving the shell is ready for input",
+    )
     parser.add_argument(
         "--ready",
         default="Commands: help echo",
@@ -100,9 +100,11 @@ def main() -> int:
 
     done = threading.Event()
     lock = threading.Lock()
-    state = {"ready": False, "progress": 0}
+    prompt = args.prompt.encode()
     ready = args.ready.encode()
     progress = args.progress.encode()
+    state = {"shell_ready": not bool(prompt), "ready": False, "progress": 0}
+    carry_len = max(len(prompt), len(ready), len(progress)) - 1
 
     def reader() -> None:
         """Copies the guest's serial stream to stdout and tracks markers."""
@@ -119,10 +121,12 @@ def main() -> int:
                 out.flush()
                 window = carry + data
                 with lock:
+                    if prompt and prompt in window:
+                        state["shell_ready"] = True
                     if ready in window:
                         state["ready"] = True
                     state["progress"] += window.count(progress)
-                carry = window[-(len(progress) - 1):]
+                carry = window[-carry_len:] if carry_len > 0 else b""
         except (OSError, ValueError):
             pass
         finally:
@@ -137,6 +141,15 @@ def main() -> int:
                 return True
             except (OSError, ValueError):
                 return False
+
+        # Wait for the shell to announce readiness before sending the command body,
+        # ensuring the firmware (OVMF console) and early kernel initialization do
+        # not swallow or tear keystrokes before the shell's serial read loop is active.
+        while not done.is_set():
+            with lock:
+                if state["shell_ready"]:
+                    break
+            time.sleep(0.05)
 
         if not send(payload):
             return

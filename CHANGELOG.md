@@ -171,6 +171,14 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Fixed
 
+- **Synchronize boot feeder with shell ready prompt** (F4, F7, test): `tools/boot-feed.py`
+  waits for the shell to announce readiness (`shell ready`) before transmitting the
+  initial command payload. Early transmission upon QEMU startup previously allowed OVMF
+  UEFI console drivers and early firmware initialization to consume or discard the initial
+  part of the script before the shell entered its serial read loop, causing missing command
+  diagnostics in CI.
+  See [ADR 0099](docs/adr/0099-synchronize-boot-feeder-with-shell-ready-prompt.md).
+
 - **The frame verifier replays the listings the kernel actually served** (F8,
   desktop): the shell's script remounts `/data` while the desktop runs, and a
   loaded runner re-feeds its script while the window client is still catching
