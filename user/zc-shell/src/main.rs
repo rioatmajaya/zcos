@@ -10,7 +10,8 @@
 //! through the log syscall, so the transcript appears in the kernel serial log.
 //! Standard output can also be redirected to files with `> <file>` (truncate or
 //! create) and `>> <file>` (append), resolving relative paths against the
-//! current working directory. The exit status of the previous command is tracked
+//! current working directory, or piped between commands with the pipeline
+//! operator `|`. The exit status of the previous command is tracked
 //! and observable via `echo $?`. Environment variables are supported via `export`,
 //! `set`, `unset`, and `env`, with parameter expansion (`$VAR`, `$?`, `$PWD`).
 //!
@@ -433,10 +434,53 @@ fn expand_word<'a>(word: &'a [u8], slot: usize) -> &'a [u8] {
 /// shorter.
 const DMESG_LINE_CAP: usize = 512;
 
+/// Capacity of pipeline intermediate buffer.
+const PIPE_CAP: usize = 4096;
+
+/// Double buffer for pipeline stages in .bss.
+static mut PIPE_A: [u8; PIPE_CAP] = [0; PIPE_CAP];
+static mut PIPE_A_LEN: usize = 0;
+static mut PIPE_B: [u8; PIPE_CAP] = [0; PIPE_CAP];
+static mut PIPE_B_LEN: usize = 0;
+
+/// True when standard output is being captured into a pipeline intermediate buffer.
+static mut PIPE_CAPTURING: bool = false;
+
+/// If false, captures into PIPE_A; if true, captures into PIPE_B.
+static mut PIPE_USE_B: bool = false;
+
+/// Appends bytes into the active pipeline staging buffer.
+fn pipe_write_bytes(bytes: &[u8]) {
+    unsafe {
+        let (buf, len_ptr) = if !core::ptr::addr_of!(PIPE_USE_B).read() {
+            (
+                core::ptr::addr_of_mut!(PIPE_A).cast::<u8>(),
+                core::ptr::addr_of_mut!(PIPE_A_LEN),
+            )
+        } else {
+            (
+                core::ptr::addr_of_mut!(PIPE_B).cast::<u8>(),
+                core::ptr::addr_of_mut!(PIPE_B_LEN),
+            )
+        };
+        let cur_len = len_ptr.read();
+        let room = PIPE_CAP.saturating_sub(cur_len);
+        let take = bytes.len().min(room);
+        if take > 0 {
+            buf.add(cur_len).copy_from_nonoverlapping(bytes.as_ptr(), take);
+            len_ptr.write(cur_len + take);
+        }
+    }
+}
+
 /// Appends bytes to the output staging, flushing or truncating on overflow.
 fn out_bytes(bytes: &[u8]) {
     // SAFETY: owned here; no other task touches this buffer.
     unsafe {
+        if core::ptr::addr_of!(PIPE_CAPTURING).read() {
+            pipe_write_bytes(bytes);
+            return;
+        }
         let redir = core::ptr::addr_of!(REDIR_FD).read();
         if redir != u64::MAX {
             let len = core::ptr::addr_of!(OUT_LEN).read();
@@ -474,6 +518,9 @@ fn out_bytes(bytes: &[u8]) {
 fn out_flush() {
     // SAFETY: owned here; called once per response.
     unsafe {
+        if core::ptr::addr_of!(PIPE_CAPTURING).read() {
+            return;
+        }
         let len = core::ptr::addr_of!(OUT_LEN).read();
         if len == 0 {
             return;
@@ -627,6 +674,10 @@ fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
 /// Logs a raw byte slice as text, or writes to redirected stdout.
 fn print_bytes(bytes: &[u8]) {
     unsafe {
+        if core::ptr::addr_of!(PIPE_CAPTURING).read() {
+            pipe_write_bytes(bytes);
+            return;
+        }
         let redir = core::ptr::addr_of!(REDIR_FD).read();
         if redir != u64::MAX {
             let _ = write(redir, bytes);
@@ -651,6 +702,10 @@ fn print_bytes(bytes: &[u8]) {
 /// 64-byte chunks.
 fn print_lines(bytes: &[u8]) {
     unsafe {
+        if core::ptr::addr_of!(PIPE_CAPTURING).read() {
+            pipe_write_bytes(bytes);
+            return;
+        }
         let redir = core::ptr::addr_of!(REDIR_FD).read();
         if redir != u64::MAX {
             let _ = write(redir, bytes);
@@ -685,8 +740,8 @@ pub extern "C" fn zc_signal_handler() {
     log("signal: handled\n");
 }
 
-/// Runs a single command line segment with optional stdout redirection. Returns whether to exit the shell.
-fn run_single(line: &[u8]) -> bool {
+/// Runs a single command line segment with optional stdout redirection and piped input. Returns whether to exit the shell.
+fn run_single(line: &[u8], pipe_in: Option<&[u8]>) -> bool {
     env_init();
     let mut argv: [&[u8]; 16] = [&[]; 16];
     let mut count = 0;
@@ -804,12 +859,105 @@ fn run_single(line: &[u8]) -> bool {
         return false;
     }
 
-    let should_exit = execute_cmd(&argv, count);
+    let should_exit = execute_cmd(&argv, count, pipe_in);
     out_flush();
 
     if redir_fd != u64::MAX {
         close(redir_fd);
         unsafe { core::ptr::addr_of_mut!(REDIR_FD).write(u64::MAX) };
+    }
+
+    should_exit
+}
+
+/// Runs a command segment that may contain pipeline operators (`|`).
+/// Returns whether to exit the shell.
+fn run_pipeline(seg: &[u8]) -> bool {
+    if !seg.iter().any(|&b| b == b'|') {
+        return run_single(seg, None);
+    }
+
+    const STAGE_CAP: usize = 4;
+    let mut stages: [&[u8]; STAGE_CAP] = [&[]; STAGE_CAP];
+    let mut stage_count = 0;
+    let mut start = 0;
+
+    for i in 0..seg.len() {
+        if seg[i] == b'|' {
+            if stage_count < STAGE_CAP {
+                stages[stage_count] = trim_ascii(&seg[start..i]);
+                stage_count += 1;
+            }
+            start = i + 1;
+        }
+    }
+    if stage_count < STAGE_CAP {
+        stages[stage_count] = trim_ascii(&seg[start..]);
+        stage_count += 1;
+    }
+
+    for i in 0..stage_count {
+        if stages[i].is_empty() {
+            log("pipeline: syntax error near `|`\n");
+            set_status(2);
+            return false;
+        }
+    }
+
+    unsafe {
+        core::ptr::addr_of_mut!(PIPE_A_LEN).write(0);
+        core::ptr::addr_of_mut!(PIPE_B_LEN).write(0);
+    }
+
+    let mut should_exit = false;
+    for k in 0..stage_count {
+        let is_last = k + 1 == stage_count;
+
+        let stage_input: Option<&[u8]> = if k == 0 {
+            None
+        } else {
+            unsafe {
+                if k % 2 == 1 {
+                    let len = core::ptr::addr_of!(PIPE_A_LEN).read();
+                    Some(core::slice::from_raw_parts(
+                        core::ptr::addr_of!(PIPE_A).cast::<u8>(),
+                        len,
+                    ))
+                } else {
+                    let len = core::ptr::addr_of!(PIPE_B_LEN).read();
+                    Some(core::slice::from_raw_parts(
+                        core::ptr::addr_of!(PIPE_B).cast::<u8>(),
+                        len,
+                    ))
+                }
+            }
+        };
+
+        if is_last {
+            unsafe {
+                core::ptr::addr_of_mut!(PIPE_CAPTURING).write(false);
+            }
+        } else {
+            unsafe {
+                core::ptr::addr_of_mut!(PIPE_CAPTURING).write(true);
+                let use_b = k % 2 == 1;
+                core::ptr::addr_of_mut!(PIPE_USE_B).write(use_b);
+                if !use_b {
+                    core::ptr::addr_of_mut!(PIPE_A_LEN).write(0);
+                } else {
+                    core::ptr::addr_of_mut!(PIPE_B_LEN).write(0);
+                }
+            }
+        }
+
+        if run_single(stages[k], stage_input) {
+            should_exit = true;
+            break;
+        }
+    }
+
+    unsafe {
+        core::ptr::addr_of_mut!(PIPE_CAPTURING).write(false);
     }
 
     should_exit
@@ -842,7 +990,7 @@ fn run(line: &[u8]) -> bool {
                 ChainOp::Or => get_status() != 0,
             };
             if should_run && !seg.is_empty() {
-                if run_single(seg) {
+                if run_pipeline(seg) {
                     return true;
                 }
             }
@@ -862,7 +1010,7 @@ fn run(line: &[u8]) -> bool {
             ChainOp::Or => get_status() != 0,
         };
         if should_run && !seg.is_empty() {
-            if run_single(seg) {
+            if run_pipeline(seg) {
                 return true;
             }
         }
@@ -872,16 +1020,20 @@ fn run(line: &[u8]) -> bool {
 }
 
 /// Executes one command given by `argv[..count]`. Returns whether the shell should exit.
-fn execute_cmd(argv: &[&[u8]], count: usize) -> bool {
+fn execute_cmd(argv: &[&[u8]], count: usize, pipe_in: Option<&[u8]>) -> bool {
     match argv[0] {
         b"help" => {
             let msg = b"Commands: help echo cd pwd cat head wc grep test true false export set unset env ls stat touch cp write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc dev uname free ps spawn kill wait notify event session signal raise dmesg date uptime poweroff exit\n";
             unsafe {
-                let redir = core::ptr::addr_of!(REDIR_FD).read();
-                if redir != u64::MAX {
-                    let _ = write(redir, msg);
+                if core::ptr::addr_of!(PIPE_CAPTURING).read() {
+                    pipe_write_bytes(msg);
                 } else {
-                    log(core::str::from_utf8(msg).unwrap_or("?"));
+                    let redir = core::ptr::addr_of!(REDIR_FD).read();
+                    if redir != u64::MAX {
+                        let _ = write(redir, msg);
+                    } else {
+                        log(core::str::from_utf8(msg).unwrap_or("?"));
+                    }
                 }
             }
             set_status(0);
@@ -938,10 +1090,18 @@ fn execute_cmd(argv: &[&[u8]], count: usize) -> bool {
             set_status(0);
         }
         b"cat" => {
-            if count < 2 {
-                log("usage: cat <file>\n");
-                set_status(1);
-                return false;
+            let from_pipe = count == 1 || (count == 2 && argv[1] == b"-");
+            if from_pipe {
+                if let Some(input) = pipe_in {
+                    print_bytes(input);
+                    out_flush();
+                    set_status(0);
+                    return false;
+                } else {
+                    log("usage: cat [file]\n");
+                    set_status(1);
+                    return false;
+                }
             }
             let mut path_buf = [0u8; CWD_CAP];
             let path = resolve_path_buf(argv[1], &mut path_buf);
@@ -966,20 +1126,50 @@ fn execute_cmd(argv: &[&[u8]], count: usize) -> bool {
             }
             close(fd);
             unsafe {
-                if core::ptr::addr_of!(REDIR_FD).read() == u64::MAX && last_byte != b'\n' {
+                if core::ptr::addr_of!(REDIR_FD).read() == u64::MAX
+                    && !core::ptr::addr_of!(PIPE_CAPTURING).read()
+                    && last_byte != b'\n'
+                {
                     log("\n");
                 }
             }
             set_status(0);
         }
         b"head" => {
-            if count < 2 {
-                log("usage: head <file>\n");
-                set_status(1);
-                return false;
+            let mut max_lines = 10u64;
+            let mut file_idx = 1;
+            if count >= 3 && argv[1] == b"-n" {
+                if let Some(n) = parse_decimal(argv[2]) {
+                    max_lines = n;
+                    file_idx = 3;
+                }
+            }
+            let from_pipe = file_idx >= count || (file_idx < count && argv[file_idx] == b"-");
+            if from_pipe {
+                if let Some(input) = pipe_in {
+                    let mut lines = 0u64;
+                    let mut start = 0;
+                    while start < input.len() && lines < max_lines {
+                        let end = input[start..]
+                            .iter()
+                            .position(|&b| b == b'\n')
+                            .map_or(input.len(), |pos| start + pos);
+                        out_bytes(&input[start..end]);
+                        out_bytes(b"\n");
+                        lines += 1;
+                        start = end + 1;
+                    }
+                    out_flush();
+                    set_status(0);
+                    return false;
+                } else {
+                    log("usage: head [-n <N>] [file]\n");
+                    set_status(1);
+                    return false;
+                }
             }
             let mut path_buf = [0u8; CWD_CAP];
-            let path = resolve_path_buf(argv[1], &mut path_buf);
+            let path = resolve_path_buf(argv[file_idx], &mut path_buf);
             let fd = open(path);
             if fd == u64::MAX {
                 log("head: cannot open\n");
@@ -997,7 +1187,7 @@ fn execute_cmd(argv: &[&[u8]], count: usize) -> bool {
                     out_bytes(&[b]);
                     if b == b'\n' {
                         lines += 1;
-                        if lines >= 10 {
+                        if lines >= max_lines {
                             break 'outer;
                         }
                     }
@@ -1008,10 +1198,39 @@ fn execute_cmd(argv: &[&[u8]], count: usize) -> bool {
             set_status(0);
         }
         b"wc" => {
-            if count < 2 {
-                log("usage: wc <file>\n");
-                set_status(1);
-                return false;
+            let from_pipe = count == 1 || (count == 2 && argv[1] == b"-");
+            if from_pipe {
+                if let Some(input) = pipe_in {
+                    let mut lines = 0u64;
+                    let mut words = 0u64;
+                    let bytes = input.len() as u64;
+                    let mut in_word = false;
+                    for &b in input {
+                        if b == b'\n' {
+                            lines += 1;
+                        }
+                        if b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' {
+                            in_word = false;
+                        } else if !in_word {
+                            in_word = true;
+                            words += 1;
+                        }
+                    }
+                    out_bytes(b"wc: lines ");
+                    out_u64(lines);
+                    out_bytes(b" words ");
+                    out_u64(words);
+                    out_bytes(b" bytes ");
+                    out_u64(bytes);
+                    out_bytes(b"\n");
+                    out_flush();
+                    set_status(0);
+                    return false;
+                } else {
+                    log("usage: wc [file]\n");
+                    set_status(1);
+                    return false;
+                }
             }
             let mut path_buf = [0u8; CWD_CAP];
             let path = resolve_path_buf(argv[1], &mut path_buf);
@@ -1077,13 +1296,53 @@ fn execute_cmd(argv: &[&[u8]], count: usize) -> bool {
                 arg_idx += 1;
             }
 
-            if arg_idx + 2 > count {
-                log("usage: grep [-n] [-v] <pattern> <file>\n");
+            if arg_idx >= count {
+                log("usage: grep [-n] [-v] <pattern> [file]\n");
                 set_status(2);
                 return false;
             }
 
             let pattern = argv[arg_idx];
+            let from_pipe = arg_idx + 1 == count || (arg_idx + 2 == count && argv[arg_idx + 1] == b"-");
+
+            if from_pipe {
+                if let Some(input) = pipe_in {
+                    let mut line_number = 1u64;
+                    let mut matched_count = 0u64;
+                    let mut start = 0;
+                    while start < input.len() {
+                        let end = input[start..]
+                            .iter()
+                            .position(|&b| b == b'\n')
+                            .map_or(input.len(), |pos| start + pos);
+                        let mut line = &input[start..end];
+                        if line.ends_with(b"\r") {
+                            line = &line[..line.len() - 1];
+                        }
+                        let is_match = contains_subslice(line, pattern);
+                        let selected = if invert { !is_match } else { is_match };
+                        if selected {
+                            matched_count += 1;
+                            if show_line_num {
+                                out_u64(line_number);
+                                out_bytes(b":");
+                            }
+                            out_bytes(line);
+                            out_bytes(b"\n");
+                            out_flush();
+                        }
+                        line_number += 1;
+                        start = end + 1;
+                    }
+                    set_status(if matched_count > 0 { 0 } else { 1 });
+                    return false;
+                } else {
+                    log("usage: grep [-n] [-v] <pattern> [file]\n");
+                    set_status(2);
+                    return false;
+                }
+            }
+
             let mut path_buf = [0u8; CWD_CAP];
             let path = resolve_path_buf(argv[arg_idx + 1], &mut path_buf);
             let fd = open(path);

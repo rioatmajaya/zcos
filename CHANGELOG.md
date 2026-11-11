@@ -396,6 +396,15 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **Shell pipeline execution with | operator** (F7j, F4, shell): `zc-shell` adds pipeline
+  composition (`|`) using a ping-pong buffer model in `.bss` (`PIPE_A` and `PIPE_B`, 4096 bytes each).
+  Intermediate command output is captured without heap allocations or process spawning, while
+  consumer built-ins (`grep`, `wc`, `head`, `cat`) read directly from the piped input stream.
+  Pipelines cleanly integrate with command chaining (`;`, `&&`, `||`) and file redirection
+  (`>`, `>>`). `tools/boot-script.txt` exercises pipelines, word counting, and conditional
+  chained filtering under the scripted proof.
+  See [ADR 0105](docs/adr/0105-shell-pipeline-execution.md).
+
 - **Shell environment variables and parameter expansion** (F7j, F4, shell): `zc-shell` adds
   static environment storage (`export`, `set`, `unset`, and `env`) with default standard
   variables (`USER`, `HOME`, `OS`, `SHELL`, and dynamic `PWD`). Arguments and redirection

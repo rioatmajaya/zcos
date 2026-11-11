@@ -89,12 +89,8 @@ test -f /hello.txt && grep -n hello /hello.txt > grep_out.txt
 cat grep_out.txt
 rm grep_out.txt
 echo chain_one; echo chain_two
-write relative.txt TEST_REL
-cat relative.txt
-stat relative.txt
-rm relative.txt
-cd
-pwd
+write relative.txt TEST_REL; cat relative.txt; stat relative.txt; rm relative.txt
+cd; pwd
 stat /dev/blk
 id
 session
@@ -102,7 +98,6 @@ signal
 raise 2 1
 svc
 ps
-help
 wait 0
 wait 1
 spawn producer.elf
@@ -128,7 +123,6 @@ ps
 spawn .hello-c.elf
 dmesg
 date
-uname
 uname -a
 dev
 free
@@ -137,4 +131,7 @@ export GREET=zcos_env_ok
 echo $GREET
 [ $GREET = zcos_env_ok ] && echo env_test_ok
 unset GREET
+echo zcos_pipe_ok | grep pipe_ok
+echo foo | wc
+echo pipe_and | grep pipe && echo pipe_and_ok
 exit

@@ -88,6 +88,10 @@ jobs:
         # Environment variables and parameter expansion (ADR 0104).
         grep -q "task 2: zcos_env_ok" build/boot.log
         grep -q "task 2: env_test_ok" build/boot.log
+        # Pipeline execution (ADR 0105).
+        grep -q "task 2: zcos_pipe_ok" build/boot.log
+        grep -q "task 2: wc: lines 1 words 1 bytes 4" build/boot.log
+        grep -q "task 2: pipe_and_ok" build/boot.log
         grep -q "task 2: relative.txt: file, 8 bytes" build/boot.log
         grep -q "task 2: rm: removed relative.txt" build/boot.log
         grep -q "task 2: touch: created /tmp/touched" build/boot.log
