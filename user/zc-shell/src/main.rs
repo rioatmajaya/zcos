@@ -5,8 +5,12 @@
 //! `touch`, `cp`, `write`, `append`, `rm`, `mkdir`, `rmdir`, `mv`, `sync`, `tmp`,
 //! `persist`, `chmod`, `mount`, `umount`, `id`, `svc`, `ps`, `spawn`, `kill`, `wait`,
 //! `notify`, `event`, `session`, `signal`, `raise`, `dmesg`, `date`, `dev`, `uname`,
-//! `free`, `uptime`, `poweroff`, and `exit`. Output goes
+//! `free`, `uptime`, `poweroff`, and `exit`. Output normally goes
 //! through the log syscall, so the transcript appears in the kernel serial log.
+//! Standard output can also be redirected to files with `> <file>` (truncate or
+//! create) and `>> <file>` (append), resolving relative paths against the
+//! current working directory. The exit status of the previous command is tracked
+//! and observable via `echo $?`.
 //!
 //! `id` asks the kernel for this task's user and group ids plus its session.
 //! The shell runs as an unprivileged user, so `id` is the observable side of
@@ -207,16 +211,60 @@ static mut DMESG: [u8; DMESG_CAP] = [0; DMESG_CAP];
 /// Exit status the `exit` command parsed; read once by the entry loop.
 static mut EXIT_STATUS: u32 = 0;
 
+/// Active file descriptor for redirected stdout, or `u64::MAX` when output goes to console.
+static mut REDIR_FD: u64 = u64::MAX;
+
+/// Exit status of the most recently executed command (0 for success, non-zero for error).
+static mut LAST_STATUS: u32 = 0;
+
+/// Redirection mode for command stdout.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum RedirMode {
+    None,
+    Overwrite,
+    Append,
+}
+
+/// Sets the exit status of the most recently executed command.
+fn set_status(status: u32) {
+    // SAFETY: owned by the single-threaded shell loop.
+    unsafe {
+        core::ptr::addr_of_mut!(LAST_STATUS).write(status);
+    }
+}
+
 /// Longest captured line `dmesg` prints in one syscall, excluding the newline.
 ///
 /// It matches the kernel's per-call buffer limit; kernel diagnostics are far
 /// shorter.
 const DMESG_LINE_CAP: usize = 512;
 
-/// Appends bytes to the output staging, truncating on overflow.
+/// Appends bytes to the output staging, flushing or truncating on overflow.
 fn out_bytes(bytes: &[u8]) {
     // SAFETY: owned here; no other task touches this buffer.
     unsafe {
+        let redir = core::ptr::addr_of!(REDIR_FD).read();
+        if redir != u64::MAX {
+            let len = core::ptr::addr_of!(OUT_LEN).read();
+            let room = LINE_CAP.saturating_sub(len);
+            if bytes.len() <= room {
+                core::ptr::addr_of_mut!(OUT)
+                    .cast::<u8>()
+                    .add(len)
+                    .copy_from_nonoverlapping(bytes.as_ptr(), bytes.len());
+                core::ptr::addr_of_mut!(OUT_LEN).write(len + bytes.len());
+            } else {
+                if len > 0 {
+                    let staged =
+                        core::slice::from_raw_parts(core::ptr::addr_of!(OUT).cast::<u8>(), len);
+                    let _ = write(redir, staged);
+                    core::ptr::addr_of_mut!(OUT_LEN).write(0);
+                }
+                let _ = write(redir, bytes);
+            }
+            return;
+        }
+
         let len = core::ptr::addr_of!(OUT_LEN).read();
         let room = LINE_CAP.saturating_sub(len);
         let take = bytes.len().min(room);
@@ -228,14 +276,22 @@ fn out_bytes(bytes: &[u8]) {
     }
 }
 
-/// Logs the staged output as one line and clears it.
+/// Logs or writes the staged output and clears it.
 fn out_flush() {
     // SAFETY: owned here; called once per response.
     unsafe {
         let len = core::ptr::addr_of!(OUT_LEN).read();
+        if len == 0 {
+            return;
+        }
         let bytes =
             core::slice::from_raw_parts(core::ptr::addr_of!(OUT).cast::<u8>(), len);
-        log(core::str::from_utf8(bytes).unwrap_or("?"));
+        let redir = core::ptr::addr_of!(REDIR_FD).read();
+        if redir != u64::MAX {
+            let _ = write(redir, bytes);
+        } else {
+            log(core::str::from_utf8(bytes).unwrap_or("?"));
+        }
         core::ptr::addr_of_mut!(OUT_LEN).write(0);
     }
 }
@@ -363,8 +419,15 @@ fn parse_decimal(text: &[u8]) -> Option<u64> {
     Some(value)
 }
 
-/// Logs a raw byte slice as text.
+/// Logs a raw byte slice as text, or writes to redirected stdout.
 fn print_bytes(bytes: &[u8]) {
+    unsafe {
+        let redir = core::ptr::addr_of!(REDIR_FD).read();
+        if redir != u64::MAX {
+            let _ = write(redir, bytes);
+            return;
+        }
+    }
     let mut chunk = [0u8; 64];
     let mut offset = 0;
     while offset < bytes.len() {
@@ -375,13 +438,20 @@ fn print_bytes(bytes: &[u8]) {
     }
 }
 
-/// Logs captured kernel log lines one at a time.
+/// Logs captured kernel log lines one at a time, or writes to redirected stdout.
 ///
 /// The line and its newline go out in one syscall, so the `task N:` prefix
 /// appears once per line. Blank lines are skipped: a prefix-only line would add
 /// noise without content. A line longer than [`DMESG_LINE_CAP`] falls back to
 /// 64-byte chunks.
 fn print_lines(bytes: &[u8]) {
+    unsafe {
+        let redir = core::ptr::addr_of!(REDIR_FD).read();
+        if redir != u64::MAX {
+            let _ = write(redir, bytes);
+            return;
+        }
+    }
     let mut line = [0u8; DMESG_LINE_CAP + 1];
     let mut start = 0;
     while start < bytes.len() {
@@ -412,34 +482,161 @@ pub extern "C" fn zc_signal_handler() {
 
 /// Runs one parsed command line. Returns whether to exit the shell.
 fn run(line: &[u8]) -> bool {
-    let mut argv: [&[u8]; 4] = [&[]; 4];
+    let mut argv: [&[u8]; 16] = [&[]; 16];
     let mut count = 0;
-    split(line, |arg| {
-        if count < argv.len() {
-            argv[count] = arg;
+    let mut redir_mode = RedirMode::None;
+    let mut redir_target: Option<&[u8]> = None;
+    let mut expect_target = false;
+
+    split(line, |word| {
+        if expect_target {
+            redir_target = Some(word);
+            expect_target = false;
+        } else if word == b">" {
+            redir_mode = RedirMode::Overwrite;
+            expect_target = true;
+        } else if word == b">>" {
+            redir_mode = RedirMode::Append;
+            expect_target = true;
+        } else if word.starts_with(b">>") && word.len() > 2 {
+            redir_mode = RedirMode::Append;
+            redir_target = Some(&word[2..]);
+        } else if word.starts_with(b">") && word.len() > 1 {
+            redir_mode = RedirMode::Overwrite;
+            redir_target = Some(&word[1..]);
+        } else if count < argv.len() {
+            argv[count] = word;
             count += 1;
         }
     });
-    if count == 0 {
+
+    if redir_mode != RedirMode::None && (expect_target || redir_target.is_none()) {
+        log("redir: missing target file\n");
+        set_status(1);
         return false;
     }
+
+    let redir_fd = if let Some(target) = redir_target {
+        let mut path_buf = [0u8; CWD_CAP];
+        let path = resolve_path_buf(target, &mut path_buf);
+        match redir_mode {
+            RedirMode::None => u64::MAX,
+            RedirMode::Overwrite => {
+                let existing = open(path);
+                if existing != u64::MAX {
+                    close(existing);
+                    let _ = unlink(path);
+                }
+                if create(path) == u64::MAX {
+                    let fd = open(path);
+                    if fd == u64::MAX {
+                        log("redir: cannot open file\n");
+                        set_status(1);
+                        return false;
+                    }
+                    fd
+                } else {
+                    let fd = open(path);
+                    if fd == u64::MAX {
+                        log("redir: cannot open file\n");
+                        set_status(1);
+                        return false;
+                    }
+                    fd
+                }
+            }
+            RedirMode::Append => {
+                let mut fd = open(path);
+                if fd == u64::MAX {
+                    if create(path) == u64::MAX {
+                        log("redir: cannot open file\n");
+                        set_status(1);
+                        return false;
+                    }
+                    fd = open(path);
+                }
+                if fd == u64::MAX {
+                    log("redir: cannot open file\n");
+                    set_status(1);
+                    return false;
+                }
+                let mut st = Stat {
+                    kind: 0,
+                    mode: 0,
+                    size: 0,
+                    node: 0,
+                    uid: 0,
+                    gid: 0,
+                };
+                if stat(path, &mut st) {
+                    let _ = seek(fd, st.size);
+                }
+                fd
+            }
+        }
+    } else {
+        u64::MAX
+    };
+
+    if redir_fd != u64::MAX {
+        unsafe { core::ptr::addr_of_mut!(REDIR_FD).write(redir_fd) };
+    }
+
+    if count == 0 {
+        if redir_fd != u64::MAX {
+            close(redir_fd);
+            unsafe { core::ptr::addr_of_mut!(REDIR_FD).write(u64::MAX) };
+            set_status(0);
+        }
+        return false;
+    }
+
+    let should_exit = execute_cmd(&argv, count);
+    out_flush();
+
+    if redir_fd != u64::MAX {
+        close(redir_fd);
+        unsafe { core::ptr::addr_of_mut!(REDIR_FD).write(u64::MAX) };
+    }
+
+    should_exit
+}
+
+/// Executes one command given by `argv[..count]`. Returns whether the shell should exit.
+fn execute_cmd(argv: &[&[u8]], count: usize) -> bool {
     match argv[0] {
         b"help" => {
-            log("Commands: help echo cd pwd cat head wc ls stat touch cp write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc dev uname free ps spawn kill wait notify event session signal raise dmesg date uptime poweroff exit\n");
+            let msg = b"Commands: help echo cd pwd cat head wc ls stat touch cp write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc dev uname free ps spawn kill wait notify event session signal raise dmesg date uptime poweroff exit\n";
+            unsafe {
+                let redir = core::ptr::addr_of!(REDIR_FD).read();
+                if redir != u64::MAX {
+                    let _ = write(redir, msg);
+                } else {
+                    log(core::str::from_utf8(msg).unwrap_or("?"));
+                }
+            }
+            set_status(0);
         }
         b"echo" => {
             for index in 1..count {
-                out_bytes(argv[index]);
+                if argv[index] == b"$?" {
+                    let status = unsafe { core::ptr::addr_of!(LAST_STATUS).read() };
+                    out_u64(u64::from(status));
+                } else {
+                    out_bytes(argv[index]);
+                }
                 if index + 1 < count {
                     out_bytes(b" ");
                 }
             }
             out_bytes(b"\n");
             out_flush();
+            set_status(0);
         }
         b"cd" => {
             if count < 2 || argv[1] == b"/" || argv[1] == b"~" {
                 set_cwd(b"/");
+                set_status(0);
                 return false;
             }
             let mut target_buf = [0u8; CWD_CAP];
@@ -454,22 +651,27 @@ fn run(line: &[u8]) -> bool {
             };
             if !stat(target, &mut st) {
                 log("cd: no such file or directory\n");
+                set_status(1);
                 return false;
             }
             if st.kind != KIND_DIR {
                 log("cd: not a directory\n");
+                set_status(1);
                 return false;
             }
             set_cwd(target.as_bytes());
+            set_status(0);
         }
         b"pwd" => {
             out_bytes(get_cwd());
             out_bytes(b"\n");
             out_flush();
+            set_status(0);
         }
         b"cat" => {
             if count < 2 {
                 log("usage: cat <file>\n");
+                set_status(1);
                 return false;
             }
             let mut path_buf = [0u8; CWD_CAP];
@@ -480,22 +682,31 @@ fn run(line: &[u8]) -> bool {
                 // the kernel logs an `audit:` line for the denial, so this
                 // message stays deliberately neutral.
                 log("cat: cannot open\n");
+                set_status(1);
                 return false;
             }
             let mut buffer = [0u8; 64];
+            let mut last_byte = b'\n';
             loop {
                 let got = read(fd, &mut buffer);
                 if got == u64::MAX || got == 0 {
                     break;
                 }
+                last_byte = buffer[got as usize - 1];
                 print_bytes(&buffer[..got as usize]);
             }
             close(fd);
-            log("\n");
+            unsafe {
+                if core::ptr::addr_of!(REDIR_FD).read() == u64::MAX && last_byte != b'\n' {
+                    log("\n");
+                }
+            }
+            set_status(0);
         }
         b"head" => {
             if count < 2 {
                 log("usage: head <file>\n");
+                set_status(1);
                 return false;
             }
             let mut path_buf = [0u8; CWD_CAP];
@@ -503,6 +714,7 @@ fn run(line: &[u8]) -> bool {
             let fd = open(path);
             if fd == u64::MAX {
                 log("head: cannot open\n");
+                set_status(1);
                 return false;
             }
             let mut buffer = [0u8; 64];
@@ -524,10 +736,12 @@ fn run(line: &[u8]) -> bool {
             }
             close(fd);
             out_flush();
+            set_status(0);
         }
         b"wc" => {
             if count < 2 {
                 log("usage: wc <file>\n");
+                set_status(1);
                 return false;
             }
             let mut path_buf = [0u8; CWD_CAP];
@@ -535,6 +749,7 @@ fn run(line: &[u8]) -> bool {
             let fd = open(path);
             if fd == u64::MAX {
                 log("wc: cannot open\n");
+                set_status(1);
                 return false;
             }
             let mut buffer = [0u8; 64];
@@ -571,6 +786,7 @@ fn run(line: &[u8]) -> bool {
             out_bytes(argv[1]);
             out_bytes(b"\n");
             out_flush();
+            set_status(0);
         }
         b"ls" => {
             let mut path_buf = [0u8; CWD_CAP];
@@ -581,11 +797,13 @@ fn run(line: &[u8]) -> bool {
             };
             let mut out = [0u8; DIRENT_LEN];
             let mut index = 0u64;
+            let mut err = false;
             loop {
                 match readdir(path, index, &mut out) {
                     READDIR_ENTRY => {
                         let Some(entry) = DirEntry::read_from(&out) else {
                             log("ls: bad entry\n");
+                            err = true;
                             break;
                         };
                         out_bytes(entry.name());
@@ -599,20 +817,28 @@ fn run(line: &[u8]) -> bool {
                         // reports the end must not hang the shell.
                         if index >= 64 {
                             log("ls: too many entries\n");
+                            err = true;
                             break;
                         }
                     }
                     READDIR_END => break,
                     _ => {
                         log("ls: cannot list\n");
+                        err = true;
                         break;
                     }
                 }
+            }
+            if err {
+                set_status(1);
+            } else {
+                set_status(0);
             }
         }
         b"stat" => {
             if count < 2 {
                 log("usage: stat <file>\n");
+                set_status(1);
                 return false;
             }
             let mut path_buf = [0u8; CWD_CAP];
@@ -627,6 +853,7 @@ fn run(line: &[u8]) -> bool {
             };
             if !stat(path, &mut info) {
                 log("stat: no such file\n");
+                set_status(1);
                 return false;
             }
             out_bytes(argv[1]);
@@ -652,10 +879,12 @@ fn run(line: &[u8]) -> bool {
             out_u64(u64::from(info.gid));
             out_bytes(b"\n");
             out_flush();
+            set_status(0);
         }
         b"rm" => {
             if count < 2 {
                 log("usage: rm <file>\n");
+                set_status(1);
                 return false;
             }
             let mut path_buf = [0u8; CWD_CAP];
@@ -665,16 +894,19 @@ fn run(line: &[u8]) -> bool {
                 out_bytes(argv[1]);
                 out_bytes(b"\n");
                 out_flush();
+                set_status(0);
             } else {
                 // A missing file, a denied one, or a read-only mount all
                 // surface as `u64::MAX`; the kernel logs an `audit:` line for
                 // the denial, so this stays deliberately neutral.
                 log("rm: cannot remove\n");
+                set_status(1);
             }
         }
         b"mkdir" => {
             if count < 2 {
                 log("usage: mkdir <dir>\n");
+                set_status(1);
                 return false;
             }
             let mut path_buf = [0u8; CWD_CAP];
@@ -684,16 +916,19 @@ fn run(line: &[u8]) -> bool {
                 out_bytes(argv[1]);
                 out_bytes(b"\n");
                 out_flush();
+                set_status(0);
             } else {
                 // A missing parent, a denied one, a name already in use by a
                 // file, or a read-only mount all surface as `u64::MAX`; the
                 // kernel logs an `audit:` line for a denial.
                 log("mkdir: cannot create\n");
+                set_status(1);
             }
         }
         b"rmdir" => {
             if count < 2 {
                 log("usage: rmdir <dir>\n");
+                set_status(1);
                 return false;
             }
             let mut path_buf = [0u8; CWD_CAP];
@@ -703,16 +938,19 @@ fn run(line: &[u8]) -> bool {
                 out_bytes(argv[1]);
                 out_bytes(b"\n");
                 out_flush();
+                set_status(0);
             } else {
                 // A non-empty directory, a missing one, a denied one, or a
                 // read-only mount all surface as `u64::MAX`. `rm` removes a
                 // file; `rmdir` only removes a directory.
                 log("rmdir: cannot remove\n");
+                set_status(1);
             }
         }
         b"mv" => {
             if count < 3 {
                 log("usage: mv <old> <new>\n");
+                set_status(1);
                 return false;
             }
             let mut old_buf = [0u8; CWD_CAP];
@@ -726,15 +964,18 @@ fn run(line: &[u8]) -> bool {
                 out_bytes(argv[2]);
                 out_bytes(b"\n");
                 out_flush();
+                set_status(0);
             } else {
                 // A missing source, a denied parent, a directory target, or a
                 // cross-mount move all surface as `u64::MAX`.
                 log("mv: cannot move\n");
+                set_status(1);
             }
         }
         b"touch" => {
             if count < 2 {
                 log("usage: touch <file>\n");
+                set_status(1);
                 return false;
             }
             let mut path_buf = [0u8; CWD_CAP];
@@ -746,18 +987,22 @@ fn run(line: &[u8]) -> bool {
                 out_bytes(argv[1]);
                 out_bytes(b"\n");
                 out_flush();
+                set_status(0);
             } else if create(path) == 0 {
                 out_bytes(b"touch: created ");
                 out_bytes(argv[1]);
                 out_bytes(b"\n");
                 out_flush();
+                set_status(0);
             } else {
                 log("touch: cannot create\n");
+                set_status(1);
             }
         }
         b"cp" => {
             if count < 3 {
                 log("usage: cp <src> <dst>\n");
+                set_status(1);
                 return false;
             }
             let mut src_buf = [0u8; CWD_CAP];
@@ -767,6 +1012,7 @@ fn run(line: &[u8]) -> bool {
             let src_fd = open(src);
             if src_fd == u64::MAX {
                 log("cp: cannot open source\n");
+                set_status(1);
                 return false;
             }
             let mut dst_fd = open(dst);
@@ -774,12 +1020,14 @@ fn run(line: &[u8]) -> bool {
                 if create(dst) != 0 {
                     close(src_fd);
                     log("cp: cannot create destination\n");
+                    set_status(1);
                     return false;
                 }
                 dst_fd = open(dst);
                 if dst_fd == u64::MAX {
                     close(src_fd);
                     log("cp: cannot open destination\n");
+                    set_status(1);
                     return false;
                 }
             }
@@ -804,6 +1052,7 @@ fn run(line: &[u8]) -> bool {
             close(dst_fd);
             if failed {
                 log("cp: copy failed\n");
+                set_status(1);
             } else {
                 out_bytes(b"cp: copied ");
                 out_bytes(argv[1]);
@@ -811,11 +1060,13 @@ fn run(line: &[u8]) -> bool {
                 out_bytes(argv[2]);
                 out_bytes(b"\n");
                 out_flush();
+                set_status(0);
             }
         }
         b"append" => {
             if count < 3 {
                 log("usage: append <file> <text>\n");
+                set_status(1);
                 return false;
             }
             let mut path_buf = [0u8; CWD_CAP];
@@ -825,12 +1076,14 @@ fn run(line: &[u8]) -> bool {
                 // A missing file is created on demand, like `write`.
                 if create(path) == u64::MAX {
                     log("append: cannot create\n");
+                    set_status(1);
                     return false;
                 }
                 fd = open(path);
             }
             if fd == u64::MAX {
                 log("append: no such file\n");
+                set_status(1);
                 return false;
             }
             // Seek to the current end, then write there: the file grows
@@ -846,19 +1099,23 @@ fn run(line: &[u8]) -> bool {
             if !stat(path, &mut info) || seek(fd, info.size) != 0 {
                 close(fd);
                 log("append: cannot position\n");
+                set_status(1);
                 return false;
             }
             let wrote = write(fd, argv[2]);
             close(fd);
             if wrote == u64::MAX {
                 log("append: failed\n");
+                set_status(1);
             } else {
                 log("append: ok\n");
+                set_status(0);
             }
         }
         b"write" => {
             if count < 3 {
                 log("usage: write <file> <text>\n");
+                set_status(1);
                 return false;
             }
             let mut path_buf = [0u8; CWD_CAP];
@@ -868,53 +1125,65 @@ fn run(line: &[u8]) -> bool {
                 // A missing file is created on demand, so `write` can make one.
                 if create(path) == u64::MAX {
                     log("write: cannot create\n");
+                    set_status(1);
                     return false;
                 }
                 fd = open(path);
             }
             if fd == u64::MAX {
                 log("write: no such file\n");
+                set_status(1);
                 return false;
             }
             let wrote = write(fd, argv[2]);
             close(fd);
             if wrote == u64::MAX {
                 log("write: failed\n");
+                set_status(1);
                 return false;
             }
             log("write: ok\n");
+            set_status(0);
         }
         b"chmod" => {
             if count < 3 {
                 log("usage: chmod <file> <octal>\n");
+                set_status(1);
                 return false;
             }
             let mut path_buf = [0u8; CWD_CAP];
             let path = resolve_path_buf(argv[1], &mut path_buf);
             let Some(mode) = parse_octal(argv[2]) else {
                 log("chmod: bad mode\n");
+                set_status(1);
                 return false;
             };
             if chmod(path, mode) == 0 {
                 log("chmod: ok\n");
+                set_status(0);
             } else {
                 // The kernel logs the `audit:` line; a denial and an
                 // unsupported filesystem both land here.
                 log("chmod: failed\n");
+                set_status(1);
             }
         }
         b"mount" => {
             if mount(DATA_MOUNT, FS_ID_ZCFS) == 0 {
                 log("mount: /data ok\n");
+                set_status(0);
             } else {
                 log("mount: /data failed\n");
+                set_status(1);
             }
         }
         b"umount" => {
             if umount(DATA_MOUNT) == 0 {
                 log("umount: /data ok\n");
+                set_status(0);
             } else {
                 log("umount: /data failed\n");
+                set_status(1);
             }
         }
         b"sync" => {
@@ -922,8 +1191,10 @@ fn run(line: &[u8]) -> bool {
             // stamps itself clean, so a crash after this needs no recovery.
             if sync() == 0 {
                 log("sync: ok\n");
+                set_status(0);
             } else {
                 log("sync: failed\n");
+                set_status(1);
             }
         }
         b"tmp" => {
@@ -935,24 +1206,28 @@ fn run(line: &[u8]) -> bool {
             if fd == u64::MAX {
                 if create(TMP_PATH) == u64::MAX {
                     log("tmp: cannot create\n");
+                    set_status(1);
                     return false;
                 }
                 fd = open(TMP_PATH);
             }
             if fd == u64::MAX {
                 log("tmp: no such file\n");
+                set_status(1);
                 return false;
             }
             let wrote = write(fd, TMP_PATTERN);
             close(fd);
             if wrote != TMP_PATTERN.len() as u64 {
                 log("tmp: write failed\n");
+                set_status(1);
                 return false;
             }
             // Re-open and read back: the bytes came out of RAM, not the disk.
             let fd = open(TMP_PATH);
             if fd == u64::MAX {
                 log("tmp: reopen failed\n");
+                set_status(1);
                 return false;
             }
             let mut buffer = [0u8; 32];
@@ -960,20 +1235,24 @@ fn run(line: &[u8]) -> bool {
             close(fd);
             if got != TMP_PATTERN.len() as u64 || &buffer[..got as usize] != TMP_PATTERN {
                 log("tmp: mismatch\n");
+                set_status(1);
                 return false;
             }
             log("tmp: ok\n");
+            set_status(0);
         }
         b"persist" => {
             let fd = open(PERSIST_PATH);
             if fd == u64::MAX {
                 log("persist: open failed\n");
+                set_status(1);
                 return false;
             }
             let wrote = write(fd, PERSIST_PATTERN);
             close(fd);
             if wrote != PERSIST_PATTERN.len() as u64 {
                 log("persist: write failed\n");
+                set_status(1);
                 return false;
             }
             // Unmount, then mount again. The second mount replays the volume
@@ -981,11 +1260,13 @@ fn run(line: &[u8]) -> bool {
             // bytes are durable rather than cached.
             if umount(DATA_MOUNT) != 0 || mount(DATA_MOUNT, FS_ID_ZCFS) != 0 {
                 log("persist: remount failed\n");
+                set_status(1);
                 return false;
             }
             let fd = open(PERSIST_PATH);
             if fd == u64::MAX {
                 log("persist: reopen failed\n");
+                set_status(1);
                 return false;
             }
             let mut buffer = [0u8; 32];
@@ -995,9 +1276,11 @@ fn run(line: &[u8]) -> bool {
                 || &buffer[..got as usize] != PERSIST_PATTERN
             {
                 log("persist: mismatch\n");
+                set_status(1);
                 return false;
             }
             log("vfs: persistence ok\n");
+            set_status(0);
         }
         b"id" => {
             let word = getid();
@@ -1009,6 +1292,7 @@ fn run(line: &[u8]) -> bool {
             out_u64(session());
             out_bytes(b"\n");
             out_flush();
+            set_status(0);
         }
         b"svc" => {
             // The catalog is the only list of service identity; the shell
@@ -1054,6 +1338,7 @@ fn run(line: &[u8]) -> bool {
                 out_bytes(b"\n");
                 out_flush();
             }
+            set_status(0);
         }
         b"dev" => {
             let mut index = 0;
@@ -1083,6 +1368,7 @@ fn run(line: &[u8]) -> bool {
                     }
                 }
             }
+            set_status(0);
         }
         b"uname" => {
             let mut show_sys = false;
@@ -1108,6 +1394,7 @@ fn run(line: &[u8]) -> bool {
                             }
                             _ => {
                                 log("uname: invalid option\n");
+                                set_status(1);
                                 return false;
                             }
                         }
@@ -1141,6 +1428,7 @@ fn run(line: &[u8]) -> bool {
             }
             out_bytes(b"\n");
             out_flush();
+            set_status(0);
         }
         b"free" | b"mem" => {
             let mut info = MemInfo {
@@ -1158,8 +1446,10 @@ fn run(line: &[u8]) -> bool {
                 out_u64(info.free_bytes / 1024);
                 out_bytes(b" KB\n");
                 out_flush();
+                set_status(0);
             } else {
                 log("free: failed to read memory info\n");
+                set_status(1);
             }
         }
         b"ps" => {
@@ -1211,10 +1501,12 @@ fn run(line: &[u8]) -> bool {
             out_u64(alive);
             out_bytes(b" alive\n");
             out_flush();
+            set_status(0);
         }
         b"spawn" => {
             if count < 2 {
                 log("usage: spawn <image> [session]\n");
+                set_status(1);
                 return false;
             }
             let name = core::str::from_utf8(argv[1]).unwrap_or("");
@@ -1233,6 +1525,7 @@ fn run(line: &[u8]) -> bool {
                 // client, no free slot); this message stays neutral, as
                 // `cat` does for a missing or denied file.
                 log("spawn: cannot spawn\n");
+                set_status(1);
                 return false;
             }
             out_bytes(b"spawn: task ");
@@ -1241,14 +1534,17 @@ fn run(line: &[u8]) -> bool {
             out_bytes(argv[1]);
             out_bytes(b"\n");
             out_flush();
+            set_status(0);
         }
         b"kill" => {
             if count < 2 {
                 log("usage: kill <slot> [status]\n");
+                set_status(1);
                 return false;
             }
             let Some(slot) = parse_decimal(argv[1]) else {
                 log("kill: bad slot\n");
+                set_status(1);
                 return false;
             };
             // A status is optional so `kill <slot>` means the conventional
@@ -1256,6 +1552,7 @@ fn run(line: &[u8]) -> bool {
             let status = if count >= 3 {
                 let Some(status) = parse_decimal(argv[2]) else {
                     log("kill: bad status\n");
+                    set_status(1);
                     return false;
                 };
                 status
@@ -1266,6 +1563,7 @@ fn run(line: &[u8]) -> bool {
                 // The kernel logs the exact reason (supervised, boot task,
                 // dead, own slot); this message stays neutral like `wait`'s.
                 log("kill: cannot kill\n");
+                set_status(1);
                 return false;
             }
             out_bytes(b"kill: task ");
@@ -1274,14 +1572,17 @@ fn run(line: &[u8]) -> bool {
             out_u64(status);
             out_bytes(b"\n");
             out_flush();
+            set_status(0);
         }
         b"wait" => {
             if count < 2 {
                 log("usage: wait <slot>\n");
+                set_status(1);
                 return false;
             }
             let Some(slot) = parse_decimal(argv[1]) else {
                 log("wait: bad slot\n");
+                set_status(1);
                 return false;
             };
             let status = wait(slot);
@@ -1289,6 +1590,7 @@ fn run(line: &[u8]) -> bool {
                 // Supervised, own, unknown, and already reaped slots all fail
                 // closed; the kernel's audit line names which one it was.
                 log("wait: cannot wait\n");
+                set_status(1);
                 return false;
             }
             out_bytes(b"wait: task ");
@@ -1297,22 +1599,26 @@ fn run(line: &[u8]) -> bool {
             out_u64(status);
             out_bytes(b"\n");
             out_flush();
+            set_status(0);
         }
         b"notify" => {
             if count < 3 {
                 log("usage: notify <slot> <bits>\n");
+                set_status(1);
                 return false;
             }
             let (Some(slot), Some(bits)) =
                 (parse_decimal(argv[1]), parse_decimal(argv[2]))
             else {
                 log("notify: bad arguments\n");
+                set_status(1);
                 return false;
             };
             if notify(slot, bits) == u64::MAX {
                 // The kernel logs the exact reason (empty bits, dead slot,
                 // another session); this message stays neutral like `kill`'s.
                 log("notify: cannot notify\n");
+                set_status(1);
                 return false;
             }
             out_bytes(b"notify: task ");
@@ -1321,58 +1627,71 @@ fn run(line: &[u8]) -> bool {
             out_u64(bits);
             out_bytes(b"\n");
             out_flush();
+            set_status(0);
         }
         b"event" => {
             if count < 2 {
                 log("usage: event <mask>\n");
+                set_status(1);
                 return false;
             }
             let Some(mask) = parse_decimal(argv[1]) else {
                 log("event: bad mask\n");
+                set_status(1);
                 return false;
             };
             let bits = event_wait(mask);
             if bits == u64::MAX {
                 log("event: cannot wait\n");
+                set_status(1);
                 return false;
             }
             out_bytes(b"event: got ");
             out_u64(bits);
             out_bytes(b"\n");
             out_flush();
+            set_status(0);
         }
         b"session" => {
             let id = session_create();
             if id == u64::MAX {
                 log("session: cannot create\n");
+                set_status(1);
                 return false;
             }
             out_bytes(b"session: created ");
             out_u64(id);
             out_bytes(b"\n");
             out_flush();
+            set_status(0);
         }
         b"signal" => {
             if signal(1, zc_signal_handler as *const () as u64) == u64::MAX {
                 log("signal: cannot register\n");
+                set_status(1);
                 return false;
             }
             log("signal: registered\n");
+            set_status(0);
         }
         b"raise" => {
             if count < 3 {
                 log("usage: raise <slot> <sig>\n");
+                set_status(1);
                 return false;
             }
             let (Some(slot), Some(sig)) = (parse_decimal(argv[1]), parse_decimal(argv[2])) else {
                 log("raise: bad arguments\n");
+                set_status(1);
                 return false;
             };
             if raise(slot, sig) == u64::MAX {
                 log("raise: cannot raise\n");
+                set_status(1);
                 return false;
             }
             log("raise: ok\n");
+            set_status(0);
         }
         b"dmesg" => {
             // The ring is read-only kernel diagnostics; printing it goes
@@ -1385,8 +1704,10 @@ fn run(line: &[u8]) -> bool {
             let got = log_read(0, buffer);
             if got == u64::MAX {
                 log("dmesg: cannot read\n");
+                set_status(1);
             } else {
                 print_lines(&buffer[..got as usize]);
+                set_status(0);
             }
         }
         b"date" | b"time" => {
@@ -1400,8 +1721,10 @@ fn run(line: &[u8]) -> bool {
                     out_bytes(b" (proof)\n");
                 }
                 out_flush();
+                set_status(0);
             } else {
                 log("date: bad clock reading\n");
+                set_status(1);
             }
         }
         b"uptime" => {
@@ -1420,6 +1743,7 @@ fn run(line: &[u8]) -> bool {
             out_u64(frac);
             out_bytes(b"s\n");
             out_flush();
+            set_status(0);
         }
         b"exit" => {
             // `exit [status]` records the status the entry loop passes to
@@ -1438,6 +1762,7 @@ fn run(line: &[u8]) -> bool {
             // Tell the block domain to flush and stop, so the boot can end
             // with the volume clean instead of waiting out the timeout.
             let _ = send_to(IPC_FS as u64, FS_OP_STOP as u64);
+            set_status(0);
             return true;
         }
         b"poweroff" => {
@@ -1449,6 +1774,7 @@ fn run(line: &[u8]) -> bool {
         }
         _ => {
             log("unknown command\n");
+            set_status(127);
         }
     }
     false

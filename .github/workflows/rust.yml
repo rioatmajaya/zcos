@@ -68,6 +68,14 @@ jobs:
         grep -F -q "$(printf 'task 2: /tmp\r')" build/boot.log
         grep -q "task 2: cd: no such file or directory" build/boot.log
         grep -q "task 2: cd: not a directory" build/boot.log
+        # Shell redirection and exit status tracking (ADR 0101).
+        grep -q "task 2: redir_one" build/boot.log
+        grep -q "redir_two" build/boot.log
+        grep -q "task 2: rm: removed redir.txt" build/boot.log
+        grep -q "task 2: rm: removed redir_pwd.txt" build/boot.log
+        grep -q "task 2: redir: cannot open file" build/boot.log
+        grep -F -q "$(printf 'task 2: 1\r')" build/boot.log
+        grep -F -q "$(printf 'task 2: 0\r')" build/boot.log
         grep -q "task 2: relative.txt: file, 8 bytes" build/boot.log
         grep -q "task 2: rm: removed relative.txt" build/boot.log
         grep -q "task 2: touch: created /tmp/touched" build/boot.log

@@ -72,6 +72,18 @@ cd /tmp
 pwd
 cd nonexistent
 cd /hello.txt
+echo $?
+echo redir_one > redir.txt
+cat redir.txt
+echo $?
+echo redir_two >> redir.txt
+cat redir.txt
+pwd > redir_pwd.txt
+cat redir_pwd.txt
+rm redir.txt
+rm redir_pwd.txt
+echo fail > /nonexistent_dir/file.txt
+echo $?
 write relative.txt TEST_REL
 cat relative.txt
 stat relative.txt

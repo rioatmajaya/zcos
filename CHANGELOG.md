@@ -396,6 +396,14 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **Shell standard output redirection and exit status tracking** (F7j, F4, shell): `zc-shell`
+  supports standard output redirection with `>` (overwrite/create) and `>>` (append),
+  resolving target file paths against the current working directory. The shell tracks the exit
+  status of the previous command across all built-in commands (0 for success, non-zero for
+  errors, 127 for unknown commands) and exposes it via `echo $?`. `tools/boot-script.txt`
+  exercises redirection, status checks, append, and error conditions under the scripted proof.
+  See [ADR 0101](docs/adr/0101-shell-stdout-redirection-and-exit-status.md).
+
 - **Shell working directory tracking and relative path resolution** (F7j, F4, shell): `zc_shell`
   maintains working directory state (`CWD`) starting at `/` and adds built-in commands
   `pwd` (prints current working directory) and `cd` (changes directory, validating

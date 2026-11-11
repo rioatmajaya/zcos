@@ -107,6 +107,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0098](0098-file-utilities-in-the-shell.md) | File utilities in the shell: cp, touch, head, and wc | Accepted |
 | [0099](0099-synchronize-boot-feeder-with-shell-ready-prompt.md) | Synchronize boot feeder with shell ready prompt | Accepted |
 | [0100](0100-shell-working-directory-and-relative-paths.md) | Shell working directory tracking and relative path resolution | Accepted |
+| [0101](0101-shell-stdout-redirection-and-exit-status.md) | Shell standard output redirection and exit status tracking | Accepted |
 
 ## Adding a decision
 
