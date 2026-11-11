@@ -396,6 +396,14 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **Shell environment variables and parameter expansion** (F7j, F4, shell): `zc-shell` adds
+  static environment storage (`export`, `set`, `unset`, and `env`) with default standard
+  variables (`USER`, `HOME`, `OS`, `SHELL`, and dynamic `PWD`). Arguments and redirection
+  targets expand `$VAR` references, `$PWD`, and `$?` exit status directly within `#![no_std]`
+  without dynamic allocations, allowing variables and status codes to be used in command arguments
+  and conditionals (`test $? = 0`, `[ $GREET = zcos_env_ok ]`).
+  See [ADR 0104](docs/adr/0104-shell-environment-variables-and-parameter-expansion.md).
+
 - **Shell command chaining with ;, &&, and ||** (F7j, F4, shell): `zc-shell` supports sequential
   execution with `;` and conditional execution with `&&` (runs if previous status was 0) and
   `||` (runs if previous status was non-zero). Each segment in a chain independently executes

@@ -1,17 +1,18 @@
 //! Shell task: an interactive command line over the serial port.
 //!
 //! Reads keystrokes with blocking serial reads, edits a single line with
-//! backspace support, and runs `help`, `echo`, `cd`, `pwd`, `cat`, `head`, `wc`, `ls`, `stat`,
+//! backspace support, and runs `help`, `echo`, `cd`, `pwd`, `cat`, `head`, `wc`,
+//! `grep`, `test`, `true`, `false`, `export`, `set`, `unset`, `env`, `ls`, `stat`,
 //! `touch`, `cp`, `write`, `append`, `rm`, `mkdir`, `rmdir`, `mv`, `sync`, `tmp`,
 //! `persist`, `chmod`, `mount`, `umount`, `id`, `svc`, `ps`, `spawn`, `kill`, `wait`,
 //! `notify`, `event`, `session`, `signal`, `raise`, `dmesg`, `date`, `dev`, `uname`,
-//! `free`, `uptime`, `poweroff`, and `exit`. Also includes pattern matching with
-//! `grep`, and conditional testing with `test`, `[`, `true`, and `false`. Output normally goes
+//! `free`, `uptime`, `poweroff`, and `exit`. Output normally goes
 //! through the log syscall, so the transcript appears in the kernel serial log.
 //! Standard output can also be redirected to files with `> <file>` (truncate or
 //! create) and `>> <file>` (append), resolving relative paths against the
 //! current working directory. The exit status of the previous command is tracked
-//! and observable via `echo $?`.
+//! and observable via `echo $?`. Environment variables are supported via `export`,
+//! `set`, `unset`, and `env`, with parameter expansion (`$VAR`, `$?`, `$PWD`).
 //!
 //! `id` asks the kernel for this task's user and group ids plus its session.
 //! The shell runs as an unprivileged user, so `id` is the observable side of
@@ -120,6 +121,7 @@ fn set_cwd(path: &[u8]) {
             .copy_from_nonoverlapping(path.as_ptr(), end);
         core::ptr::addr_of_mut!(CWD_LEN).write(end);
     }
+    let _ = env_set(b"PWD", get_cwd());
 }
 
 /// Resolves `input` relative to [`get_cwd`] into canonical form inside `buf`,
@@ -266,6 +268,163 @@ fn trim_ascii(mut bytes: &[u8]) -> &[u8] {
         }
     }
     bytes
+}
+
+/// Capacity of environment variables table.
+const ENV_CAP: usize = 16;
+/// Maximum length of an environment variable key.
+const ENV_KEY_CAP: usize = 32;
+/// Maximum length of an environment variable value.
+const ENV_VAL_CAP: usize = 64;
+
+#[derive(Copy, Clone)]
+struct EnvEntry {
+    key: [u8; ENV_KEY_CAP],
+    key_len: usize,
+    val: [u8; ENV_VAL_CAP],
+    val_len: usize,
+    occupied: bool,
+}
+
+static mut ENV_TABLE: [EnvEntry; ENV_CAP] = [EnvEntry {
+    key: [0; ENV_KEY_CAP],
+    key_len: 0,
+    val: [0; ENV_VAL_CAP],
+    val_len: 0,
+    occupied: false,
+}; ENV_CAP];
+
+static mut ENV_INIT_DONE: bool = false;
+
+/// Formatted buffer for `$?` status string expansion per argument slot.
+static mut STATUS_EXP_BUFS: [[u8; 16]; 16] = [[0; 16]; 16];
+
+/// Formats a `u32` into ASCII decimal bytes in `buf`. Returns the number of bytes written.
+fn format_u32(mut val: u32, buf: &mut [u8; 16]) -> usize {
+    if val == 0 {
+        buf[0] = b'0';
+        return 1;
+    }
+    let mut tmp = [0u8; 16];
+    let mut tlen = 0;
+    while val > 0 {
+        tmp[tlen] = b'0' + (val % 10) as u8;
+        val /= 10;
+        tlen += 1;
+    }
+    for i in 0..tlen {
+        buf[i] = tmp[tlen - 1 - i];
+    }
+    tlen
+}
+
+/// Initializes default environment variables.
+fn env_init() {
+    unsafe {
+        if core::ptr::addr_of!(ENV_INIT_DONE).read() {
+            return;
+        }
+        core::ptr::addr_of_mut!(ENV_INIT_DONE).write(true);
+    }
+    let _ = env_set(b"USER", b"user");
+    let _ = env_set(b"HOME", b"/");
+    let _ = env_set(b"OS", b"zcos");
+    let _ = env_set(b"SHELL", b"zc-shell");
+    let _ = env_set(b"PWD", get_cwd());
+}
+
+/// Sets or updates an environment variable `key` with `val`.
+fn env_set(key: &[u8], val: &[u8]) -> bool {
+    if key.is_empty() || key.len() > ENV_KEY_CAP || val.len() > ENV_VAL_CAP {
+        return false;
+    }
+    unsafe {
+        for i in 0..ENV_CAP {
+            let entry = &mut *core::ptr::addr_of_mut!(ENV_TABLE[i]);
+            if entry.occupied && entry.key_len == key.len() && &entry.key[..entry.key_len] == key {
+                entry.val[..val.len()].copy_from_slice(val);
+                entry.val_len = val.len();
+                return true;
+            }
+        }
+        for i in 0..ENV_CAP {
+            let entry = &mut *core::ptr::addr_of_mut!(ENV_TABLE[i]);
+            if !entry.occupied {
+                entry.key[..key.len()].copy_from_slice(key);
+                entry.key_len = key.len();
+                entry.val[..val.len()].copy_from_slice(val);
+                entry.val_len = val.len();
+                entry.occupied = true;
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Looks up an environment variable by `key`.
+fn env_get(key: &[u8]) -> Option<&'static [u8]> {
+    unsafe {
+        for i in 0..ENV_CAP {
+            let entry = &*core::ptr::addr_of!(ENV_TABLE[i]);
+            if entry.occupied && entry.key_len == key.len() && &entry.key[..entry.key_len] == key {
+                return Some(&entry.val[..entry.val_len]);
+            }
+        }
+    }
+    None
+}
+
+/// Removes an environment variable by `key`.
+fn env_unset(key: &[u8]) {
+    unsafe {
+        for i in 0..ENV_CAP {
+            let entry = &mut *core::ptr::addr_of_mut!(ENV_TABLE[i]);
+            if entry.occupied && entry.key_len == key.len() && &entry.key[..entry.key_len] == key {
+                entry.occupied = false;
+                return;
+            }
+        }
+    }
+}
+
+/// Prints all defined environment variables to stdout/redirection.
+fn env_print() {
+    unsafe {
+        for i in 0..ENV_CAP {
+            let entry = &*core::ptr::addr_of!(ENV_TABLE[i]);
+            if entry.occupied {
+                out_bytes(&entry.key[..entry.key_len]);
+                out_bytes(b"=");
+                out_bytes(&entry.val[..entry.val_len]);
+                out_bytes(b"\n");
+            }
+        }
+    }
+    out_flush();
+}
+
+/// Expands a single argument word, replacing `$VAR`, `$?`, or `$PWD` if applicable.
+fn expand_word<'a>(word: &'a [u8], slot: usize) -> &'a [u8] {
+    if word == b"$?" {
+        let status = get_status();
+        unsafe {
+            let buf = &mut *core::ptr::addr_of_mut!(STATUS_EXP_BUFS[slot]);
+            let len = format_u32(status, buf);
+            core::slice::from_raw_parts(buf.as_ptr(), len)
+        }
+    } else if word == b"$PWD" {
+        get_cwd()
+    } else if word.starts_with(b"$") && word.len() > 1 {
+        let key = &word[1..];
+        if let Some(val) = env_get(key) {
+            val
+        } else {
+            b""
+        }
+    } else {
+        word
+    }
 }
 
 /// Longest captured line `dmesg` prints in one syscall, excluding the newline.
@@ -528,6 +687,7 @@ pub extern "C" fn zc_signal_handler() {
 
 /// Runs a single command line segment with optional stdout redirection. Returns whether to exit the shell.
 fn run_single(line: &[u8]) -> bool {
+    env_init();
     let mut argv: [&[u8]; 16] = [&[]; 16];
     let mut count = 0;
     let mut redir_mode = RedirMode::None;
@@ -536,7 +696,7 @@ fn run_single(line: &[u8]) -> bool {
 
     split(line, |word| {
         if expect_target {
-            redir_target = Some(word);
+            redir_target = Some(expand_word(word, 15));
             expect_target = false;
         } else if word == b">" {
             redir_mode = RedirMode::Overwrite;
@@ -546,10 +706,10 @@ fn run_single(line: &[u8]) -> bool {
             expect_target = true;
         } else if word.starts_with(b">>") && word.len() > 2 {
             redir_mode = RedirMode::Append;
-            redir_target = Some(&word[2..]);
+            redir_target = Some(expand_word(&word[2..], 15));
         } else if word.starts_with(b">") && word.len() > 1 {
             redir_mode = RedirMode::Overwrite;
-            redir_target = Some(&word[1..]);
+            redir_target = Some(expand_word(&word[1..], 15));
         } else if count < argv.len() {
             argv[count] = word;
             count += 1;
@@ -560,6 +720,13 @@ fn run_single(line: &[u8]) -> bool {
         log("redir: missing target file\n");
         set_status(1);
         return false;
+    }
+
+    // Expand variables in arguments (except for export/set/unset where variable names are managed)
+    for i in 0..count {
+        if i == 0 || (argv[0] != b"export" && argv[0] != b"set" && argv[0] != b"unset") {
+            argv[i] = expand_word(argv[i], i);
+        }
     }
 
     let redir_fd = if let Some(target) = redir_target {
@@ -708,7 +875,7 @@ fn run(line: &[u8]) -> bool {
 fn execute_cmd(argv: &[&[u8]], count: usize) -> bool {
     match argv[0] {
         b"help" => {
-            let msg = b"Commands: help echo cd pwd cat head wc grep test true false ls stat touch cp write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc dev uname free ps spawn kill wait notify event session signal raise dmesg date uptime poweroff exit\n";
+            let msg = b"Commands: help echo cd pwd cat head wc grep test true false export set unset env ls stat touch cp write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc dev uname free ps spawn kill wait notify event session signal raise dmesg date uptime poweroff exit\n";
             unsafe {
                 let redir = core::ptr::addr_of!(REDIR_FD).read();
                 if redir != u64::MAX {
@@ -1085,6 +1252,43 @@ fn execute_cmd(argv: &[&[u8]], count: usize) -> bool {
                 log("test: too many arguments\n");
                 set_status(2);
             }
+        }
+        b"export" | b"set" => {
+            if count < 2 {
+                env_print();
+                set_status(0);
+                return false;
+            }
+            let (key, val) = if let Some(eq_pos) = argv[1].iter().position(|&b| b == b'=') {
+                let k = &argv[1][..eq_pos];
+                let v = &argv[1][eq_pos + 1..];
+                let v_exp = expand_word(v, 1);
+                (k, v_exp)
+            } else if count >= 3 {
+                let v_exp = expand_word(argv[2], 2);
+                (argv[1], v_exp)
+            } else {
+                (argv[1], &b""[..])
+            };
+            if env_set(key, val) {
+                set_status(0);
+            } else {
+                log("env: cannot set variable\n");
+                set_status(1);
+            }
+        }
+        b"unset" => {
+            if count < 2 {
+                log("usage: unset <VAR>\n");
+                set_status(1);
+                return false;
+            }
+            env_unset(argv[1]);
+            set_status(0);
+        }
+        b"env" => {
+            env_print();
+            set_status(0);
         }
         b"ls" => {
             let mut path_buf = [0u8; CWD_CAP];
@@ -2081,6 +2285,7 @@ fn execute_cmd(argv: &[&[u8]], count: usize) -> bool {
 /// Task entry point; the kernel provides a fresh user stack.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
+    env_init();
     log("shell ready\n");
     loop {
         log("> ");

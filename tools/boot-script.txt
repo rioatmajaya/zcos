@@ -133,4 +133,8 @@ uname -a
 dev
 free
 uptime
+export GREET=zcos_env_ok
+echo $GREET
+[ $GREET = zcos_env_ok ] && echo env_test_ok
+unset GREET
 exit
