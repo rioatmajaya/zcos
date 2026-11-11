@@ -396,6 +396,16 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **Shell working directory tracking and relative path resolution** (F7j, F4, shell): `zc_shell`
+  maintains working directory state (`CWD`) starting at `/` and adds built-in commands
+  `pwd` (prints current working directory) and `cd` (changes directory, validating
+  existence and `KIND_DIR`). Path arguments across file utilities (`cat`, `head`, `wc`,
+  `ls`, `stat`, `touch`, `cp`, `write`, `append`, `rm`, `mkdir`, `rmdir`, `mv`, `chmod`)
+  now resolve through canonical relative path resolution with `.` and `..` normalization.
+  `tools/boot-script.txt` exercises directory navigation, relative file creation and removal,
+  and directory error conditions.
+  See [ADR 0100](docs/adr/0100-shell-working-directory-and-relative-paths.md).
+
 - **File utilities in the shell: cp, touch, head, and wc** (F7j, F4, shell): `zc_shell`
   adds built-in commands `touch` (ensures file existence or creates via `SYS_CREATE`),
   `cp` (streams file content in 64-byte chunks via `SYS_READ` and `SYS_WRITE`), `head`

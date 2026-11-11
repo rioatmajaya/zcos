@@ -1,7 +1,7 @@
 //! Shell task: an interactive command line over the serial port.
 //!
 //! Reads keystrokes with blocking serial reads, edits a single line with
-//! backspace support, and runs `help`, `echo`, `cat`, `head`, `wc`, `ls`, `stat`,
+//! backspace support, and runs `help`, `echo`, `cd`, `pwd`, `cat`, `head`, `wc`, `ls`, `stat`,
 //! `touch`, `cp`, `write`, `append`, `rm`, `mkdir`, `rmdir`, `mv`, `sync`, `tmp`,
 //! `persist`, `chmod`, `mount`, `umount`, `id`, `svc`, `ps`, `spawn`, `kill`, `wait`,
 //! `notify`, `event`, `session`, `signal`, `raise`, `dmesg`, `date`, `dev`, `uname`,
@@ -74,6 +74,111 @@ const DATA_MOUNT: &str = "/data";
 
 /// The file `persist` writes, on the zcfs volume mounted at [`DATA_MOUNT`].
 const PERSIST_PATH: &str = "/data/probe";
+
+/// Longest working directory path accepted.
+const CWD_CAP: usize = 128;
+
+/// Current working directory path in ASCII.
+static mut CWD: [u8; CWD_CAP] = {
+    let mut buf = [0u8; CWD_CAP];
+    buf[0] = b'/';
+    buf
+};
+/// Used bytes in [`CWD`].
+static mut CWD_LEN: usize = 1;
+
+/// Returns the current working directory as an ASCII byte slice.
+fn get_cwd() -> &'static [u8] {
+    // SAFETY: owned here; single-threaded execution and no other task touches this buffer.
+    unsafe {
+        let len = core::ptr::addr_of!(CWD_LEN).read();
+        core::slice::from_raw_parts(core::ptr::addr_of!(CWD).cast::<u8>(), len)
+    }
+}
+
+/// Updates the current working directory to `path`.
+///
+/// Invariant: CWD always begins with `/` and contains no trailing slash unless
+/// it is the root `/`.
+fn set_cwd(path: &[u8]) {
+    if path.is_empty() || path.len() >= CWD_CAP || path[0] != b'/' {
+        return;
+    }
+    let mut end = path.len();
+    while end > 1 && path[end - 1] == b'/' {
+        end -= 1;
+    }
+    // SAFETY: owned here; single-threaded execution and no other task touches this buffer.
+    unsafe {
+        core::ptr::addr_of_mut!(CWD)
+            .cast::<u8>()
+            .copy_from_nonoverlapping(path.as_ptr(), end);
+        core::ptr::addr_of_mut!(CWD_LEN).write(end);
+    }
+}
+
+/// Resolves `input` relative to [`get_cwd`] into canonical form inside `buf`,
+/// returning it as a string slice.
+///
+/// If `input` is empty, returns the current working directory.
+/// If `input` begins with `/`, it is treated as absolute; otherwise it is
+/// resolved relative to `get_cwd()`. Components `.` and `..` are normalized.
+fn resolve_path_buf<'a>(input: &[u8], buf: &'a mut [u8; CWD_CAP]) -> &'a str {
+    let mut out_len = if input.starts_with(b"/") {
+        buf[0] = b'/';
+        1
+    } else {
+        let cwd = get_cwd();
+        let take = cwd.len().min(CWD_CAP);
+        buf[..take].copy_from_slice(&cwd[..take]);
+        take
+    };
+
+    let mut i = 0;
+    while i < input.len() {
+        while i < input.len() && input[i] == b'/' {
+            i += 1;
+        }
+        if i >= input.len() {
+            break;
+        }
+        let start = i;
+        while i < input.len() && input[i] != b'/' {
+            i += 1;
+        }
+        let comp = &input[start..i];
+        if comp == b"." {
+            // Current directory: no modification
+        } else if comp == b".." {
+            if out_len > 1 {
+                let mut last_slash = out_len - 1;
+                while last_slash > 0 && buf[last_slash] != b'/' {
+                    last_slash -= 1;
+                }
+                out_len = if last_slash == 0 { 1 } else { last_slash };
+            }
+        } else {
+            if out_len > 1 {
+                if out_len < CWD_CAP {
+                    buf[out_len] = b'/';
+                    out_len += 1;
+                }
+            } else if out_len == 1 && buf[0] == b'/' {
+                // At root `/`, first child character immediately follows `/`
+            }
+            let take = comp.len().min(CWD_CAP.saturating_sub(out_len));
+            buf[out_len..out_len + take].copy_from_slice(&comp[..take]);
+            out_len += take;
+        }
+    }
+
+    if out_len == 0 {
+        buf[0] = b'/';
+        out_len = 1;
+    }
+
+    core::str::from_utf8(&buf[..out_len]).unwrap_or("/")
+}
 
 /// Longest command line accepted.
 const LINE_CAP: usize = 128;
@@ -320,7 +425,7 @@ fn run(line: &[u8]) -> bool {
     }
     match argv[0] {
         b"help" => {
-            log("Commands: help echo cat head wc ls stat touch cp write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc dev uname free ps spawn kill wait notify event session signal raise dmesg date uptime poweroff exit\n");
+            log("Commands: help echo cd pwd cat head wc ls stat touch cp write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc dev uname free ps spawn kill wait notify event session signal raise dmesg date uptime poweroff exit\n");
         }
         b"echo" => {
             for index in 1..count {
@@ -332,12 +437,43 @@ fn run(line: &[u8]) -> bool {
             out_bytes(b"\n");
             out_flush();
         }
+        b"cd" => {
+            if count < 2 || argv[1] == b"/" || argv[1] == b"~" {
+                set_cwd(b"/");
+                return false;
+            }
+            let mut target_buf = [0u8; CWD_CAP];
+            let target = resolve_path_buf(argv[1], &mut target_buf);
+            let mut st = Stat {
+                kind: 0,
+                mode: 0,
+                size: 0,
+                node: 0,
+                uid: 0,
+                gid: 0,
+            };
+            if !stat(target, &mut st) {
+                log("cd: no such file or directory\n");
+                return false;
+            }
+            if st.kind != KIND_DIR {
+                log("cd: not a directory\n");
+                return false;
+            }
+            set_cwd(target.as_bytes());
+        }
+        b"pwd" => {
+            out_bytes(get_cwd());
+            out_bytes(b"\n");
+            out_flush();
+        }
         b"cat" => {
             if count < 2 {
                 log("usage: cat <file>\n");
                 return false;
             }
-            let path = core::str::from_utf8(argv[1]).unwrap_or("");
+            let mut path_buf = [0u8; CWD_CAP];
+            let path = resolve_path_buf(argv[1], &mut path_buf);
             let fd = open(path);
             if fd == u64::MAX {
                 // A missing file and a denied one both surface as `u64::MAX`;
@@ -362,7 +498,8 @@ fn run(line: &[u8]) -> bool {
                 log("usage: head <file>\n");
                 return false;
             }
-            let path = core::str::from_utf8(argv[1]).unwrap_or("");
+            let mut path_buf = [0u8; CWD_CAP];
+            let path = resolve_path_buf(argv[1], &mut path_buf);
             let fd = open(path);
             if fd == u64::MAX {
                 log("head: cannot open\n");
@@ -393,7 +530,8 @@ fn run(line: &[u8]) -> bool {
                 log("usage: wc <file>\n");
                 return false;
             }
-            let path = core::str::from_utf8(argv[1]).unwrap_or("");
+            let mut path_buf = [0u8; CWD_CAP];
+            let path = resolve_path_buf(argv[1], &mut path_buf);
             let fd = open(path);
             if fd == u64::MAX {
                 log("wc: cannot open\n");
@@ -435,10 +573,11 @@ fn run(line: &[u8]) -> bool {
             out_flush();
         }
         b"ls" => {
+            let mut path_buf = [0u8; CWD_CAP];
             let path = if count < 2 {
-                "/"
+                core::str::from_utf8(get_cwd()).unwrap_or("/")
             } else {
-                core::str::from_utf8(argv[1]).unwrap_or("/")
+                resolve_path_buf(argv[1], &mut path_buf)
             };
             let mut out = [0u8; DIRENT_LEN];
             let mut index = 0u64;
@@ -476,7 +615,8 @@ fn run(line: &[u8]) -> bool {
                 log("usage: stat <file>\n");
                 return false;
             }
-            let path = core::str::from_utf8(argv[1]).unwrap_or("");
+            let mut path_buf = [0u8; CWD_CAP];
+            let path = resolve_path_buf(argv[1], &mut path_buf);
             let mut info = Stat {
                 kind: 0,
                 mode: 0,
@@ -518,7 +658,8 @@ fn run(line: &[u8]) -> bool {
                 log("usage: rm <file>\n");
                 return false;
             }
-            let path = core::str::from_utf8(argv[1]).unwrap_or("");
+            let mut path_buf = [0u8; CWD_CAP];
+            let path = resolve_path_buf(argv[1], &mut path_buf);
             if unlink(path) == 0 {
                 out_bytes(b"rm: removed ");
                 out_bytes(argv[1]);
@@ -536,7 +677,8 @@ fn run(line: &[u8]) -> bool {
                 log("usage: mkdir <dir>\n");
                 return false;
             }
-            let path = core::str::from_utf8(argv[1]).unwrap_or("");
+            let mut path_buf = [0u8; CWD_CAP];
+            let path = resolve_path_buf(argv[1], &mut path_buf);
             if mkdir(path) == 0 {
                 out_bytes(b"mkdir: made ");
                 out_bytes(argv[1]);
@@ -554,7 +696,8 @@ fn run(line: &[u8]) -> bool {
                 log("usage: rmdir <dir>\n");
                 return false;
             }
-            let path = core::str::from_utf8(argv[1]).unwrap_or("");
+            let mut path_buf = [0u8; CWD_CAP];
+            let path = resolve_path_buf(argv[1], &mut path_buf);
             if rmdir(path) == 0 {
                 out_bytes(b"rmdir: removed ");
                 out_bytes(argv[1]);
@@ -572,8 +715,10 @@ fn run(line: &[u8]) -> bool {
                 log("usage: mv <old> <new>\n");
                 return false;
             }
-            let old = core::str::from_utf8(argv[1]).unwrap_or("");
-            let new = core::str::from_utf8(argv[2]).unwrap_or("");
+            let mut old_buf = [0u8; CWD_CAP];
+            let mut new_buf = [0u8; CWD_CAP];
+            let old = resolve_path_buf(argv[1], &mut old_buf);
+            let new = resolve_path_buf(argv[2], &mut new_buf);
             if rename(old, new) == 0 {
                 out_bytes(b"mv: moved ");
                 out_bytes(argv[1]);
@@ -592,7 +737,8 @@ fn run(line: &[u8]) -> bool {
                 log("usage: touch <file>\n");
                 return false;
             }
-            let path = core::str::from_utf8(argv[1]).unwrap_or("");
+            let mut path_buf = [0u8; CWD_CAP];
+            let path = resolve_path_buf(argv[1], &mut path_buf);
             let fd = open(path);
             if fd != u64::MAX {
                 close(fd);
@@ -614,8 +760,10 @@ fn run(line: &[u8]) -> bool {
                 log("usage: cp <src> <dst>\n");
                 return false;
             }
-            let src = core::str::from_utf8(argv[1]).unwrap_or("");
-            let dst = core::str::from_utf8(argv[2]).unwrap_or("");
+            let mut src_buf = [0u8; CWD_CAP];
+            let mut dst_buf = [0u8; CWD_CAP];
+            let src = resolve_path_buf(argv[1], &mut src_buf);
+            let dst = resolve_path_buf(argv[2], &mut dst_buf);
             let src_fd = open(src);
             if src_fd == u64::MAX {
                 log("cp: cannot open source\n");
@@ -670,7 +818,8 @@ fn run(line: &[u8]) -> bool {
                 log("usage: append <file> <text>\n");
                 return false;
             }
-            let path = core::str::from_utf8(argv[1]).unwrap_or("");
+            let mut path_buf = [0u8; CWD_CAP];
+            let path = resolve_path_buf(argv[1], &mut path_buf);
             let mut fd = open(path);
             if fd == u64::MAX {
                 // A missing file is created on demand, like `write`.
@@ -712,7 +861,8 @@ fn run(line: &[u8]) -> bool {
                 log("usage: write <file> <text>\n");
                 return false;
             }
-            let path = core::str::from_utf8(argv[1]).unwrap_or("");
+            let mut path_buf = [0u8; CWD_CAP];
+            let path = resolve_path_buf(argv[1], &mut path_buf);
             let mut fd = open(path);
             if fd == u64::MAX {
                 // A missing file is created on demand, so `write` can make one.
@@ -739,7 +889,8 @@ fn run(line: &[u8]) -> bool {
                 log("usage: chmod <file> <octal>\n");
                 return false;
             }
-            let path = core::str::from_utf8(argv[1]).unwrap_or("");
+            let mut path_buf = [0u8; CWD_CAP];
+            let path = resolve_path_buf(argv[1], &mut path_buf);
             let Some(mode) = parse_octal(argv[2]) else {
                 log("chmod: bad mode\n");
                 return false;

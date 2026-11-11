@@ -106,6 +106,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0097](0097-explicit-service-dependencies-and-failure-health-states.md) | Explicit service dependencies and failure health states | Accepted |
 | [0098](0098-file-utilities-in-the-shell.md) | File utilities in the shell: cp, touch, head, and wc | Accepted |
 | [0099](0099-synchronize-boot-feeder-with-shell-ready-prompt.md) | Synchronize boot feeder with shell ready prompt | Accepted |
+| [0100](0100-shell-working-directory-and-relative-paths.md) | Shell working directory tracking and relative path resolution | Accepted |
 
 ## Adding a decision
 

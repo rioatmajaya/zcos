@@ -63,6 +63,21 @@ head /tmp/hello-copy.txt
 wc /tmp/hello-copy.txt
 rm /tmp/touched
 rm /tmp/hello-copy.txt
+pwd
+cd /data
+pwd
+cd ..
+pwd
+cd /tmp
+pwd
+cd nonexistent
+cd /hello.txt
+write relative.txt TEST_REL
+cat relative.txt
+stat relative.txt
+rm relative.txt
+cd
+pwd
 stat /dev/blk
 id
 session
