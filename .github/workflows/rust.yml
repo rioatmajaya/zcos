@@ -11,7 +11,7 @@ env:
 
 jobs:
   host:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
     - name: Build workspace
@@ -20,7 +20,7 @@ jobs:
       run: cargo test --workspace --verbose
 
   changelog:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
     - name: Check the changelog has an Unreleased section
@@ -29,14 +29,14 @@ jobs:
         grep -q '^## \[Unreleased\]' CHANGELOG.md
 
   boot:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
     - name: Install QEMU, OVMF, and image tools
       run: |
-        echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4
-        sudo apt-get update
-        sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf mtools dosfstools e2fsprogs
+        sudo sed -i 's/azure\.archive\.ubuntu\.com/archive.ubuntu.com/g' /etc/apt/sources.list.d/*.sources /etc/apt/sources.list /etc/apt/apt-mirrors.txt 2>/dev/null || true
+        sudo apt-get update -y || true
+        sudo apt-get install -y qemu-system-x86 ovmf mtools dosfstools e2fsprogs
     - name: Install boot targets
       run: |
         rustup target add x86_64-unknown-uefi
