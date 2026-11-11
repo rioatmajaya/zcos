@@ -11,7 +11,7 @@ env:
 
 jobs:
   host:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
     - uses: actions/checkout@v4
     - name: Build workspace
@@ -20,7 +20,7 @@ jobs:
       run: cargo test --workspace --verbose
 
   changelog:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
     - uses: actions/checkout@v4
     - name: Check the changelog has an Unreleased section
@@ -29,13 +29,13 @@ jobs:
         grep -q '^## \[Unreleased\]' CHANGELOG.md
 
   boot:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
     - uses: actions/checkout@v4
     - name: Install QEMU, OVMF, and image tools
       run: |
-        sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
-        sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 -o Acquire::http::Timeout=30 qemu-system-x86 ovmf mtools dosfstools e2fsprogs
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf mtools dosfstools e2fsprogs
     - name: Install boot targets
       run: |
         rustup target add x86_64-unknown-uefi
