@@ -5,7 +5,8 @@
 //! `touch`, `cp`, `write`, `append`, `rm`, `mkdir`, `rmdir`, `mv`, `sync`, `tmp`,
 //! `persist`, `chmod`, `mount`, `umount`, `id`, `svc`, `ps`, `spawn`, `kill`, `wait`,
 //! `notify`, `event`, `session`, `signal`, `raise`, `dmesg`, `date`, `dev`, `uname`,
-//! `free`, `uptime`, `poweroff`, and `exit`. Output normally goes
+//! `free`, `uptime`, `poweroff`, and `exit`. Also includes pattern matching with
+//! `grep`, and conditional testing with `test`, `[`, `true`, and `false`. Output normally goes
 //! through the log syscall, so the transcript appears in the kernel serial log.
 //! Standard output can also be redirected to files with `> <file>` (truncate or
 //! create) and `>> <file>` (append), resolving relative paths against the
@@ -419,6 +420,17 @@ fn parse_decimal(text: &[u8]) -> Option<u64> {
     Some(value)
 }
 
+/// Returns true if `needle` occurs as a contiguous subslice in `haystack`.
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if haystack.len() < needle.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
 /// Logs a raw byte slice as text, or writes to redirected stdout.
 fn print_bytes(bytes: &[u8]) {
     unsafe {
@@ -606,7 +618,7 @@ fn run(line: &[u8]) -> bool {
 fn execute_cmd(argv: &[&[u8]], count: usize) -> bool {
     match argv[0] {
         b"help" => {
-            let msg = b"Commands: help echo cd pwd cat head wc ls stat touch cp write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc dev uname free ps spawn kill wait notify event session signal raise dmesg date uptime poweroff exit\n";
+            let msg = b"Commands: help echo cd pwd cat head wc grep test true false ls stat touch cp write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc dev uname free ps spawn kill wait notify event session signal raise dmesg date uptime poweroff exit\n";
             unsafe {
                 let redir = core::ptr::addr_of!(REDIR_FD).read();
                 if redir != u64::MAX {
@@ -787,6 +799,202 @@ fn execute_cmd(argv: &[&[u8]], count: usize) -> bool {
             out_bytes(b"\n");
             out_flush();
             set_status(0);
+        }
+        b"grep" => {
+            let mut show_line_num = false;
+            let mut invert = false;
+            let mut arg_idx = 1;
+            while arg_idx < count && argv[arg_idx].starts_with(b"-") && argv[arg_idx].len() > 1 {
+                let flag = argv[arg_idx];
+                for &ch in &flag[1..] {
+                    match ch {
+                        b'n' => show_line_num = true,
+                        b'v' => invert = true,
+                        _ => {
+                            log("grep: invalid option\n");
+                            set_status(2);
+                            return false;
+                        }
+                    }
+                }
+                arg_idx += 1;
+            }
+
+            if arg_idx + 2 > count {
+                log("usage: grep [-n] [-v] <pattern> <file>\n");
+                set_status(2);
+                return false;
+            }
+
+            let pattern = argv[arg_idx];
+            let mut path_buf = [0u8; CWD_CAP];
+            let path = resolve_path_buf(argv[arg_idx + 1], &mut path_buf);
+            let fd = open(path);
+            if fd == u64::MAX {
+                log("grep: cannot open\n");
+                set_status(2);
+                return false;
+            }
+
+            let mut buffer = [0u8; 64];
+            let mut line_buf = [0u8; 256];
+            let mut line_len = 0;
+            let mut line_number = 1u64;
+            let mut matched_count = 0u64;
+
+            loop {
+                let got = read(fd, &mut buffer);
+                if got == u64::MAX || got == 0 {
+                    break;
+                }
+                for &b in &buffer[..got as usize] {
+                    if b == b'\n' {
+                        let mut end = line_len;
+                        if end > 0 && line_buf[end - 1] == b'\r' {
+                            end -= 1;
+                        }
+                        let is_match = contains_subslice(&line_buf[..end], pattern);
+                        let selected = if invert { !is_match } else { is_match };
+                        if selected {
+                            matched_count += 1;
+                            if show_line_num {
+                                out_u64(line_number);
+                                out_bytes(b":");
+                            }
+                            out_bytes(&line_buf[..end]);
+                            out_bytes(b"\n");
+                            out_flush();
+                        }
+                        line_len = 0;
+                        line_number += 1;
+                    } else if line_len < line_buf.len() {
+                        line_buf[line_len] = b;
+                        line_len += 1;
+                    }
+                }
+            }
+
+            if line_len > 0 {
+                let mut end = line_len;
+                if end > 0 && line_buf[end - 1] == b'\r' {
+                    end -= 1;
+                }
+                let is_match = contains_subslice(&line_buf[..end], pattern);
+                let selected = if invert { !is_match } else { is_match };
+                if selected {
+                    matched_count += 1;
+                    if show_line_num {
+                        out_u64(line_number);
+                        out_bytes(b":");
+                    }
+                    out_bytes(&line_buf[..end]);
+                    out_bytes(b"\n");
+                    out_flush();
+                }
+            }
+
+            close(fd);
+            set_status(if matched_count > 0 { 0 } else { 1 });
+        }
+        b"true" => {
+            set_status(0);
+        }
+        b"false" => {
+            set_status(1);
+        }
+        b"test" | b"[" => {
+            let is_bracket = argv[0] == b"[";
+            let mut effective_count = count;
+            if is_bracket {
+                if count < 2 || argv[count - 1] != b"]" {
+                    log("[: missing `]'\n");
+                    set_status(2);
+                    return false;
+                }
+                effective_count -= 1;
+            }
+
+            if effective_count <= 1 {
+                set_status(1);
+            } else if effective_count == 2 {
+                set_status(if !argv[1].is_empty() { 0 } else { 1 });
+            } else if effective_count == 3 {
+                let op = argv[1];
+                let arg = argv[2];
+                match op {
+                    b"-e" => {
+                        let mut path_buf = [0u8; CWD_CAP];
+                        let path = resolve_path_buf(arg, &mut path_buf);
+                        let mut st = Stat {
+                            kind: 0,
+                            mode: 0,
+                            size: 0,
+                            node: 0,
+                            uid: 0,
+                            gid: 0,
+                        };
+                        let exists = stat(path, &mut st);
+                        set_status(if exists { 0 } else { 1 });
+                    }
+                    b"-f" => {
+                        let mut path_buf = [0u8; CWD_CAP];
+                        let path = resolve_path_buf(arg, &mut path_buf);
+                        let mut st = Stat {
+                            kind: 0,
+                            mode: 0,
+                            size: 0,
+                            node: 0,
+                            uid: 0,
+                            gid: 0,
+                        };
+                        let exists = stat(path, &mut st);
+                        set_status(if exists && st.kind != KIND_DIR { 0 } else { 1 });
+                    }
+                    b"-d" => {
+                        let mut path_buf = [0u8; CWD_CAP];
+                        let path = resolve_path_buf(arg, &mut path_buf);
+                        let mut st = Stat {
+                            kind: 0,
+                            mode: 0,
+                            size: 0,
+                            node: 0,
+                            uid: 0,
+                            gid: 0,
+                        };
+                        let exists = stat(path, &mut st);
+                        set_status(if exists && st.kind == KIND_DIR { 0 } else { 1 });
+                    }
+                    b"-z" => {
+                        set_status(if arg.is_empty() { 0 } else { 1 });
+                    }
+                    b"-n" => {
+                        set_status(if !arg.is_empty() { 0 } else { 1 });
+                    }
+                    _ => {
+                        log("test: unknown unary operator\n");
+                        set_status(2);
+                    }
+                }
+            } else if effective_count == 4 {
+                let left = argv[1];
+                let op = argv[2];
+                let right = argv[3];
+                match op {
+                    b"=" | b"==" => {
+                        set_status(if left == right { 0 } else { 1 });
+                    }
+                    b"!=" => {
+                        set_status(if left != right { 0 } else { 1 });
+                    }
+                    _ => {
+                        log("test: unknown binary operator\n");
+                        set_status(2);
+                    }
+                }
+            } else {
+                log("test: too many arguments\n");
+                set_status(2);
+            }
         }
         b"ls" => {
             let mut path_buf = [0u8; CWD_CAP];

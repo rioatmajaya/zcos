@@ -396,6 +396,15 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **Shell pattern search (grep) and conditional testing (test, true, false)** (F7j, F4, shell):
+  `zc-shell` adds `grep [-n] [-v] <pattern> <file>` for substring line matching with line numbering
+  and inverted match flags, streaming file data in 64-byte chunks and line buffers up to 256 bytes.
+  Adds conditional expression evaluator `test` (and alias `[` `]`) supporting file checks (`-e`,
+  `-f`, `-d`), string checks (`-z`, `-n`), and string comparisons (`=`, `!=`), communicating outcomes
+  via exit status `$?`. Adds built-ins `true` (status 0) and `false` (status 1). `tools/boot-script.txt`
+  exercises `grep`, `test`, `true`, and `false` under the scripted proof.
+  See [ADR 0102](docs/adr/0102-shell-pattern-search-and-conditional-testing.md).
+
 - **Shell standard output redirection and exit status tracking** (F7j, F4, shell): `zc-shell`
   supports standard output redirection with `>` (overwrite/create) and `>>` (append),
   resolving target file paths against the current working directory. The shell tracks the exit

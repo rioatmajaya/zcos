@@ -108,6 +108,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0099](0099-synchronize-boot-feeder-with-shell-ready-prompt.md) | Synchronize boot feeder with shell ready prompt | Accepted |
 | [0100](0100-shell-working-directory-and-relative-paths.md) | Shell working directory tracking and relative path resolution | Accepted |
 | [0101](0101-shell-stdout-redirection-and-exit-status.md) | Shell standard output redirection and exit status tracking | Accepted |
+| [0102](0102-shell-pattern-search-and-conditional-testing.md) | Shell pattern search (grep) and conditional testing (test, true, false) | Accepted |
 
 ## Adding a decision
 

@@ -84,6 +84,30 @@ rm redir.txt
 rm redir_pwd.txt
 echo fail > /nonexistent_dir/file.txt
 echo $?
+true
+echo $?
+false
+echo $?
+test -f /hello.txt
+echo $?
+test -d /hello.txt
+echo $?
+test -d /tmp
+echo $?
+test -e nonexistent
+echo $?
+[ abc = abc ]
+echo $?
+[ abc != abc ]
+echo $?
+grep hello /hello.txt
+echo $?
+grep -n hello /hello.txt
+grep nonexistent /hello.txt
+echo $?
+grep hello /hello.txt > grep_out.txt
+cat grep_out.txt
+rm grep_out.txt
 write relative.txt TEST_REL
 cat relative.txt
 stat relative.txt
