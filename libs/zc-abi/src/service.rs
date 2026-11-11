@@ -159,6 +159,27 @@ pub const SERVICE_KIND_FAULT: u32 = 1;
 /// Event kind: the service exited cleanly through `SYS_TASK_EXIT`.
 pub const SERVICE_KIND_EXIT: u32 = 2;
 
+/// Maximum restart attempts permitted for a supervised service before its budget is exhausted.
+pub const SERVICE_MAX_RESTARTS: u32 = 3;
+
+/// Classifies service health into a string classification.
+///
+/// - `"healthy"`: zero faults recorded.
+/// - `"degraded"`: one or more faults, but still running within restart budget.
+/// - `"exhausted"`: down and exceeded restart budget (or down after faulting).
+#[must_use]
+pub const fn service_health_classification(word: u64) -> &'static str {
+    let faults = service_faults(word);
+    let up = service_is_up(word);
+    if faults == 0 {
+        "healthy"
+    } else if up && faults <= SERVICE_MAX_RESTARTS {
+        "degraded"
+    } else {
+        "exhausted"
+    }
+}
+
 /// Packs one supervision event into a single IPC word.
 ///
 /// The low 32 bits carry the service id, the high 32 bits the kind, so a
@@ -299,5 +320,23 @@ mod tests {
         assert_eq!(service_restarts(faults), 0);
         assert_eq!(service_faults(faults), 0xCD);
         assert!(service_is_ready(faults));
+    }
+
+    #[test]
+    fn health_classification_reflects_budget_and_liveness() {
+        let healthy = service_health(true, true, 0, 0);
+        assert_eq!(service_health_classification(healthy), "healthy");
+
+        let degraded = service_health(true, true, 1, 1);
+        assert_eq!(service_health_classification(degraded), "degraded");
+
+        let at_limit = service_health(true, true, 3, 3);
+        assert_eq!(service_health_classification(at_limit), "degraded");
+
+        let exhausted_over = service_health(true, true, 4, 4);
+        assert_eq!(service_health_classification(exhausted_over), "exhausted");
+
+        let down_faulted = service_health(false, false, 1, 1);
+        assert_eq!(service_health_classification(down_faulted), "exhausted");
     }
 }

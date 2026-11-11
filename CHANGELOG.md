@@ -396,6 +396,16 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **Standard character pseudo-devices (null, zero, urandom) and service health inspection** (F7f, F7h, core system, shell):
+  `kernel/zc-kernel` adds permanent standard character pseudo-devices in `DevFs`:
+  `/dev/null` (reads return immediate EOF; writes discard data), `/dev/zero` (reads return infinite zeroes; writes discard data),
+  and `/dev/urandom` (reads return pseudo-random bytes generated via an allocation-free 64-bit xorshift PRNG; writes discard data).
+  All three pseudo-devices report `0o666` mode granting unrestricted access to unprivileged tasks. `DevFs` implements `FileSystem::write`
+  to support writing and redirection (`> /dev/null`, `>> /dev/null`). In `user/zc-shell`, `head` adds `-c <bytes>` flag for bounded
+  byte streaming from character devices. `svc` integrates human-readable health classifications (`healthy`, `degraded`, `exhausted`)
+  and explicit dependency declarations (`requires`), observable from userspace while preserving backward-compatible CI assertions.
+  See [ADR 0107](docs/adr/0107-standard-character-devices-and-service-health-inspection.md).
+
 - **Shell script execution and comment parsing** (F7j, F4, shell): `zc-shell` adds batch script
   execution via `sh <file>`, `sh -c "<command>"`, `source <file>`, `. <file>`, and direct file path
   execution (`./<script>` or `*.sh`). Arguments passed to scripts bind positional parameters (`$0`,

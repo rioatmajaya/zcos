@@ -92,6 +92,13 @@ echo chain_one; echo chain_two
 write relative.txt TEST_REL; cat relative.txt; stat relative.txt; rm relative.txt
 cd; pwd
 stat /dev/blk
+stat /dev/null
+stat /dev/zero
+echo silent_dev_null > /dev/null
+cat /dev/null
+head -c 4 /dev/zero > /tmp/zero_test.txt
+stat /tmp/zero_test.txt
+rm /tmp/zero_test.txt
 id
 session
 signal

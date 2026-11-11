@@ -84,8 +84,8 @@ pub use memory::{MemInfo, MEM_INFO_LEN};
 pub use service::{
     BLK_SERVICE, KBD_SERVICE, SERVICE_CATALOG, SERVICE_HEALTH_COUNT_MASK,
     SERVICE_HEALTH_FAULT_SHIFT, SERVICE_HEALTH_RESTART_SHIFT, SERVICE_KIND_EXIT,
-    SERVICE_KIND_FAULT, SERVICE_STATE_READY, SERVICE_STATE_UP, ServiceSpec, service_cap,
-    service_faults, service_health, service_is_ready, service_is_up, service_restarts,
+    SERVICE_KIND_FAULT, SERVICE_MAX_RESTARTS, SERVICE_STATE_READY, SERVICE_STATE_UP, ServiceSpec, service_cap,
+    service_faults, service_health, service_health_classification, service_is_ready, service_is_up, service_restarts,
     service_state, supervise_event, supervise_kind, supervise_service,
 };
 pub use session::{replay_launch, replay_pointer};

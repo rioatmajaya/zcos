@@ -63,7 +63,7 @@ use zc_user::{
     DIRENT_LEN, DirEntry, FS_ID_ZCFS, FS_OP_STOP, IPC_FS, KIND_CHR, KIND_DIR, READDIR_END,
     READDIR_ENTRY, SERVICE_CATALOG, Stat, TASK_SLOTS, TaskInfo, chmod, close, create, getid,
     identity_gid, identity_uid, log, log_parts, log_read, mem_info, mount, open, poweroff, read, readdir,
-    send_to, serial_read, service_faults, service_health, service_is_ready, service_is_up,
+    send_to, serial_read, service_faults, service_health, service_health_classification, service_is_ready, service_is_up,
     service_lookup, service_restarts, session, spawn, stat, task_exit_with, task_info, umount,
     unlink, mkdir, rmdir,
     rename, seek, sync, uptime, wait, write, kill, notify, event_wait, session_create, spawn_in, signal, raise,
@@ -1366,33 +1366,44 @@ fn execute_cmd(argv: &[&[u8]], count: usize, pipe_in: Option<&[u8]>) -> bool {
         }
         b"head" => {
             let mut max_lines = 10u64;
+            let mut max_bytes = 0u64;
             let mut file_idx = 1;
             if count >= 3 && argv[1] == b"-n" {
                 if let Some(n) = parse_decimal(argv[2]) {
                     max_lines = n;
                     file_idx = 3;
                 }
+            } else if count >= 3 && argv[1] == b"-c" {
+                if let Some(c) = parse_decimal(argv[2]) {
+                    max_bytes = c;
+                    file_idx = 3;
+                }
             }
             let from_pipe = file_idx >= count || (file_idx < count && argv[file_idx] == b"-");
             if from_pipe {
                 if let Some(input) = pipe_in {
-                    let mut lines = 0u64;
-                    let mut start = 0;
-                    while start < input.len() && lines < max_lines {
-                        let end = input[start..]
-                            .iter()
-                            .position(|&b| b == b'\n')
-                            .map_or(input.len(), |pos| start + pos);
-                        out_bytes(&input[start..end]);
-                        out_bytes(b"\n");
-                        lines += 1;
-                        start = end + 1;
+                    if max_bytes > 0 {
+                        let take = (max_bytes as usize).min(input.len());
+                        out_bytes(&input[..take]);
+                    } else {
+                        let mut lines = 0u64;
+                        let mut start = 0;
+                        while start < input.len() && lines < max_lines {
+                            let end = input[start..]
+                                .iter()
+                                .position(|&b| b == b'\n')
+                                .map_or(input.len(), |pos| start + pos);
+                            out_bytes(&input[start..end]);
+                            out_bytes(b"\n");
+                            lines += 1;
+                            start = end + 1;
+                        }
                     }
                     out_flush();
                     set_status(0);
                     return false;
                 } else {
-                    log("usage: head [-n <N>] [file]\n");
+                    log("usage: head [-n <N>|-c <N>] [file]\n");
                     set_status(1);
                     return false;
                 }
@@ -1407,17 +1418,28 @@ fn execute_cmd(argv: &[&[u8]], count: usize, pipe_in: Option<&[u8]>) -> bool {
             }
             let mut buffer = [0u8; 64];
             let mut lines = 0;
+            let mut bytes_out = 0u64;
             'outer: loop {
                 let got = read(fd, &mut buffer);
                 if got == u64::MAX || got == 0 {
                     break;
                 }
-                for &b in &buffer[..got as usize] {
-                    out_bytes(&[b]);
-                    if b == b'\n' {
-                        lines += 1;
-                        if lines >= max_lines {
-                            break 'outer;
+                if max_bytes > 0 {
+                    let remaining = max_bytes - bytes_out;
+                    let to_write = (got as usize).min(remaining as usize);
+                    out_bytes(&buffer[..to_write]);
+                    bytes_out += to_write as u64;
+                    if bytes_out >= max_bytes {
+                        break 'outer;
+                    }
+                } else {
+                    for &b in &buffer[..got as usize] {
+                        out_bytes(&[b]);
+                        if b == b'\n' {
+                            lines += 1;
+                            if lines >= max_lines {
+                                break 'outer;
+                            }
                         }
                     }
                 }
@@ -2324,6 +2346,23 @@ fn execute_cmd(argv: &[&[u8]], count: usize, pipe_in: Option<&[u8]>) -> bool {
                 if endpoint != u64::MAX {
                     out_bytes(b" endpoint=");
                     out_u64(endpoint);
+                }
+                out_bytes(b" health=");
+                out_bytes(service_health_classification(health).as_bytes());
+                out_bytes(b" requires=");
+                if service.requires.is_empty() {
+                    out_bytes(b"none");
+                } else {
+                    for (i, &req_id) in service.requires.iter().enumerate() {
+                        if i > 0 {
+                            out_bytes(b",");
+                        }
+                        if let Some(req_spec) = SERVICE_CATALOG.iter().find(|s| s.id == req_id) {
+                            out_bytes(req_spec.name.as_bytes());
+                        } else {
+                            out_u64(u64::from(req_id));
+                        }
+                    }
                 }
                 out_bytes(b"\n");
                 out_flush();

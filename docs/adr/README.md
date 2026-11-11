@@ -113,6 +113,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0104](0104-shell-environment-variables-and-parameter-expansion.md) | Shell environment variables and parameter expansion | Accepted |
 | [0105](0105-shell-pipeline-execution.md) | Shell pipeline execution (`\|` operator) | Accepted |
 | [0106](0106-shell-script-execution-and-comments.md) | Shell script execution (sh, source, .) and comments (#) | Accepted |
+| [0107](0107-standard-character-devices-and-service-health-inspection.md) | Standard character devices (null, zero, urandom) and service health inspection | Accepted |
 
 ## Adding a decision
 

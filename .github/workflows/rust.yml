@@ -289,6 +289,15 @@ jobs:
         grep -q "task 2: ZC OS zcos 0.1.0 x86_64" build/boot.log
         grep -q "task 2: dev: blk (char)" build/boot.log
         grep -q "task 2: dev: kbd (char)" build/boot.log
+        # Standard character devices in devfs and health classification (ADR 0107).
+        grep -q "task 2: dev: null (char)" build/boot.log
+        grep -q "task 2: dev: zero (char)" build/boot.log
+        grep -q "task 2: dev: urandom (char)" build/boot.log
+        grep -q "task 2: /dev/null: char device, mode 0666" build/boot.log
+        grep -q "task 2: /dev/zero: char device, mode 0666" build/boot.log
+        grep -q "task 2: /tmp/zero_test.txt: file, 4 bytes" build/boot.log
+        grep -q "task 2: svc: blk up ready restarts=1 faults=1 endpoint=2 health=degraded requires=none" build/boot.log
+        grep -q "task 2: svc: kbd up ready restarts=1 faults=1 health=degraded requires=none" build/boot.log
         # `free` inspects physical memory via SYS_MEM_INFO (ADR 0095).
         grep -q "task 2: mem: total " build/boot.log
         # `uptime` inspects system monotonic time via SYS_UPTIME (ADR 0096).

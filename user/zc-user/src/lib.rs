@@ -29,7 +29,7 @@ pub use zc_abi::{
     SYS_WRITE, SYS_YIELD,
     SERVICE_STATE_READY, SERVICE_STATE_UP, MmioInfo, ServiceSpec, Stat, SurfaceInfo, SyscallError,
     TASK_INFO_LEN, TASK_SLOTS, TASK_STATE_ALIVE, TASK_STATE_READY, TaskInfo,
-    WM_ACK, identity_gid, identity_uid, identity_word, service_faults, service_is_ready,
+    WM_ACK, identity_gid, identity_uid, identity_word, service_faults, service_health_classification, service_is_ready,
     service_is_up, service_restarts, service_state, supervise_kind, supervise_service,
 };
 
