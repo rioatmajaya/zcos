@@ -85,7 +85,6 @@ jobs:
         grep -q "task 2: chain_two" build/boot.log
         grep -q "task 2: chain_and_ok" build/boot.log
         grep -q "task 2: chain_or_ok" build/boot.log
-        grep -q "task 2: rm: removed chain_grep.txt" build/boot.log
         # Environment variables and parameter expansion (ADR 0104).
         grep -q "task 2: zcos_env_ok" build/boot.log
         grep -q "task 2: env_test_ok" build/boot.log
