@@ -79,6 +79,12 @@ jobs:
         # Pattern search and conditional testing (ADR 0102).
         grep -q "task 2: 1:hello from the ZC OS initramfs" build/boot.log
         grep -q "task 2: rm: removed grep_out.txt" build/boot.log
+        # Command chaining and conditional operators (ADR 0103).
+        grep -q "task 2: chain_one" build/boot.log
+        grep -q "task 2: chain_two" build/boot.log
+        grep -q "task 2: chain_and_ok" build/boot.log
+        grep -q "task 2: chain_or_ok" build/boot.log
+        grep -q "task 2: rm: removed chain_grep.txt" build/boot.log
         grep -q "task 2: relative.txt: file, 8 bytes" build/boot.log
         grep -q "task 2: rm: removed relative.txt" build/boot.log
         grep -q "task 2: touch: created /tmp/touched" build/boot.log

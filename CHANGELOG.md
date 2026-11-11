@@ -396,6 +396,14 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **Shell command chaining with ;, &&, and ||** (F7j, F4, shell): `zc-shell` supports sequential
+  execution with `;` and conditional execution with `&&` (runs if previous status was 0) and
+  `||` (runs if previous status was non-zero). Each segment in a chain independently executes
+  with its own arguments and standard output redirection (`>`, `>>`) and updates `LAST_STATUS`.
+  `tools/boot-script.txt` exercises sequential chaining, conditional AND/OR chaining, and combined
+  test-and-grep redirection under the scripted proof.
+  See [ADR 0103](docs/adr/0103-shell-command-chaining-and-conditional-operators.md).
+
 - **Shell pattern search (grep) and conditional testing (test, true, false)** (F7j, F4, shell):
   `zc-shell` adds `grep [-n] [-v] <pattern> <file>` for substring line matching with line numbering
   and inverted match flags, streaming file data in 64-byte chunks and line buffers up to 256 bytes.

@@ -234,6 +234,40 @@ fn set_status(status: u32) {
     }
 }
 
+/// Returns the exit status of the most recently executed command.
+fn get_status() -> u32 {
+    // SAFETY: owned by the single-threaded shell loop.
+    unsafe { core::ptr::addr_of!(LAST_STATUS).read() }
+}
+
+/// Command chaining operator.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum ChainOp {
+    None,
+    Semi,
+    And,
+    Or,
+}
+
+/// Strips leading and trailing ASCII whitespace from `bytes`.
+fn trim_ascii(mut bytes: &[u8]) -> &[u8] {
+    while let Some((&first, rest)) = bytes.split_first() {
+        if first == b' ' || first == b'\t' || first == b'\r' || first == b'\n' {
+            bytes = rest;
+        } else {
+            break;
+        }
+    }
+    while let Some((&last, rest)) = bytes.split_last() {
+        if last == b' ' || last == b'\t' || last == b'\r' || last == b'\n' {
+            bytes = rest;
+        } else {
+            break;
+        }
+    }
+    bytes
+}
+
 /// Longest captured line `dmesg` prints in one syscall, excluding the newline.
 ///
 /// It matches the kernel's per-call buffer limit; kernel diagnostics are far
@@ -492,8 +526,8 @@ pub extern "C" fn zc_signal_handler() {
     log("signal: handled\n");
 }
 
-/// Runs one parsed command line. Returns whether to exit the shell.
-fn run(line: &[u8]) -> bool {
+/// Runs a single command line segment with optional stdout redirection. Returns whether to exit the shell.
+fn run_single(line: &[u8]) -> bool {
     let mut argv: [&[u8]; 16] = [&[]; 16];
     let mut count = 0;
     let mut redir_mode = RedirMode::None;
@@ -612,6 +646,62 @@ fn run(line: &[u8]) -> bool {
     }
 
     should_exit
+}
+
+/// Runs one command line, supporting chaining operators `;`, `&&`, and `||`.
+/// Returns whether to exit the shell.
+fn run(line: &[u8]) -> bool {
+    let mut seg_start = 0;
+    let mut prev_op = ChainOp::None;
+    let len = line.len();
+    let mut i = 0;
+
+    while i < len {
+        let op = if line[i] == b';' {
+            Some((ChainOp::Semi, 1))
+        } else if i + 1 < len && line[i] == b'&' && line[i + 1] == b'&' {
+            Some((ChainOp::And, 2))
+        } else if i + 1 < len && line[i] == b'|' && line[i + 1] == b'|' {
+            Some((ChainOp::Or, 2))
+        } else {
+            None
+        };
+
+        if let Some((next_op, op_len)) = op {
+            let seg = trim_ascii(&line[seg_start..i]);
+            let should_run = match prev_op {
+                ChainOp::None | ChainOp::Semi => true,
+                ChainOp::And => get_status() == 0,
+                ChainOp::Or => get_status() != 0,
+            };
+            if should_run && !seg.is_empty() {
+                if run_single(seg) {
+                    return true;
+                }
+            }
+            prev_op = next_op;
+            i += op_len;
+            seg_start = i;
+        } else {
+            i += 1;
+        }
+    }
+
+    if seg_start < len {
+        let seg = trim_ascii(&line[seg_start..len]);
+        let should_run = match prev_op {
+            ChainOp::None | ChainOp::Semi => true,
+            ChainOp::And => get_status() == 0,
+            ChainOp::Or => get_status() != 0,
+        };
+        if should_run && !seg.is_empty() {
+            if run_single(seg) {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 /// Executes one command given by `argv[..count]`. Returns whether the shell should exit.

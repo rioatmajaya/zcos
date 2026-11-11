@@ -109,6 +109,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0100](0100-shell-working-directory-and-relative-paths.md) | Shell working directory tracking and relative path resolution | Accepted |
 | [0101](0101-shell-stdout-redirection-and-exit-status.md) | Shell standard output redirection and exit status tracking | Accepted |
 | [0102](0102-shell-pattern-search-and-conditional-testing.md) | Shell pattern search (grep) and conditional testing (test, true, false) | Accepted |
+| [0103](0103-shell-command-chaining-and-conditional-operators.md) | Shell command chaining (;, &&, \|\|) | Accepted |
 
 ## Adding a decision
 

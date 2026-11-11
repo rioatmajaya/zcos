@@ -74,40 +74,21 @@ cd nonexistent
 cd /hello.txt
 echo $?
 echo redir_one > redir.txt
-cat redir.txt
-echo $?
 echo redir_two >> redir.txt
 cat redir.txt
+echo $?
 pwd > redir_pwd.txt
 cat redir_pwd.txt
 rm redir.txt
 rm redir_pwd.txt
 echo fail > /nonexistent_dir/file.txt
 echo $?
-true
-echo $?
-false
-echo $?
-test -f /hello.txt
-echo $?
-test -d /hello.txt
-echo $?
-test -d /tmp
-echo $?
-test -e nonexistent
-echo $?
-[ abc = abc ]
-echo $?
-[ abc != abc ]
-echo $?
-grep hello /hello.txt
-echo $?
-grep -n hello /hello.txt
-grep nonexistent /hello.txt
-echo $?
-grep hello /hello.txt > grep_out.txt
+true && echo chain_and_ok
+false || echo chain_or_ok
+test -f /hello.txt && grep -n hello /hello.txt > grep_out.txt
 cat grep_out.txt
 rm grep_out.txt
+echo chain_one; echo chain_two
 write relative.txt TEST_REL
 cat relative.txt
 stat relative.txt
