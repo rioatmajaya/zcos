@@ -134,4 +134,11 @@ unset GREET
 echo zcos_pipe_ok | grep pipe_ok
 echo foo | wc
 echo pipe_and | grep pipe && echo pipe_and_ok
+echo "echo zcos_sh_ok $1 $#" > /tmp/test_sh.sh
+sh /tmp/test_sh.sh sh_arg
+source /tmp/test_sh.sh src_arg
+rm /tmp/test_sh.sh
+sh -c "echo zcos_sh_c_ok"
+# Full line comment
+echo zcos_comment_ok # Inline comment
 exit

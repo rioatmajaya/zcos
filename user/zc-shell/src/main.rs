@@ -4,9 +4,9 @@
 //! backspace support, and runs `help`, `echo`, `cd`, `pwd`, `cat`, `head`, `wc`,
 //! `grep`, `test`, `true`, `false`, `export`, `set`, `unset`, `env`, `ls`, `stat`,
 //! `touch`, `cp`, `write`, `append`, `rm`, `mkdir`, `rmdir`, `mv`, `sync`, `tmp`,
-//! `persist`, `chmod`, `mount`, `umount`, `id`, `svc`, `ps`, `spawn`, `kill`, `wait`,
-//! `notify`, `event`, `session`, `signal`, `raise`, `dmesg`, `date`, `dev`, `uname`,
-//! `free`, `uptime`, `poweroff`, and `exit`. Output normally goes
+//! `persist`, `chmod`, `mount`, `umount`, `id`, `svc`, `dev`, `uname`, `free`, `ps`, `spawn`, `kill`, `wait`,
+//! `notify`, `event`, `session`, `signal`, `raise`, `dmesg`, `date`,
+//! `uptime`, `sh`, `source`, `poweroff`, and `exit`. Output normally goes
 //! through the log syscall, so the transcript appears in the kernel serial log.
 //! Standard output can also be redirected to files with `> <file>` (truncate or
 //! create) and `>> <file>` (append), resolving relative paths against the
@@ -14,6 +14,8 @@
 //! operator `|`. The exit status of the previous command is tracked
 //! and observable via `echo $?`. Environment variables are supported via `export`,
 //! `set`, `unset`, and `env`, with parameter expansion (`$VAR`, `$?`, `$PWD`).
+//! Scripts can be executed via `sh <file>`, `source <file>`, `. <file>`, or
+//! directly by path, supporting comments (`#`) and positional parameters (`$0`..`$9`, `$#`).
 //!
 //! `id` asks the kernel for this task's user and group ids plus its session.
 //! The shell runs as an unprivileged user, so `id` is the observable side of
@@ -271,8 +273,28 @@ fn trim_ascii(mut bytes: &[u8]) -> &[u8] {
     bytes
 }
 
+/// Strips shell comments (`# ...`) that are unquoted and start at line beginning or after whitespace.
+fn strip_comment(line: &[u8]) -> &[u8] {
+    let mut in_quote: Option<u8> = None;
+    let mut i = 0;
+    while i < line.len() {
+        let c = line[i];
+        if in_quote == Some(c) {
+            in_quote = None;
+        } else if in_quote.is_none() && (c == b'"' || c == b'\'') {
+            in_quote = Some(c);
+        } else if in_quote.is_none() && c == b'#' {
+            if i == 0 || line[i - 1] == b' ' || line[i - 1] == b'\t' {
+                return &line[..i];
+            }
+        }
+        i += 1;
+    }
+    line
+}
+
 /// Capacity of environment variables table.
-const ENV_CAP: usize = 16;
+const ENV_CAP: usize = 32;
 /// Maximum length of an environment variable key.
 const ENV_KEY_CAP: usize = 32;
 /// Maximum length of an environment variable value.
@@ -296,6 +318,33 @@ static mut ENV_TABLE: [EnvEntry; ENV_CAP] = [EnvEntry {
 }; ENV_CAP];
 
 static mut ENV_INIT_DONE: bool = false;
+
+/// Maximum nesting depth for script execution to prevent recursion / stack overflow.
+const MAX_SCRIPT_DEPTH: usize = 4;
+/// Buffer capacity for reading a script file.
+const SCRIPT_BUF_CAP: usize = 2048;
+
+#[derive(Copy, Clone)]
+struct SavedParams {
+    args: [[u8; ENV_VAL_CAP]; 10],
+    lens: [usize; 10],
+    has: [bool; 10],
+    hash: [u8; 16],
+    hash_len: usize,
+    hash_has: bool,
+}
+
+static mut SCRIPT_DEPTH: usize = 0;
+static mut SCRIPT_BUFS: [[u8; SCRIPT_BUF_CAP]; MAX_SCRIPT_DEPTH] =
+    [[0; SCRIPT_BUF_CAP]; MAX_SCRIPT_DEPTH];
+static mut SAVED_PARAMS: [SavedParams; MAX_SCRIPT_DEPTH] = [SavedParams {
+    args: [[0; ENV_VAL_CAP]; 10],
+    lens: [0; 10],
+    has: [false; 10],
+    hash: [0; 16],
+    hash_len: 0,
+    hash_has: false,
+}; MAX_SCRIPT_DEPTH];
 
 /// Formatted buffer for `$?` status string expansion per argument slot.
 static mut STATUS_EXP_BUFS: [[u8; 16]; 16] = [[0; 16]; 16];
@@ -395,7 +444,11 @@ fn env_print() {
         for i in 0..ENV_CAP {
             let entry = &*core::ptr::addr_of!(ENV_TABLE[i]);
             if entry.occupied {
-                out_bytes(&entry.key[..entry.key_len]);
+                let key = &entry.key[..entry.key_len];
+                if key == b"#" || (key.len() == 1 && key[0] >= b'0' && key[0] <= b'9') {
+                    continue;
+                }
+                out_bytes(key);
                 out_bytes(b"=");
                 out_bytes(&entry.val[..entry.val_len]);
                 out_bytes(b"\n");
@@ -577,16 +630,33 @@ fn line_bytes(len: usize) -> &'static [u8] {
     unsafe { core::slice::from_raw_parts(core::ptr::addr_of!(LINE).cast::<u8>(), len) }
 }
 
-/// Splits a line into whitespace-separated arguments.
+/// Splits a line into arguments, respecting single and double quotes and whitespace.
 fn split<'a>(line: &'a [u8], mut visit: impl FnMut(&'a [u8])) {
     let mut start = None;
     let mut index = 0;
+    let mut in_quote: Option<u8> = None;
     while index <= line.len() {
-        let boundary = index == line.len() || line[index] == b' ';
+        if index < line.len() {
+            let c = line[index];
+            if in_quote == Some(c) {
+                in_quote = None;
+            } else if in_quote.is_none() && (c == b'"' || c == b'\'') {
+                in_quote = Some(c);
+            }
+        }
+        let boundary = index == line.len()
+            || (in_quote.is_none() && (line[index] == b' ' || line[index] == b'\t'));
         match (start, boundary) {
             (None, false) => start = Some(index),
             (Some(begin), true) => {
-                visit(&line[begin..index]);
+                let mut token = &line[begin..index];
+                if token.len() >= 2
+                    && ((token[0] == b'"' && token[token.len() - 1] == b'"')
+                        || (token[0] == b'\'' && token[token.len() - 1] == b'\''))
+                {
+                    token = &token[1..token.len() - 1];
+                }
+                visit(token);
                 start = None;
             }
             _ => {}
@@ -873,7 +943,19 @@ fn run_single(line: &[u8], pipe_in: Option<&[u8]>) -> bool {
 /// Runs a command segment that may contain pipeline operators (`|`).
 /// Returns whether to exit the shell.
 fn run_pipeline(seg: &[u8]) -> bool {
-    if !seg.iter().any(|&b| b == b'|') {
+    let mut has_pipe = false;
+    let mut in_quote: Option<u8> = None;
+    for &b in seg {
+        if in_quote == Some(b) {
+            in_quote = None;
+        } else if in_quote.is_none() && (b == b'"' || b == b'\'') {
+            in_quote = Some(b);
+        } else if in_quote.is_none() && b == b'|' {
+            has_pipe = true;
+            break;
+        }
+    }
+    if !has_pipe {
         return run_single(seg, None);
     }
 
@@ -881,9 +963,15 @@ fn run_pipeline(seg: &[u8]) -> bool {
     let mut stages: [&[u8]; STAGE_CAP] = [&[]; STAGE_CAP];
     let mut stage_count = 0;
     let mut start = 0;
+    in_quote = None;
 
     for i in 0..seg.len() {
-        if seg[i] == b'|' {
+        let b = seg[i];
+        if in_quote == Some(b) {
+            in_quote = None;
+        } else if in_quote.is_none() && (b == b'"' || b == b'\'') {
+            in_quote = Some(b);
+        } else if in_quote.is_none() && b == b'|' {
             if stage_count < STAGE_CAP {
                 stages[stage_count] = trim_ascii(&seg[start..i]);
                 stage_count += 1;
@@ -966,12 +1054,31 @@ fn run_pipeline(seg: &[u8]) -> bool {
 /// Runs one command line, supporting chaining operators `;`, `&&`, and `||`.
 /// Returns whether to exit the shell.
 fn run(line: &[u8]) -> bool {
+    let line = trim_ascii(strip_comment(line));
+    if line.is_empty() {
+        return false;
+    }
     let mut seg_start = 0;
     let mut prev_op = ChainOp::None;
     let len = line.len();
     let mut i = 0;
+    let mut in_quote: Option<u8> = None;
 
     while i < len {
+        let c = line[i];
+        if in_quote == Some(c) {
+            in_quote = None;
+            i += 1;
+            continue;
+        } else if in_quote.is_none() && (c == b'"' || c == b'\'') {
+            in_quote = Some(c);
+            i += 1;
+            continue;
+        } else if in_quote.is_some() {
+            i += 1;
+            continue;
+        }
+
         let op = if line[i] == b';' {
             Some((ChainOp::Semi, 1))
         } else if i + 1 < len && line[i] == b'&' && line[i + 1] == b'&' {
@@ -1019,11 +1126,133 @@ fn run(line: &[u8]) -> bool {
     false
 }
 
+/// Runs commands from a script file at `path`, passing `script_name` as `$0` and `args` as `$1`..`$9`, `$#`.
+/// Returns whether the shell should exit.
+fn run_script(path: &str, cmd_name: &[u8], script_name: &[u8], args: &[&[u8]]) -> bool {
+    unsafe {
+        let depth = core::ptr::addr_of!(SCRIPT_DEPTH).read();
+        if depth >= MAX_SCRIPT_DEPTH {
+            log(core::str::from_utf8(cmd_name).unwrap_or("sh"));
+            log(": maximum script nesting depth exceeded\n");
+            set_status(1);
+            return false;
+        }
+        core::ptr::addr_of_mut!(SCRIPT_DEPTH).write(depth + 1);
+    }
+
+    let fd = open(path);
+    if fd == u64::MAX {
+        log(core::str::from_utf8(cmd_name).unwrap_or("sh"));
+        log(": ");
+        log(path);
+        log(": no such file or directory\n");
+        set_status(1);
+        unsafe {
+            let depth = core::ptr::addr_of!(SCRIPT_DEPTH).read();
+            core::ptr::addr_of_mut!(SCRIPT_DEPTH).write(depth - 1);
+        }
+        return false;
+    }
+
+    let depth = unsafe { core::ptr::addr_of!(SCRIPT_DEPTH).read() - 1 };
+    let script_buf = unsafe { &mut (*core::ptr::addr_of_mut!(SCRIPT_BUFS))[depth] };
+
+    let mut total_read = 0;
+    while total_read < SCRIPT_BUF_CAP {
+        let chunk = (SCRIPT_BUF_CAP - total_read).min(256);
+        let n = read(fd, &mut script_buf[total_read..total_read + chunk]);
+        if n == 0 || n == u64::MAX {
+            break;
+        }
+        total_read += n as usize;
+    }
+    close(fd);
+
+    // Save previous positional parameters ($0..$9, $#)
+    unsafe {
+        let saved = &mut (*core::ptr::addr_of_mut!(SAVED_PARAMS))[depth];
+        for i in 0..10 {
+            let key = [b'0' + i as u8];
+            if let Some(val) = env_get(&key) {
+                let take = val.len().min(ENV_VAL_CAP);
+                saved.args[i][..take].copy_from_slice(&val[..take]);
+                saved.lens[i] = take;
+                saved.has[i] = true;
+            } else {
+                saved.has[i] = false;
+            }
+        }
+        if let Some(val) = env_get(b"#") {
+            let take = val.len().min(16);
+            saved.hash[..take].copy_from_slice(&val[..take]);
+            saved.hash_len = take;
+            saved.hash_has = true;
+        } else {
+            saved.hash_has = false;
+        }
+    }
+
+    // Set new positional parameters
+    let _ = env_set(b"0", script_name);
+    let mut hash_buf = [0u8; 16];
+    let hash_len = format_u32(args.len() as u32, &mut hash_buf);
+    let _ = env_set(b"#", &hash_buf[..hash_len]);
+    for i in 1..=9 {
+        let key = [b'0' + i as u8];
+        if i <= args.len() {
+            let _ = env_set(&key, args[i - 1]);
+        } else {
+            env_unset(&key);
+        }
+    }
+
+    let script = &script_buf[..total_read];
+    let mut should_exit = false;
+    let mut line_start = 0;
+
+    for i in 0..=script.len() {
+        if i == script.len() || script[i] == b'\n' {
+            let line = &script[line_start..i];
+            line_start = i + 1;
+            let trimmed = trim_ascii(strip_comment(line));
+            if !trimmed.is_empty() {
+                if run(trimmed) {
+                    should_exit = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Restore previous positional parameters
+    unsafe {
+        let saved = &(*core::ptr::addr_of!(SAVED_PARAMS))[depth];
+        for i in 0..10 {
+            let key = [b'0' + i as u8];
+            if saved.has[i] {
+                let _ = env_set(&key, &saved.args[i][..saved.lens[i]]);
+            } else {
+                env_unset(&key);
+            }
+        }
+        if saved.hash_has {
+            let _ = env_set(b"#", &saved.hash[..saved.hash_len]);
+        } else {
+            env_unset(b"#");
+        }
+
+        let depth_val = core::ptr::addr_of!(SCRIPT_DEPTH).read();
+        core::ptr::addr_of_mut!(SCRIPT_DEPTH).write(depth_val - 1);
+    }
+
+    should_exit
+}
+
 /// Executes one command given by `argv[..count]`. Returns whether the shell should exit.
 fn execute_cmd(argv: &[&[u8]], count: usize, pipe_in: Option<&[u8]>) -> bool {
     match argv[0] {
         b"help" => {
-            let msg = b"Commands: help echo cd pwd cat head wc grep test true false export set unset env ls stat touch cp write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc dev uname free ps spawn kill wait notify event session signal raise dmesg date uptime poweroff exit\n";
+            let msg = b"Commands: help echo cd pwd cat head wc grep test true false export set unset env ls stat touch cp write append rm mkdir rmdir mv sync tmp persist chmod mount umount id svc dev uname free ps spawn kill wait notify event session signal raise dmesg date uptime sh source poweroff exit\n";
             unsafe {
                 if core::ptr::addr_of!(PIPE_CAPTURING).read() {
                     pipe_write_bytes(msg);
@@ -2526,6 +2755,40 @@ fn execute_cmd(argv: &[&[u8]], count: usize, pipe_in: Option<&[u8]>) -> bool {
             set_status(0);
             return true;
         }
+        b"source" | b"." => {
+            if count < 2 {
+                log(core::str::from_utf8(argv[0]).unwrap_or("source"));
+                log(": filename argument required\n");
+                set_status(1);
+            } else {
+                let mut path_buf = [0u8; CWD_CAP];
+                let path = resolve_path_buf(argv[1], &mut path_buf);
+                if run_script(path, argv[0], argv[1], &argv[2..count]) {
+                    return true;
+                }
+            }
+        }
+        b"sh" => {
+            if count < 2 {
+                log("sh: missing operand\n");
+                set_status(1);
+            } else if argv[1] == b"-c" {
+                if count < 3 {
+                    log("sh: -c: option requires an argument\n");
+                    set_status(2);
+                } else {
+                    if run(argv[2]) {
+                        return true;
+                    }
+                }
+            } else {
+                let mut path_buf = [0u8; CWD_CAP];
+                let path = resolve_path_buf(argv[1], &mut path_buf);
+                if run_script(path, b"sh", argv[1], &argv[2..count]) {
+                    return true;
+                }
+            }
+        }
         b"poweroff" => {
             log("shell powering off\n");
             // Never returns: the kernel flushes the volume and writes ACPI
@@ -2534,6 +2797,21 @@ fn execute_cmd(argv: &[&[u8]], count: usize, pipe_in: Option<&[u8]>) -> bool {
             loop {}
         }
         _ => {
+            if argv[0].starts_with(b"./") || argv[0].starts_with(b"/") || argv[0].ends_with(b".sh") {
+                let mut path_buf = [0u8; CWD_CAP];
+                let path = resolve_path_buf(argv[0], &mut path_buf);
+                let mut st = Stat {
+                    kind: 0,
+                    mode: 0,
+                    size: 0,
+                    node: 0,
+                    uid: 0,
+                    gid: 0,
+                };
+                if stat(path, &mut st) && st.kind != KIND_DIR {
+                    return run_script(path, argv[0], argv[0], &argv[1..count]);
+                }
+            }
             log("unknown command\n");
             set_status(127);
         }

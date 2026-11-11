@@ -112,6 +112,7 @@ costs. They exist so the same debate does not happen twice (skill rule **P6**).
 | [0103](0103-shell-command-chaining-and-conditional-operators.md) | Shell command chaining (;, &&, \|\|) | Accepted |
 | [0104](0104-shell-environment-variables-and-parameter-expansion.md) | Shell environment variables and parameter expansion | Accepted |
 | [0105](0105-shell-pipeline-execution.md) | Shell pipeline execution (`\|` operator) | Accepted |
+| [0106](0106-shell-script-execution-and-comments.md) | Shell script execution (sh, source, .) and comments (#) | Accepted |
 
 ## Adding a decision
 

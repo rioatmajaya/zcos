@@ -154,10 +154,10 @@ impl Write for TaskWriter {
 
 /// Byte capacity of the receive ring.
 ///
-/// Sized like [`zc_kernel::irq::INPUT_CAP`] so one retransmitted scripted
-/// body passes whole; with overwrite-oldest semantics an even longer body
-/// only sheds bytes from its own head, never the terminator.
-const INPUT_RING_CAP: usize = 2048;
+/// Sized with room for extended scripted test passes; with overwrite-oldest
+/// semantics an even longer body only sheds bytes from its own head, never the
+/// terminator.
+const INPUT_RING_CAP: usize = 4096;
 
 /// Receive ring drained by the timer poll.
 ///

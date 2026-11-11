@@ -396,6 +396,15 @@ all three proof checksums remain `0xd616ad79aaefb099`,
 
 ### Added
 
+- **Shell script execution and comment parsing** (F7j, F4, shell): `zc-shell` adds batch script
+  execution via `sh <file>`, `sh -c "<command>"`, `source <file>`, `. <file>`, and direct file path
+  execution (`./<script>` or `*.sh`). Arguments passed to scripts bind positional parameters (`$0`,
+  `$1`..`$9`, `$#`) with static backup and restore across invocations up to 4 nesting levels.
+  Comment parsing ignores `#` characters from unquoted boundaries through end-of-line, and argument
+  tokenization natively supports single and double quote bounding. Serial input receive buffer
+  capacity (`INPUT_RING_CAP`) in `kernel/zc-kernel-image` is expanded to 4096 bytes.
+  See [ADR 0106](docs/adr/0106-shell-script-execution-and-comments.md).
+
 - **Shell pipeline execution with | operator** (F7j, F4, shell): `zc-shell` adds pipeline
   composition (`|`) using a ping-pong buffer model in `.bss` (`PIPE_A` and `PIPE_B`, 4096 bytes each).
   Intermediate command output is captured without heap allocations or process spawning, while
